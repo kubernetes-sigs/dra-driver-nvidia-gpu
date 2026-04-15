@@ -218,9 +218,16 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 				// `preparedDevices` are vfio devices; a mixture isn't supported
 				// by the current business logic and leads to unexpected
 				// behavior.
-				commonEdits = GetVfioCommonCDIContainerEdits()
+				commonEdits, err = GetVfioCommonCDIContainerEdits()
+				if err != nil {
+					return fmt.Errorf("failed to get common CDI container edits for vfio device: %w", err)
+				}
+				deviceEdits, err := GetVfioCDIContainerEdits(dev.Vfio.Info)
+				if err != nil {
+					return fmt.Errorf("failed to get CDI container edits for vfio device: %w", err)
+				}
 				dspec = cdispec.Device{
-					ContainerEdits: *GetVfioCDIContainerEdits(dev.Vfio.Info).ContainerEdits,
+					ContainerEdits: *deviceEdits.ContainerEdits,
 				}
 			}
 
