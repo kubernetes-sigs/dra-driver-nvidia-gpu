@@ -26,6 +26,8 @@ import (
 	"strings"
 	"time"
 
+	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"k8s.io/klog/v2"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
@@ -222,70 +224,109 @@ func (vm *VfioPciManager) bindToDriver(pciAddress, driver string) error {
 	return nil
 }
 
-func GetVfioCommonCDIContainerEdits() (*cdiapi.ContainerEdits, error) {
-	deviceNodes := []*cdispec.DeviceNode{
-		{
-			Path: filepath.Join(vfioDevicesRoot, "vfio"),
-		},
-	}
-
-	// Include IOMMU device node if IOMMUFD is supported.
-	iommuFDEnabled, err := checkIommuFDEnabled()
-	if err != nil {
-		return nil, fmt.Errorf("error checking if IOMMUFD is supported: %w", err)
-	}
-	if iommuFDEnabled {
-		deviceNodes = append(deviceNodes, &cdispec.DeviceNode{
-			Path: iommuDevicePath,
-		})
-	}
-
+// GetVfioCommonCDIContainerEdits returns the common CDI container edits required by all vfio device(s)
+// in the claim.
+func GetVfioCommonCDIContainerEdits(config *configapi.VfioDeviceConfig) (*cdiapi.ContainerEdits, error) {
 	edits := &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
-			DeviceNodes: deviceNodes,
 			// Make sure that NVIDIA_VISIBLE_DEVICES is set to void to avoid the
 			// nvidia-container-runtime honoring it in addition to the underlying
 			// runtime honoring CDI.
-			Env: []string{"NVIDIA_VISIBLE_DEVICES=void"},
+			Env:         []string{"NVIDIA_VISIBLE_DEVICES=void"},
+			DeviceNodes: make([]*cdispec.DeviceNode, 0),
 		},
 	}
+
+	// IOMMU API device is not requested. Exit early.
+	if !*config.Iommu.EnableAPIDevice {
+		return edits, nil
+	}
+
+	// Apply the backend policy specific container edits.
+	switch config.Iommu.BackendPolicy {
+	case configapi.IOMMUBackendPolicyPreferIommuFD:
+		iommuFDEnabled, err := checkIommuFDEnabled()
+		if err != nil {
+			return nil, fmt.Errorf("error checking if IOMMUFD is supported: %w", err)
+		}
+		if iommuFDEnabled {
+			edits.DeviceNodes = append(edits.DeviceNodes, &cdispec.DeviceNode{
+				Path: iommuDevicePath,
+			})
+			// We're done applying the backend policy here.
+			break
+		}
+		// iommufd is not available. So fallback and apply the legacy iommu container edits.
+		// This is the same as the LegacyOnly backend policy, so we fall through to it.
+		fallthrough
+	case configapi.IOMMUBackendPolicyLegacyOnly:
+		edits.DeviceNodes = append(edits.DeviceNodes, &cdispec.DeviceNode{
+			Path: filepath.Join(vfioDevicesRoot, "vfio"),
+		})
+	default:
+		return nil, fmt.Errorf("unknown IOMMU backend policy: %q", config.Iommu.BackendPolicy)
+	}
+
 	return edits, nil
 }
 
 // GetCDIContainerEdits returns the CDI spec for a container to have access to the GPU
 // while bound on vfio-pci driver.
-func GetVfioCDIContainerEdits(info *VfioDeviceInfo) (*cdiapi.ContainerEdits, error) {
+func GetVfioCDIContainerEdits(config *configapi.VfioDeviceConfig, info *VfioDeviceInfo) (*cdiapi.ContainerEdits, error) {
 	nvpci := nvpci.New()
 	pciDeviceInfo, err := nvpci.GetGPUByPciBusID(info.PciBusID)
 	if err != nil {
 		return nil, fmt.Errorf("error getting PCI device info for GPU %q: %w", info.PciBusID, err)
 	}
-	deviceNodes := []*cdispec.DeviceNode{
-		{
-			Path: filepath.Join(vfioDevicesRoot, fmt.Sprintf("%d", pciDeviceInfo.IommuGroup)),
-		},
-	}
-
-	// The IOMMUFD device name follows the pattern "vfioX"
-	if strings.HasPrefix(pciDeviceInfo.IommuFD, "vfio") {
-		// The IOMMUFD device is located at /dev/vfio/devices/<vfioX> and is
-		// only available after the GPU is bound to the vfio-pci driver.
-		deviceNodes = append(deviceNodes, &cdispec.DeviceNode{
-			Path: filepath.Join(vfioDevicesPath, pciDeviceInfo.IommuFD),
-		})
-	}
 
 	edits := &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
-			DeviceNodes: deviceNodes,
+			DeviceNodes: make([]*cdispec.DeviceNode, 0),
 		},
 	}
-	return edits, nil
+
+	switch config.Iommu.BackendPolicy {
+	case configapi.IOMMUBackendPolicyPreferIommuFD:
+		iommuFDEnabled, err := checkIommuFDEnabled()
+		if err != nil {
+			return nil, fmt.Errorf("error checking if IOMMUFD is supported: %w", err)
+		}
+		if iommuFDEnabled {
+			return getIommuFDContainerEdits(config, pciDeviceInfo, edits)
+		}
+		return getLegacyIommuContainerEdits(config, pciDeviceInfo, edits)
+	case configapi.IOMMUBackendPolicyLegacyOnly:
+		return getLegacyIommuContainerEdits(config, pciDeviceInfo, edits)
+	default:
+		return nil, fmt.Errorf("unknown IOMMU backend policy: %q", config.Iommu.BackendPolicy)
+	}
+}
+
+func getIommuFDContainerEdits(config *configapi.VfioDeviceConfig, pciDeviceInfo *nvpci.NvidiaPCIDevice, containerEdits *cdiapi.ContainerEdits) (*cdiapi.ContainerEdits, error) {
+	// The IOMMUFD cdev is located at /dev/vfio/devices/<vfioX> and is
+	// expected to be available if IOMMUFD is supported and the GPU is
+	// bound to the vfio driver.
+	if !strings.HasPrefix(pciDeviceInfo.IommuFD, "vfio") {
+		// Preserve any existing container edits.
+		return containerEdits, fmt.Errorf("missing iommufd cdev for GPU %q", pciDeviceInfo.Address)
+	}
+
+	containerEdits.DeviceNodes = append(containerEdits.DeviceNodes, &cdispec.DeviceNode{
+		Path: filepath.Join(vfioDevicesPath, pciDeviceInfo.IommuFD),
+	})
+	return containerEdits, nil
+}
+
+func getLegacyIommuContainerEdits(config *configapi.VfioDeviceConfig, pciDeviceInfo *nvpci.NvidiaPCIDevice, containerEdits *cdiapi.ContainerEdits) (*cdiapi.ContainerEdits, error) {
+	containerEdits.DeviceNodes = append(containerEdits.DeviceNodes, &cdispec.DeviceNode{
+		Path: filepath.Join(vfioDevicesRoot, fmt.Sprintf("%d", pciDeviceInfo.IommuGroup)),
+	})
+	return containerEdits, nil
 }
 
 // Check if the vfio_pci module is loaded.
 func checkVfioPCIModuleLoaded() (bool, error) {
-	f, err := os.Stat(filepath.Join(sysModulePath, vfioPciModule))
+	f, err := os.Stat(filepath.Join(hostRoot, sysModulePath, vfioPciModule))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
@@ -312,7 +353,7 @@ func loadVfioPciModule() error {
 
 // Check if IOMMU is enabled.
 func checkIommuEnabled() (bool, error) {
-	f, err := os.Open(kernelIommuGroupPath)
+	f, err := os.Open(filepath.Join(hostRoot, kernelIommuGroupPath))
 	if os.IsNotExist(err) {
 		return false, nil
 	}
@@ -332,11 +373,12 @@ func checkIommuEnabled() (bool, error) {
 }
 
 // Check if IOMMUFD is enabled.
-// We correlate the IOMMUFD support with the presence of the /dev/iommu device node.
+// We correlate the IOMMUFD support with the presence of the /dev/iommu API device.
 func checkIommuFDEnabled() (bool, error) {
-	_, err := os.Stat(iommuDevicePath)
+	_, err := os.Stat(filepath.Join(hostRoot, iommuDevicePath))
 	if err != nil {
 		if os.IsNotExist(err) {
+			klog.Infof("IOMMUFD is not enabled, /dev/iommu device node does not exist")
 			return false, nil
 		}
 		return false, fmt.Errorf("error checking if iommu device node exists: %w", err)
