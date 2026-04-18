@@ -1,0 +1,52 @@
+# One pod, one container asking for 1 distinct passthrough GPU
+# Uses legacy iommu backend and includes the iommu API device.
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-test-vfio
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  namespace: gpu-test-vfio
+  name: single-gpu-full-vfioconfig
+spec:
+  spec:
+    devices:
+      config:
+      - opaque:
+          driver: gpu.nvidia.com
+          parameters:
+            apiVersion: resource.nvidia.com/v1beta1
+            kind: VfioDeviceConfig
+            iommu:
+              backendPolicy: LegacyOnly
+              enableAPIDevice: true
+        requests:
+         - "gpu"
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: vfio.gpu.nvidia.com
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: gpu-test-vfiopci
+  name: pod1-full-vfioconfig
+  labels:
+    app: pod
+spec:
+  containers:
+  - name: ctr
+    image: ubuntu:22.04
+    command: ["bash", "-c"]
+    args: ["sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: single-gpu-full-vfioconfig

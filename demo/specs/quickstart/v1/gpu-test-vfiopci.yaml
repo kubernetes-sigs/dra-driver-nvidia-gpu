@@ -24,7 +24,7 @@ spec:
 apiVersion: v1
 kind: Pod
 metadata:
-  namespace: gpu-test-vfiopci
+  namespace: gpu-test-vfio
   name: pod1
   labels:
     app: pod
