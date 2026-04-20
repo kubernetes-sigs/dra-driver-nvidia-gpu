@@ -35,7 +35,7 @@ import (
 
 	"github.com/urfave/cli/v2"
 
-	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvcd "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/common"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
@@ -490,7 +490,7 @@ func writeIMEXConfig(podIP string) error {
 }
 
 // writeNodesConfig creates a nodesConfig file with IPs for nodes in the same clique.
-func writeDaemonsConfig(cliqueID string, daemons []*nvapi.ComputeDomainDaemonInfo) error {
+func writeDaemonsConfig(cliqueID string, daemons []*nvcd.ComputeDomainDaemonInfo) error {
 	// Ensure the directory exists
 	dir := filepath.Dir(imexDaemonNodesConfigPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {

@@ -42,6 +42,14 @@
 {{- fail $error }}
 {{- end }}
 
+{{- if and .Values.resources.computeDomains.enabled (not .Values.webhook.enabled) }}
+{{- $error := "" }}
+{{- $error = printf "%s\nComputeDomain is enabled (resources.computeDomains.enabled=true) but the webhook is disabled (webhook.enabled=false)." $error }}
+{{- $error = printf "%s\nThe ComputeDomain CRD is installed with spec.conversion.strategy=Webhook, the API server needs that webhook for v1beta1/v1beta2 conversion." $error }}
+{{- $error = printf "%s\nEither set webhook.enabled=true (recommended) or disable ComputeDomain with resources.computeDomains.enabled=false." $error }}
+{{- fail $error }}
+{{- end }}
+
 {{- if .Values.nvidiaCtkPath }}
 {{- $error := "" }}
 {{- $error = printf "%s\nSetting a user-defined nvidiaCtkPath is no longer supported. It can simply be removed without consequence." $error }}

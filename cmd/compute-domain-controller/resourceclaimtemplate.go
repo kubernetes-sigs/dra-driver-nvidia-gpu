@@ -34,7 +34,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvcfg "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta2"
 )
 
 const (
@@ -52,8 +53,8 @@ type ResourceClaimTemplateTemplateData struct {
 	TargetLabelValue        string
 	DeviceClassName         string
 	DriverName              string
-	ChannelConfig           *nvapi.ComputeDomainChannelConfig
-	DaemonConfig            *nvapi.ComputeDomainDaemonConfig
+	ChannelConfig           *nvcfg.ComputeDomainChannelConfig
+	DaemonConfig            *nvcfg.ComputeDomainDaemonConfig
 }
 
 type BaseResourceClaimTemplateManager struct {
@@ -313,7 +314,7 @@ func (m *DaemonSetResourceClaimTemplateManager) Create(ctx context.Context, cd *
 		return rcts[0], nil
 	}
 
-	daemonConfig := nvapi.DefaultComputeDomainDaemonConfig()
+	daemonConfig := nvcfg.DefaultComputeDomainDaemonConfig()
 	daemonConfig.DomainID = string(cd.UID)
 
 	templateData := ResourceClaimTemplateTemplateData{
@@ -373,7 +374,7 @@ func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, names
 		return rcts[0], nil
 	}
 
-	channelConfig := nvapi.DefaultComputeDomainChannelConfig()
+	channelConfig := nvcfg.DefaultComputeDomainChannelConfig()
 	channelConfig.DomainID = string(cd.UID)
 	channelConfig.AllocationMode = cd.Spec.Channel.AllocationMode
 

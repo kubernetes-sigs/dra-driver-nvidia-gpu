@@ -28,7 +28,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvclique "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	nvinformers "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/informers/externalversions"
 )
 
@@ -46,8 +46,8 @@ type ComputeDomainCliqueManager struct {
 
 	// Note: if `previousDaemons` is empty it means we're early in the daemon's
 	// lifecycle and the IMEX daemon child process wasn't started yet.
-	previousDaemons    []*nvapi.ComputeDomainDaemonInfo
-	updatedDaemonsChan chan []*nvapi.ComputeDomainDaemonInfo
+	previousDaemons    []*nvclique.ComputeDomainDaemonInfo
+	updatedDaemonsChan chan []*nvclique.ComputeDomainDaemonInfo
 
 	podManager    *PodManager
 	mutationCache cache.MutationCache
@@ -57,8 +57,8 @@ type ComputeDomainCliqueManager struct {
 func NewComputeDomainCliqueManager(config *ManagerConfig) *ComputeDomainCliqueManager {
 	m := &ComputeDomainCliqueManager{
 		config:             config,
-		previousDaemons:    []*nvapi.ComputeDomainDaemonInfo{},
-		updatedDaemonsChan: make(chan []*nvapi.ComputeDomainDaemonInfo),
+		previousDaemons:    []*nvclique.ComputeDomainDaemonInfo{},
+		updatedDaemonsChan: make(chan []*nvclique.ComputeDomainDaemonInfo),
 	}
 
 	m.factory = nvinformers.NewSharedInformerFactoryWithOptions(
@@ -164,7 +164,7 @@ func (m *ComputeDomainCliqueManager) Stop() error {
 }
 
 // GetDaemonInfoUpdateChan returns the channel that yields daemon info updates.
-func (m *ComputeDomainCliqueManager) GetDaemonInfoUpdateChan() chan []*nvapi.ComputeDomainDaemonInfo {
+func (m *ComputeDomainCliqueManager) GetDaemonInfoUpdateChan() chan []*nvclique.ComputeDomainDaemonInfo {
 	return m.updatedDaemonsChan
 }
 
@@ -175,7 +175,7 @@ func (m *ComputeDomainCliqueManager) cliqueName() string {
 }
 
 // getClique gets the ComputeDomainClique from the mutation cache by namespace/name key.
-func (m *ComputeDomainCliqueManager) getClique() (*nvapi.ComputeDomainClique, error) {
+func (m *ComputeDomainCliqueManager) getClique() (*nvclique.ComputeDomainClique, error) {
 	key := fmt.Sprintf("%s/%s", m.config.podNamespace, m.cliqueName())
 	obj, exists, err := m.mutationCache.GetByKey(key)
 	if err != nil {
@@ -184,7 +184,7 @@ func (m *ComputeDomainCliqueManager) getClique() (*nvapi.ComputeDomainClique, er
 	if !exists {
 		return nil, nil
 	}
-	clique, ok := obj.(*nvapi.ComputeDomainClique)
+	clique, ok := obj.(*nvclique.ComputeDomainClique)
 	if !ok {
 		return nil, fmt.Errorf("unexpected object type in cache")
 	}
@@ -204,7 +204,7 @@ func (m *ComputeDomainCliqueManager) ensureCliqueExists(ctx context.Context) err
 	}
 
 	// Create the CDClique
-	newClique := &nvapi.ComputeDomainClique{
+	newClique := &nvclique.ComputeDomainClique{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      m.cliqueName(),
 			Namespace: m.config.podNamespace,
@@ -232,7 +232,7 @@ func (m *ComputeDomainCliqueManager) ensureCliqueExists(ctx context.Context) err
 // callback once upon startup for all existing objects.
 func (m *ComputeDomainCliqueManager) onAddOrUpdate(ctx context.Context, obj any) error {
 	// Cast the object to a ComputeDomainClique object
-	o, ok := obj.(*nvapi.ComputeDomainClique)
+	o, ok := obj.(*nvclique.ComputeDomainClique)
 	if !ok {
 		return fmt.Errorf("failed to cast to ComputeDomainClique")
 	}
@@ -274,8 +274,8 @@ func (m *ComputeDomainCliqueManager) onAddOrUpdate(ctx context.Context, obj any)
 // reports the IP address of this current pod running the CD daemon. If mutation
 // is needed (first insertion, or IP address update) and successful, it reflects
 // the mutation in `m.mutationCache`.
-func (m *ComputeDomainCliqueManager) syncDaemonInfoToClique(ctx context.Context, clique *nvapi.ComputeDomainClique) (*nvapi.ComputeDomainClique, error) {
-	var myDaemon *nvapi.ComputeDomainDaemonInfo
+func (m *ComputeDomainCliqueManager) syncDaemonInfoToClique(ctx context.Context, clique *nvclique.ComputeDomainClique) (*nvclique.ComputeDomainClique, error) {
+	var myDaemon *nvclique.ComputeDomainDaemonInfo
 
 	// Create a deep copy of the CDClique to avoid modifying the original
 	newClique := clique.DeepCopy()
@@ -302,12 +302,12 @@ func (m *ComputeDomainCliqueManager) syncDaemonInfoToClique(ctx context.Context,
 			return nil, fmt.Errorf("error getting next available index: %w", err)
 		}
 
-		myDaemon = &nvapi.ComputeDomainDaemonInfo{
+		myDaemon = &nvclique.ComputeDomainDaemonInfo{
 			NodeName: m.config.nodeName,
 			CliqueID: m.config.cliqueID,
 			Index:    nextIndex,
 			// This is going to be switched to Ready by podmanager.
-			Status: nvapi.ComputeDomainStatusNotReady,
+			Status: nvclique.ComputeDomainStatusNotReady,
 		}
 
 		klog.Infof("CDClique does not contain node name '%s' yet, try to insert myself: %v", m.config.nodeName, myDaemon)
@@ -347,7 +347,7 @@ func (m *ComputeDomainCliqueManager) syncDaemonInfoToClique(ctx context.Context,
 // By filling gaps in the index sequence (rather than always appending), we
 // maintain stable DNS names for existing daemons even when intermediate daemons
 // are removed from the clique and new ones are added.
-func (m *ComputeDomainCliqueManager) getNextAvailableIndex(daemons []*nvapi.ComputeDomainDaemonInfo) (int, error) {
+func (m *ComputeDomainCliqueManager) getNextAvailableIndex(daemons []*nvclique.ComputeDomainDaemonInfo) (int, error) {
 	// Create a map to track used indices
 	usedIndices := make(map[int]bool)
 
@@ -383,7 +383,7 @@ func (m *ComputeDomainCliqueManager) removeDaemonInfoFromClique(ctx context.Cont
 
 	// Create a deep copy and filter out the daemon with the current pod's IP address
 	newClique := clique.DeepCopy()
-	var newDaemons []*nvapi.ComputeDomainDaemonInfo
+	var newDaemons []*nvclique.ComputeDomainDaemonInfo
 	for _, d := range newClique.Daemons {
 		if d.IPAddress != m.config.podIP {
 			newDaemons = append(newDaemons, d)
@@ -405,7 +405,7 @@ func (m *ComputeDomainCliqueManager) removeDaemonInfoFromClique(ctx context.Cont
 
 // If there was actually a change compared to the previously known set of
 // daemons: pass info to IMEX daemon controller.
-func (m *ComputeDomainCliqueManager) maybePushDaemonsUpdate(clique *nvapi.ComputeDomainClique) {
+func (m *ComputeDomainCliqueManager) maybePushDaemonsUpdate(clique *nvclique.ComputeDomainClique) {
 	newIPs := m.getIPSet(clique.Daemons)
 	previousIPs := m.getIPSet(m.previousDaemons)
 
@@ -427,9 +427,9 @@ func (m *ComputeDomainCliqueManager) maybePushDaemonsUpdate(clique *nvapi.Comput
 
 // updateDaemonStatus updates the daemon info status based on pod readiness.
 func (m *ComputeDomainCliqueManager) updateDaemonStatus(ctx context.Context, ready bool) error {
-	status := nvapi.ComputeDomainStatusNotReady
+	status := nvclique.ComputeDomainStatusNotReady
 	if ready {
-		status = nvapi.ComputeDomainStatusReady
+		status = nvclique.ComputeDomainStatusReady
 	}
 
 	clique, err := m.getClique()
@@ -444,7 +444,7 @@ func (m *ComputeDomainCliqueManager) updateDaemonStatus(ctx context.Context, rea
 	newClique := clique.DeepCopy()
 
 	// Find the daemon
-	var myDaemon *nvapi.ComputeDomainDaemonInfo
+	var myDaemon *nvclique.ComputeDomainDaemonInfo
 	for _, d := range newClique.Daemons {
 		if d.NodeName == m.config.nodeName {
 			myDaemon = d
@@ -477,7 +477,7 @@ func (m *ComputeDomainCliqueManager) updateDaemonStatus(ctx context.Context, rea
 }
 
 // ensureOwnerReference ensures this pod is listed as an owner of the clique.
-func (m *ComputeDomainCliqueManager) ensureOwnerReference(clique *nvapi.ComputeDomainClique) {
+func (m *ComputeDomainCliqueManager) ensureOwnerReference(clique *nvclique.ComputeDomainClique) {
 	for _, ref := range clique.OwnerReferences {
 		if string(ref.UID) == m.config.podUID {
 			return
@@ -491,7 +491,7 @@ func (m *ComputeDomainCliqueManager) ensureOwnerReference(clique *nvapi.ComputeD
 	})
 }
 
-func (m *ComputeDomainCliqueManager) getIPSet(daemons []*nvapi.ComputeDomainDaemonInfo) IPSet {
+func (m *ComputeDomainCliqueManager) getIPSet(daemons []*nvclique.ComputeDomainDaemonInfo) IPSet {
 	set := make(IPSet)
 	for _, d := range daemons {
 		set[d.IPAddress] = struct{}{}

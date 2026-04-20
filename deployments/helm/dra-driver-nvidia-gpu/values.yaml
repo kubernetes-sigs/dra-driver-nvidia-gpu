@@ -141,8 +141,14 @@ featureGates: {}
 logVerbosity: "4"
 
 # Webhook configuration
+#
+# The ComputeDomain CRD uses spec.conversion (webhook) for v1beta1 <-> v1beta2.
+# When resources.computeDomains.enabled is true, the conversion webhook must be
+# running or API server conversion calls will fail. This chart therefore defaults
+# webhook.enabled to true. To disable the webhook deployment, set
+# resources.computeDomains.enabled to false as well.
 webhook:
-  enabled: false
+  enabled: true
   replicas: 1
   servicePort: 443
   containerPort: 443

@@ -112,6 +112,7 @@ func newApp() *cli.App {
 func newMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/validate-resource-claim-parameters", serveResourceClaim)
+	mux.HandleFunc("/convert-computedomain", serveComputeDomainConversion)
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, req *http.Request) {
 		_, err := w.Write([]byte("ok"))
 		if err != nil {

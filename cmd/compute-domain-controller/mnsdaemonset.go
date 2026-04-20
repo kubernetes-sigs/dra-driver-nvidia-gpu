@@ -22,7 +22,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 
-	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta2"
 )
 
 // MultiNamespaceDaemonSetManager manages DaemonSets across multiple namespaces.

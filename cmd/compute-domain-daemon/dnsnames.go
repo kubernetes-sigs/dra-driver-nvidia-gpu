@@ -28,7 +28,7 @@ import (
 
 	"k8s.io/klog/v2"
 
-	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvcd "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 )
 
 const (
@@ -62,7 +62,7 @@ func NewDNSNameManager(cliqueID string, maxNodesPerIMEXDomain int, nodesConfigPa
 // UpdateDNSNameMappings updates the /etc/hosts file with any new IP to DNS name
 // mappings. The boolean return value indicates whether the hosts file was
 // updated or not (it must be ignored when the returned error is non-nil).
-func (m *DNSNameManager) UpdateDNSNameMappings(daemons []*nvapi.ComputeDomainDaemonInfo) (bool, error) {
+func (m *DNSNameManager) UpdateDNSNameMappings(daemons []*nvcd.ComputeDomainDaemonInfo) (bool, error) {
 	m.Lock()
 	defer m.Unlock()
 
@@ -70,7 +70,7 @@ func (m *DNSNameManager) UpdateDNSNameMappings(daemons []*nvapi.ComputeDomainDae
 	ipToDNSName := make(IPToDNSNameMap)
 
 	// Prefilter daemons to only consider those with the matching cliqueID
-	var cliqueDaemons []*nvapi.ComputeDomainDaemonInfo
+	var cliqueDaemons []*nvcd.ComputeDomainDaemonInfo
 	for _, daemon := range daemons {
 		if daemon.CliqueID == m.cliqueID {
 			cliqueDaemons = append(cliqueDaemons, daemon)
@@ -130,7 +130,7 @@ func (m *DNSNameManager) LogDNSNameMappings() {
 
 // constructDNSName constructs a DNS name for a daemon based on its index field.
 // Returns an error if the index is invalid or exceeds maxNodesPerIMEXDomain.
-func (m *DNSNameManager) constructDNSName(daemon *nvapi.ComputeDomainDaemonInfo) (string, error) {
+func (m *DNSNameManager) constructDNSName(daemon *nvcd.ComputeDomainDaemonInfo) (string, error) {
 	if daemon.Index < 0 {
 		return "", fmt.Errorf("daemon %s has invalid index %d", daemon.NodeName, daemon.Index)
 	}

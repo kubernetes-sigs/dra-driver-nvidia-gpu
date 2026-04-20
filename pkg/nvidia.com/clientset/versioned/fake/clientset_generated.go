@@ -27,6 +27,8 @@ import (
 	clientset "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/clientset/versioned"
 	resourcev1beta1 "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/clientset/versioned/typed/resource/v1beta1"
 	fakeresourcev1beta1 "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/clientset/versioned/typed/resource/v1beta1/fake"
+	resourcev1beta2 "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/clientset/versioned/typed/resource/v1beta2"
+	fakeresourcev1beta2 "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/clientset/versioned/typed/resource/v1beta2/fake"
 )
 
 // NewSimpleClientset returns a clientset that will respond with the provided objects.
@@ -82,4 +84,9 @@ var (
 // ResourceV1beta1 retrieves the ResourceV1beta1Client
 func (c *Clientset) ResourceV1beta1() resourcev1beta1.ResourceV1beta1Interface {
 	return &fakeresourcev1beta1.FakeResourceV1beta1{Fake: &c.Fake}
+}
+
+// ResourceV1beta2 retrieves the ResourceV1beta2Client
+func (c *Clientset) ResourceV1beta2() resourcev1beta2.ResourceV1beta2Interface {
+	return &fakeresourcev1beta2.FakeResourceV1beta2{Fake: &c.Fake}
 }

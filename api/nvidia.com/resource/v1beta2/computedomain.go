@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package v1beta1
+package v1beta2
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,13 +33,12 @@ const (
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +k8s:openapi-gen=true
 // +kubebuilder:resource:scope=Namespaced
-// +kubebuilder:deprecatedversion
+// +kubebuilder:storageversion
 // +kubebuilder:subresource:status
 
 // ComputeDomain prepares a set of nodes to run a multi-node workload in.
 //
-// Deprecated: use resource.nvidia.com/v1beta2 ComputeDomain. This version is
-// retained for compatibility.
+// Hub is the storage / conversion hub for ComputeDomain API versions.
 type ComputeDomain struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -63,43 +62,13 @@ type ComputeDomainList struct {
 
 // +kubebuilder:validation:XValidation:rule="self == oldSelf", message="A computeDomain.spec is immutable"
 
-// AnnotationComputeDomainNumNodes stores the v1beta1-only numNodes field on the hub)
-// object so it survives conversion. It is not part of the v1beta2 API.
-const AnnotationComputeDomainNumNodes = "resource.nvidia.com/computedomain-num-nodes"
-
 // ComputeDomainSpec provides the spec for a ComputeDomain.
+//
+// The deprecated resource.nvidia.com/v1beta1 API carries `spec.numNodes`; that
+// value is not part of this version and is preserved on the stored object via
+// metadata.annotations["resource.nvidia.com/computedomain-num-nodes"].
 type ComputeDomainSpec struct {
-	// Intended number of IMEX daemons (i.e., individual compute nodes) in the
-	// ComputeDomain. Must be zero or greater.
-	//
-	// With `featureGates.IMEXDaemonsWithDNSNames=true` (the default), this is
-	// recommended to be set to zero. Workload must implement and consult its
-	// own source of truth for the number of workers online before trying to
-	// share GPU memory (and hence triggering IMEX interaction). When non-zero,
-	// `numNodes` is used only for automatically updating the global
-	// ComputeDomain `Status` (indicating `Ready` when the number of ready IMEX
-	// daemons equals `numNodes`). In this mode, a `numNodes` value greater than
-	// zero in particular does not gate the startup of IMEX daemons: individual
-	// IMEX daemons are started immediately without waiting for its peers, and
-	// any workload pod gets released right after its local IMEX daemon has
-	// started.
-	//
-	// With `featureGates.IMEXDaemonsWithDNSNames=false`, `numNodes` must be set
-	// to the expected number of worker nodes joining the ComputeDomain. In that
-	// mode, all workload pods are held back (with containers in state
-	// `ContainerCreating`) until the underlying IMEX domain has been joined by
-	// `numNodes` IMEX daemons. Pods from more than `numNodes` nodes trying to
-	// join the ComputeDomain may lead to unexpected behavior.
-	//
-	// The `numNodes` field exists only on this deprecated API version, it is
-	// not present on resource.nvidia.com/v1beta2 and is round-tripped via
-	// metadata.annotations["resource.nvidia.com/computedomain-num-nodes"] on the hub.
-	//
-	// +kubebuilder:default:=0
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Optional
-	NumNodes int                       `json:"numNodes,omitempty"`
-	Channel  *ComputeDomainChannelSpec `json:"channel"`
+	Channel *ComputeDomainChannelSpec `json:"channel"`
 }
 
 // ComputeDomainChannelSpec provides the spec for a channel used to run a workload inside a ComputeDomain.

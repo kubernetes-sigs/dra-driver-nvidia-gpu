@@ -27,10 +27,11 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta2"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/apis/computedomain/numnodes"
 	nvinformers "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/informers/externalversions"
-	nvlisters "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/listers/resource/v1beta1"
+	nvlisters "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/listers/resource/v1beta2"
 )
 
 type GetComputeDomainFunc func(uid string) (*nvapi.ComputeDomain, error)
@@ -78,7 +79,7 @@ type ComputeDomainManager struct {
 // NewComputeDomainManager creates a new ComputeDomainManager.
 func NewComputeDomainManager(config *ManagerConfig) *ComputeDomainManager {
 	factory := nvinformers.NewSharedInformerFactory(config.clientsets.Nvidia, informerResyncPeriod)
-	informer := factory.Resource().V1beta1().ComputeDomains().Informer()
+	informer := factory.Resource().V1beta2().ComputeDomains().Informer()
 	lister := nvlisters.NewComputeDomainLister(informer.GetIndexer())
 
 	m := &ComputeDomainManager{
@@ -210,7 +211,7 @@ func (m *ComputeDomainManager) UpdateStatus(ctx context.Context, cd *nvapi.Compu
 
 	metrics.ObserveComputeDomainStatus(string(cd.UID), cd.Status.Status)
 
-	updatedCD, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomains(cd.Namespace).UpdateStatus(ctx, cd, metav1.UpdateOptions{})
+	updatedCD, err := m.config.clientsets.Nvidia.ResourceV1beta2().ComputeDomains(cd.Namespace).UpdateStatus(ctx, cd, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +245,7 @@ func (m *ComputeDomainManager) RemoveFinalizer(ctx context.Context, uid string) 
 		return nil
 	}
 
-	if _, err = m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomains(cd.Namespace).Update(ctx, newCD, metav1.UpdateOptions{}); err != nil {
+	if _, err = m.config.clientsets.Nvidia.ResourceV1beta2().ComputeDomains(cd.Namespace).Update(ctx, newCD, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("error updating ComputeDomain: %w", err)
 	}
 
@@ -252,8 +253,9 @@ func (m *ComputeDomainManager) RemoveFinalizer(ctx context.Context, uid string) 
 }
 
 func (m *ComputeDomainManager) calculateGlobalStatus(cd *nvapi.ComputeDomain) string {
+	expected := numnodes.FromObject(&cd.ObjectMeta)
 	// Mark the ComputeDomain as not ready if not enough nodes are present in the nodes list.
-	if len(cd.Status.Nodes) < cd.Spec.NumNodes {
+	if len(cd.Status.Nodes) < expected {
 		return nvapi.ComputeDomainStatusNotReady
 	}
 
@@ -291,7 +293,7 @@ func (m *ComputeDomainManager) addFinalizer(ctx context.Context, cd *nvapi.Compu
 
 	newCD := cd.DeepCopy()
 	newCD.Finalizers = append(newCD.Finalizers, computeDomainFinalizer)
-	if _, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomains(cd.Namespace).Update(ctx, newCD, metav1.UpdateOptions{}); err != nil {
+	if _, err := m.config.clientsets.Nvidia.ResourceV1beta2().ComputeDomains(cd.Namespace).Update(ctx, newCD, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("error updating ComputeDomain: %w", err)
 	}
 

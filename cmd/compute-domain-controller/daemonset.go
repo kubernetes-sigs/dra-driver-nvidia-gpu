@@ -34,8 +34,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta2"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/apis/computedomain/numnodes"
 )
 
 const (
@@ -382,13 +383,14 @@ func (m *DaemonSetManager) onAddOrUpdate(ctx context.Context, obj any) error {
 		return nil
 	}
 
-	if int(d.Status.NumberReady) != cd.Spec.NumNodes {
+	expected := numnodes.FromObject(&cd.ObjectMeta)
+	if int(d.Status.NumberReady) != expected {
 		return nil
 	}
 
 	newCD := cd.DeepCopy()
 	newCD.Status.Status = nvapi.ComputeDomainStatusReady
-	if _, err = m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomains(newCD.Namespace).UpdateStatus(ctx, newCD, metav1.UpdateOptions{}); err != nil {
+	if _, err = m.config.clientsets.Nvidia.ResourceV1beta2().ComputeDomains(newCD.Namespace).UpdateStatus(ctx, newCD, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("error updating nodes in ComputeDomain status: %w", err)
 	}
 

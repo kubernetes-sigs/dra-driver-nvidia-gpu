@@ -24,6 +24,7 @@ import (
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
 	v1beta1 "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	v1beta2 "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta2"
 )
 
 // GenericInformer is type of SharedIndexInformer which will locate and delegate to other
@@ -57,6 +58,10 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Resource().V1beta1().ComputeDomains().Informer()}, nil
 	case v1beta1.SchemeGroupVersion.WithResource("computedomaincliques"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Resource().V1beta1().ComputeDomainCliques().Informer()}, nil
+
+		// Group=resource.nvidia.com, Version=v1beta2
+	case v1beta2.SchemeGroupVersion.WithResource("computedomains"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Resource().V1beta2().ComputeDomains().Informer()}, nil
 
 	}
 

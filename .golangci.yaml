@@ -17,6 +17,19 @@ linters:
       - common-false-positives
       - legacy
       - std-error-handling
+    rules:
+      # SA1019: conversion code legitimately uses deprecated API types (e.g. v1beta1).
+      # Match by convention so new files do not need config edits:
+      #   - *_conversion.go and *_conversion_test.go under api/, cmd/, or pkg/
+      #   - any *.go under .../conversion/ (e.g. pkg/.../conversion/)
+      - path: (api|cmd|pkg)/.*_conversion(_test)?\.go$
+        linters:
+          - staticcheck
+        text: "SA1019"
+      - path: (api|cmd|pkg)/.*/conversion/.*\.go$
+        linters:
+          - staticcheck
+        text: "SA1019"
     paths:
       - third_party$
       - builtin$

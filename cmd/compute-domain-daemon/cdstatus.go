@@ -27,8 +27,10 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvcd "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta2"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/apis/computedomain/numnodes"
 	nvinformers "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/informers/externalversions"
 )
 
@@ -45,7 +47,7 @@ type ComputeDomainStatusManager struct {
 	// Note: if `previousNodes` is empty it means we're early in the daemon's
 	// lifecycle and the IMEX daemon child process wasn't started yet.
 	previousNodes      []*nvapi.ComputeDomainNode
-	updatedDaemonsChan chan []*nvapi.ComputeDomainDaemonInfo
+	updatedDaemonsChan chan []*nvcd.ComputeDomainDaemonInfo
 
 	podManager    *PodManager
 	mutationCache cache.MutationCache
@@ -56,7 +58,7 @@ func NewComputeDomainStatusManager(config *ManagerConfig) *ComputeDomainStatusMa
 	m := &ComputeDomainStatusManager{
 		config:             config,
 		previousNodes:      []*nvapi.ComputeDomainNode{},
-		updatedDaemonsChan: make(chan []*nvapi.ComputeDomainDaemonInfo),
+		updatedDaemonsChan: make(chan []*nvcd.ComputeDomainDaemonInfo),
 	}
 
 	m.factory = nvinformers.NewSharedInformerFactoryWithOptions(
@@ -67,7 +69,7 @@ func NewComputeDomainStatusManager(config *ManagerConfig) *ComputeDomainStatusMa
 			opts.FieldSelector = fmt.Sprintf("metadata.name=%s", config.computeDomainName)
 		}),
 	)
-	m.informer = m.factory.Resource().V1beta1().ComputeDomains().Informer()
+	m.informer = m.factory.Resource().V1beta2().ComputeDomains().Informer()
 
 	m.podManager = NewPodManager(m.config, m.updateNodeStatus)
 
@@ -210,7 +212,7 @@ func (m *ComputeDomainStatusManager) onAddOrUpdate(ctx context.Context, obj any)
 	if err != nil {
 		return fmt.Errorf("CD update: failed to insert/update node info in CD: %w", err)
 	}
-	m.maybePushNodesUpdate(cd)
+	m.maybePushNodesUpdate(ctx, cd)
 
 	return nil
 }
@@ -267,7 +269,7 @@ func (m *ComputeDomainStatusManager) syncNodeInfoToCD(ctx context.Context, cd *n
 
 	// Update status and (upon success) store the latest version of the object
 	// (as returned by the API server) in the mutation cache.
-	newCD, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomains(newCD.Namespace).UpdateStatus(ctx, newCD, metav1.UpdateOptions{})
+	newCD, err := m.config.clientsets.Nvidia.ResourceV1beta2().ComputeDomains(newCD.Namespace).UpdateStatus(ctx, newCD, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("error updating ComputeDomain status: %w", err)
 	}
@@ -331,12 +333,17 @@ func (m *ComputeDomainStatusManager) getNextAvailableIndex(nodes []*nvapi.Comput
 
 // If there was actually a change compared to the previously known set of
 // nodes: pass info to IMEX daemon controller.
-func (m *ComputeDomainStatusManager) maybePushNodesUpdate(cd *nvapi.ComputeDomain) {
+func (m *ComputeDomainStatusManager) maybePushNodesUpdate(ctx context.Context, cd *nvapi.ComputeDomain) {
 	// When not running with the 'IMEXDaemonsWithDNSNames' feature enabled,
-	// wait for all 'numNodes' nodes to show up before sending an update.
+	// wait for all expected nodes (v1beta1 numNodes stored on the hub as an annotation) before sending an update.
 	if !featuregates.Enabled(featuregates.IMEXDaemonsWithDNSNames) {
-		if len(cd.Status.Nodes) != cd.Spec.NumNodes {
-			klog.Infof("numNodes: %d, nodes seen: %d", cd.Spec.NumNodes, len(cd.Status.Nodes))
+		expected, err := numnodes.FromStorage(ctx, m.config.clientsets.Nvidia.ResourceV1beta2().ComputeDomains(cd.Namespace), cd.Name)
+		if err != nil {
+			klog.Errorf("get expected node count (v1beta2): %v", err)
+			return
+		}
+		if len(cd.Status.Nodes) != expected {
+			klog.Infof("numNodes: %d, nodes seen: %d", expected, len(cd.Status.Nodes))
 			return
 		}
 	}
@@ -356,10 +363,10 @@ func (m *ComputeDomainStatusManager) maybePushNodesUpdate(cd *nvapi.ComputeDomai
 }
 
 // nodesToDaemonInfos converts ComputeDomainNodes to ComputeDomainDaemonInfos.
-func (m *ComputeDomainStatusManager) nodesToDaemonInfos(nodes []*nvapi.ComputeDomainNode) []*nvapi.ComputeDomainDaemonInfo {
-	daemons := make([]*nvapi.ComputeDomainDaemonInfo, len(nodes))
+func (m *ComputeDomainStatusManager) nodesToDaemonInfos(nodes []*nvapi.ComputeDomainNode) []*nvcd.ComputeDomainDaemonInfo {
+	daemons := make([]*nvcd.ComputeDomainDaemonInfo, len(nodes))
 	for i, node := range nodes {
-		daemons[i] = &nvapi.ComputeDomainDaemonInfo{
+		daemons[i] = &nvcd.ComputeDomainDaemonInfo{
 			NodeName:  node.Name,
 			IPAddress: node.IPAddress,
 			CliqueID:  node.CliqueID,
@@ -372,7 +379,7 @@ func (m *ComputeDomainStatusManager) nodesToDaemonInfos(nodes []*nvapi.ComputeDo
 
 // GetDaemonInfoUpdateChan returns the channel that yields daemon info updates.
 // Updates are only a complete set (size `numNodes`) if IMEXDaemonsWithDNSNames=false.
-func (m *ComputeDomainStatusManager) GetDaemonInfoUpdateChan() chan []*nvapi.ComputeDomainDaemonInfo {
+func (m *ComputeDomainStatusManager) GetDaemonInfoUpdateChan() chan []*nvcd.ComputeDomainDaemonInfo {
 	return m.updatedDaemonsChan
 }
 
@@ -405,7 +412,7 @@ func (m *ComputeDomainStatusManager) removeNodeFromComputeDomain(ctx context.Con
 	// Update status and (upon success) store the latest version of the object
 	// (as returned by the API server) in the mutation cache.
 	newCD.Status.Nodes = updatedNodes
-	newCD, err = m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomains(newCD.Namespace).UpdateStatus(ctx, newCD, metav1.UpdateOptions{})
+	newCD, err = m.config.clientsets.Nvidia.ResourceV1beta2().ComputeDomains(newCD.Namespace).UpdateStatus(ctx, newCD, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("error removing node from ComputeDomain status: %w", err)
 	}
@@ -456,7 +463,7 @@ func (m *ComputeDomainStatusManager) updateNodeStatus(ctx context.Context, ready
 
 	// Update status and (upon success) store the latest version of the object
 	// (as returned by the API server) in the mutation cache.
-	newCD, err = m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomains(newCD.Namespace).UpdateStatus(ctx, newCD, metav1.UpdateOptions{})
+	newCD, err = m.config.clientsets.Nvidia.ResourceV1beta2().ComputeDomains(newCD.Namespace).UpdateStatus(ctx, newCD, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("error updating ComputeDomain status: %w", err)
 	}

@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvcd "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/workqueue"
@@ -31,7 +31,7 @@ import (
 type DaemonInfoManager interface {
 	Start(ctx context.Context) error
 	Stop() error
-	GetDaemonInfoUpdateChan() chan []*nvapi.ComputeDomainDaemonInfo
+	GetDaemonInfoUpdateChan() chan []*nvcd.ComputeDomainDaemonInfo
 }
 
 // ManagerConfig holds the configuration for the compute domain manager.
@@ -134,6 +134,6 @@ func (c *Controller) Run(ctx context.Context) error {
 // GetDaemonInfoUpdateChan returns a channel that yields updates for the daemons
 // currently present in the CD status or CDClique. This is only a complete set of
 // daemons (size `numNodes`) if IMEXDaemonsWithDNSNames=false.
-func (c *Controller) GetDaemonInfoUpdateChan() chan []*nvapi.ComputeDomainDaemonInfo {
+func (c *Controller) GetDaemonInfoUpdateChan() chan []*nvcd.ComputeDomainDaemonInfo {
 	return c.daemonInfoManager.GetDaemonInfoUpdateChan()
 }

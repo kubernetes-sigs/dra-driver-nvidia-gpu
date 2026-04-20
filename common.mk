@@ -17,7 +17,7 @@ VENDOR := nvidia.com
 API_BASE := api/$(VENDOR)
 PKG_BASE := pkg/$(VENDOR)
 
-CLIENT_APIS := resource/v1beta1
+CLIENT_APIS := resource/v1beta1 resource/v1beta2
 CLIENT_SOURCES += $(patsubst %, $(API_BASE)/%, $(CLIENT_APIS))
 
 DEEPCOPY_SOURCES = $(CLIENT_SOURCES)

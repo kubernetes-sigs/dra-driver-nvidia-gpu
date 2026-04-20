@@ -112,6 +112,9 @@ coverage: test
 
 generate: generate-crds generate-informers fmt
 
+# Only copy the CRD for CDClique since we have templatized CRD for CD with webhook configuration
+# and that is under helm templates/ instead of crds/
+# TODO: Need to automate this to templatize the CRD for CD everytime we update the CD API
 generate-crds: generate-deepcopy .remove-crds
 	for dir in $(CLIENT_SOURCES); do \
 		controller-gen crd:crdVersions=v1 \
@@ -119,10 +122,9 @@ generate-crds: generate-deepcopy .remove-crds
 			output:crd:dir=$(CURDIR)/deployments/helm/tmp_crds; \
 	done
 	mkdir -p $(CURDIR)/deployments/helm/$(DRIVER_NAME)/crds
-	cp -R $(CURDIR)/deployments/helm/tmp_crds/* \
+	cp -R $(CURDIR)/deployments/helm/tmp_crds/resource.nvidia.com_computedomaincliques.yaml \
 		$(CURDIR)/deployments/helm/$(DRIVER_NAME)/crds
 	rm -rf $(CURDIR)/deployments/helm/tmp_crds
-
 
 # Regenerate everything and fail if the tree is dirty (used by `make check`).
 check-generate: generate

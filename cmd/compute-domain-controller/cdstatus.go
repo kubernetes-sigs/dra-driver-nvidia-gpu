@@ -27,7 +27,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 
-	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvclique "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta2"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
@@ -148,7 +149,7 @@ func (m *ComputeDomainStatusManager) sync(ctx context.Context) {
 	}
 
 	// Get fabric-attached nodes from cliques (if feature gate is enabled)
-	var cliques []*nvapi.ComputeDomainClique
+	var cliques []*nvclique.ComputeDomainClique
 	if m.cliqueManager != nil {
 		cliques, err = m.cliqueManager.List()
 		if err != nil {
@@ -163,7 +164,7 @@ func (m *ComputeDomainStatusManager) sync(ctx context.Context) {
 	}
 
 	// Group cliques by CD UID
-	cliquesByCD := make(map[string][]*nvapi.ComputeDomainClique)
+	cliquesByCD := make(map[string][]*nvclique.ComputeDomainClique)
 	for _, clique := range cliques {
 		cdUID := clique.Labels[computeDomainLabelKey]
 		if cdUID == "" {
@@ -205,7 +206,7 @@ func (m *ComputeDomainStatusManager) sync(ctx context.Context) {
 }
 
 // syncCD synchronizes node information to a single ComputeDomain's status.
-func (m *ComputeDomainStatusManager) syncCD(ctx context.Context, cd *nvapi.ComputeDomain, cliques []*nvapi.ComputeDomainClique, fabricPods []*corev1.Pod, nonFabricPods []*corev1.Pod) {
+func (m *ComputeDomainStatusManager) syncCD(ctx context.Context, cd *nvapi.ComputeDomain, cliques []*nvclique.ComputeDomainClique, fabricPods []*corev1.Pod, nonFabricPods []*corev1.Pod) {
 	var fabricNodes, nonFabricNodes, newNodes []*nvapi.ComputeDomainNode
 
 	if m.cliqueManager != nil {
@@ -239,7 +240,7 @@ func (m *ComputeDomainStatusManager) syncCD(ctx context.Context, cd *nvapi.Compu
 }
 
 // buildNodesFromCliques builds a nodes list from fabric-attached cliques.
-func (m *ComputeDomainStatusManager) buildNodesFromCliques(cliques []*nvapi.ComputeDomainClique) []*nvapi.ComputeDomainNode {
+func (m *ComputeDomainStatusManager) buildNodesFromCliques(cliques []*nvclique.ComputeDomainClique) []*nvapi.ComputeDomainNode {
 	var result []*nvapi.ComputeDomainNode
 	for _, clique := range cliques {
 		for _, daemon := range clique.Daemons {
@@ -283,7 +284,7 @@ func (m *ComputeDomainStatusManager) buildNodesFromPods(pods []*corev1.Pod) []*n
 }
 
 // cleanupClique removes stale daemon entries from a single clique.
-func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *nvapi.ComputeDomainClique, pods []*corev1.Pod) {
+func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *nvclique.ComputeDomainClique, pods []*corev1.Pod) {
 	// Build set of node names that have running daemon pods
 	runningNodes := make(map[string]struct{})
 	for _, pod := range pods {
@@ -292,7 +293,7 @@ func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *
 		}
 	}
 
-	var updatedDaemons []*nvapi.ComputeDomainDaemonInfo
+	var updatedDaemons []*nvclique.ComputeDomainDaemonInfo
 	var removedNodes []string
 
 	for _, daemon := range clique.Daemons {

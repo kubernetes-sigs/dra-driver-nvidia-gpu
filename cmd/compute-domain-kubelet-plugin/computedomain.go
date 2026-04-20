@@ -31,7 +31,7 @@ import (
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 
-	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta2"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/common"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 	nvinformers "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/informers/externalversions"
@@ -69,7 +69,7 @@ type ComputeDomainDaemonSettings struct {
 
 func NewComputeDomainManager(config *Config, cliqueID string) *ComputeDomainManager {
 	factory := nvinformers.NewSharedInformerFactory(config.clientsets.Nvidia, informerResyncPeriod)
-	informer := factory.Resource().V1beta1().ComputeDomains().Informer()
+	informer := factory.Resource().V1beta2().ComputeDomains().Informer()
 	configFilesRoot := filepath.Join(config.DriverPluginPath(), ComputeDomainDaemonConfigFilesDirName)
 
 	m := &ComputeDomainManager{
