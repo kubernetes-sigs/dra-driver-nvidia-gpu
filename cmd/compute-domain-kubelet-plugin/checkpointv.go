@@ -65,6 +65,72 @@ type PreparedClaimV1 struct {
 	PreparedDevices PreparedDevices                 `json:"preparedDevices,omitempty"`
 }
 
+// DeepCopy methods
+
+func (v1 *CheckpointV1) DeepCopy() *CheckpointV1 {
+	if v1 == nil {
+		return nil
+	}
+	return &CheckpointV1{PreparedClaims: v1.PreparedClaims.DeepCopy()}
+}
+
+func (v2 *CheckpointV2) DeepCopy() *CheckpointV2 {
+	if v2 == nil {
+		return nil
+	}
+	return &CheckpointV2{
+		Checksum:       v2.Checksum,
+		PreparedClaims: v2.PreparedClaims.DeepCopy(),
+	}
+}
+
+func (m PreparedClaimsByUIDV1) DeepCopy() PreparedClaimsByUIDV1 {
+	if m == nil {
+		return nil
+	}
+	out := make(PreparedClaimsByUIDV1, len(m))
+	for k, v := range m {
+		out[k] = v.DeepCopy()
+	}
+	return out
+}
+
+func (m PreparedClaimsByUIDV2) DeepCopy() PreparedClaimsByUIDV2 {
+	if m == nil {
+		return nil
+	}
+	out := make(PreparedClaimsByUIDV2, len(m))
+	for k, v := range m {
+		out[k] = v.DeepCopy()
+	}
+	return out
+}
+
+func (c PreparedClaimV1) DeepCopy() PreparedClaimV1 {
+	var status resourceapi.ResourceClaimStatus
+	if s := c.Status.DeepCopy(); s != nil {
+		status = *s
+	}
+	return PreparedClaimV1{
+		Status:          status,
+		PreparedDevices: c.PreparedDevices.DeepCopy(),
+	}
+}
+
+func (c PreparedClaimV2) DeepCopy() PreparedClaimV2 {
+	var status resourceapi.ResourceClaimStatus
+	if s := c.Status.DeepCopy(); s != nil {
+		status = *s
+	}
+	return PreparedClaimV2{
+		CheckpointState: c.CheckpointState,
+		Status:          status,
+		PreparedDevices: c.PreparedDevices.DeepCopy(),
+		Name:            c.Name,
+		Namespace:       c.Namespace,
+	}
+}
+
 // Conversion functions
 
 func (v1 *CheckpointV1) ToV2() *CheckpointV2 {
