@@ -46,7 +46,8 @@ type OpaqueDeviceConfig struct {
 }
 
 type DeviceConfigState struct {
-	MpsControlDaemonID string `json:"mpsControlDaemonID"`
+	MpsControlDaemonID string              `json:"mpsControlDaemonID"`
+	Config             configapi.Interface `json:"-"` // don't serialize this.
 	containerEdits     *cdiapi.ContainerEdits
 }
 
@@ -1015,8 +1016,23 @@ func (s *DeviceState) applySharingConfig(ctx context.Context, config configapi.S
 }
 
 func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configapi.VfioDeviceConfig, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult) (*DeviceConfigState, error) {
-	var configState DeviceConfigState
+	configState := DeviceConfigState{
+		Config: config,
+	}
 
+	// Add common vfio device container edits to the group config. This is
+	// configuring vfio devices only for a specific group. Its assumed that
+	// there is only a single vfio device configuration applied in the
+	// resourceclaim for all its requests. This means there's only a single
+	// prepared devices group and these edits are never duplicated. This
+	// implicitly assumptes that other device types are not present in the
+	// resourceclaim allocation.
+	commonEdits, err := GetVfioCommonCDIContainerEdits(config)
+	if err != nil {
+		return nil, fmt.Errorf("error getting common vfio device container edits: %w", err)
+	}
+
+	configState.containerEdits = commonEdits
 	// Configure the vfio-pci devices.
 	for _, r := range results {
 		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
