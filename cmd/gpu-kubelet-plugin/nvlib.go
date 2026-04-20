@@ -1315,3 +1315,77 @@ func setMax(m map[resourceapi.QualifiedName]resourceapi.DeviceCapacity, k resour
 		m[k] = v
 	}
 }
+
+// Disable GPU Persistence mode
+//
+// Currently persistence mode may be toggled in two ways:
+// 1. Using `nvidia-smi -pm`
+// 2. Using the Legacy NVML API `nvml.SetPersistenceMode`
+//
+// When using nvidia-smi, there are 2 possible scenarios:
+//  1. If nvidia-persistenced is running, then nvidia-smi uses it to toggle
+//     persistence mode.
+//  2. If nvidia-persistenced is not running, then nvidia-smi falls back to the
+//     legacy NVML API.
+//
+// Since we do not know if nvidia-persistenced is managing the GPU or not, we
+// disable persistence mode using nvidia-smi. This will guarantee the operation
+// is successful.
+//
+// Note: we `chroot` into the device root to properly run nvidia-smi.
+func (l deviceLib) disableGPUPersistenceMode(pciAddress string) error {
+	cmd := exec.Command(
+		"chroot",
+		l.devRoot,
+		"nvidia-smi",
+		"-i",
+		pciAddress,
+		"-pm",
+		"0")
+
+	output, err := cmd.CombinedOutput()
+	klog.V(4).Infof("disableGPUPersistenceMode command: %s, output: \n%s", cmd.String(), string(output))
+	if err != nil {
+		return fmt.Errorf("error running nvidia-smi: %w", err)
+	}
+	return nil
+}
+
+// Enable GPU Persistence mode
+//
+// While persistence mode disablement can be done using nvidia-smi, we cannot
+// do the same for enablement. nvidia-persistenced currently does not support
+// hotplug of GPUs.
+// In our case, it triggers the same issue when all GPUs are in passthrough mode
+// and then put back one by one onto the nvidia driver via NodeUnprepareResources.
+// `nvidia-smi -i <id> -pm 1` will fail from the second GPU onwards.
+//
+// Hence, we only support the Legacy GPU persistence mode when the
+// `PassthroughSupport` feature gate is enabled and we're switching between the
+// nvidia driver and the vfio-pci driver to manage the GPU.
+func (l deviceLib) enableGPUPersistenceMode(pciAddress string) error {
+	shutdown, ret := l.ensureNVML()
+	defer shutdown()
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("error ensuring NVML: %v", ret)
+	}
+
+	device, ret := l.nvmllib.DeviceGetHandleByPciBusId(pciAddress)
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("error getting device handle by UUID: %v", ret)
+	}
+
+	ret = device.SetPersistenceMode(nvml.FEATURE_ENABLED)
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("error setting persistence mode: %v", ret)
+	}
+	mode, ret := device.GetPersistenceMode()
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("error getting persistence mode: %v", ret)
+	}
+	if mode != nvml.FEATURE_ENABLED {
+		return fmt.Errorf("persistence mode is not enabled: %v", mode)
+	}
+
+	return nil
+}
