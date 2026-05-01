@@ -77,10 +77,6 @@ func (h *vfioCDIHandler) GetCommonEdits(enableAPIDevice bool, preferIommuFD bool
 		edits.DeviceNodes = append(edits.DeviceNodes, &cdispec.DeviceNode{
 			Path: iommuDevicePath,
 		})
-	} else {
-		edits.DeviceNodes = append(edits.DeviceNodes, &cdispec.DeviceNode{
-			Path: filepath.Join(vfioDevicesRoot, "vfio"),
-		})
 	}
 
 	return edits, nil
