@@ -199,7 +199,8 @@ tests-mock-nvml: runner-image
 		tests/bats/test_cd_logging.bats \
 		tests/bats/test_cd_failover.bats \
 		tests/bats/test_cd_mnnvl_workload.bats \
-		tests/bats/test_cd_updowngrade.bats)
+		tests/bats/test_cd_updowngrade.bats \
+		tests/bats/test_cd_leader_election.bats)
 
 tests-gpu-single: runner-image
 	$(call RUN_BATS, \
@@ -245,7 +246,8 @@ tests-cd: runner-image
 		tests/bats/test_cd_misc.bats \
 		tests/bats/test_cd_logging.bats \
 		tests/bats/test_cd_failover.bats \
-		tests/bats/test_cd_updowngrade.bats)
+		tests/bats/test_cd_updowngrade.bats \
+		tests/bats/test_cd_leader_election.bats)
 
 # Run the complete test suite (the reference!)
 tests: runner-image
@@ -262,4 +264,5 @@ tests: runner-image
 		tests/bats/test_cd_misc.bats \
 		tests/bats/test_cd_logging.bats \
 		tests/bats/test_cd_failover.bats \
-		tests/bats/test_cd_updowngrade.bats)
+		tests/bats/test_cd_updowngrade.bats \
+		tests/bats/test_cd_leader_election.bats)
