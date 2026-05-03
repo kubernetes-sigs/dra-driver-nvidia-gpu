@@ -198,11 +198,7 @@ func (d *GpuInfo) GetDevice() resourceapi.Device {
 	device := resourceapi.Device{
 		Name:       d.CanonicalName(),
 		Attributes: d.Attributes(),
-		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
-			"memory": {
-				Value: *resource.NewQuantity(int64(d.memoryBytes), resource.BinarySI),
-			},
-		},
+		Capacity:   d.fullGpuCapacity(),
 	}
 	return device
 }

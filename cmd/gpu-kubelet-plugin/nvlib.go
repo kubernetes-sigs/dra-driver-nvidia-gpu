@@ -229,38 +229,63 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 		l.gpuUUIDbyPCIBusID[gpuInfo.pciBusID] = gpuInfo.UUID
 
 		if featuregates.Enabled(featuregates.DynamicMIG) {
-			// Best-effort handle cache warmup: store mapping between full-GPU
-			// UUID and NVML device handle in a map. Ignore failures.
-			if _, ret := l.DeviceGetHandleByUUID(gpuInfo.UUID); ret != nvml.SUCCESS {
-				klog.Warningf("DeviceGetHandleByUUIDCached failed: %s", ret)
-			}
-
-			// For this full device, inspect all MIG profiles and their possible
-			// placements. Side effect: this enriches `gpuInfo` with additional
-			// properties (such as the memory slice count, and the maximum
-			// capacities as reported by individual MIG profiles).
-			migspecs, err := l.inspectMigProfilesAndPlacements(gpuInfo, d)
+			supportsDynamicMIG, err := supportsDynamicMIGDiscovery(gpuInfo, d)
 			if err != nil {
-				return fmt.Errorf("error getting MIG info for GPU %v: %w", i, err)
+				return fmt.Errorf("error determining DynamicMIG support for GPU %v: %w", i, err)
 			}
 
-			// Announce the full physical GPU.
-			thisGPUAllocatable[gpuInfo.CanonicalName()] = parentdev
-
-			for _, migspec := range migspecs {
-				dev := &AllocatableDevice{
-					MigDynamic: migspec,
+			// gpuInfo.migEnabled is captured once during enumeration and is
+			// never re-read. The branches below rely on this snapshot:
+			// toggling MIG mode on Ampere requires a GPU reset that this
+			// plugin does not initiate, so within a single plugin lifetime
+			// the value cannot change underneath us. A future refactor that
+			// moves the migEnabled read past enumeration (or starts
+			// re-reading it) must reconsider these branches.
+			if supportsDynamicMIG {
+				// Best-effort handle cache warmup: store mapping between full-GPU
+				// UUID and NVML device handle in a map. Ignore failures.
+				if _, ret := l.DeviceGetHandleByUUID(gpuInfo.UUID); ret != nvml.SUCCESS {
+					klog.Warningf("DeviceGetHandleByUUID failed: %s", ret)
 				}
-				thisGPUAllocatable[migspec.CanonicalName()] = dev
-			}
 
-			err = perGPUAllocatable.AddGPUAllocatables(gpuInfo.pciBusID, thisGPUAllocatable)
-			if err != nil {
-				return fmt.Errorf("error adding allocatables for PCI bus ID %q: %w", gpuInfo.pciBusID, err)
-			}
+				// For this full device, inspect all MIG profiles and their possible
+				// placements. Side effect: this enriches `gpuInfo` with additional
+				// properties (such as the memory slice count, and the maximum
+				// capacities as reported by individual MIG profiles).
+				migspecs, err := l.inspectMigProfilesAndPlacements(gpuInfo, d)
+				if err != nil {
+					return fmt.Errorf("error getting MIG info for GPU %v: %w", i, err)
+				}
 
-			// Terminate this function -- this is mutually exclusive with static MIG and vfio/passthrough.
-			return nil
+				// When migEnabled is true, parentdev is intentionally NOT added
+				// to thisGPUAllocatable — the full GPU is not allocatable on
+				// Ampere when MIG cannot be toggled without a GPU reset. The
+				// per-GPU shared CounterSet that MIG partitions reference by
+				// name is still emitted by the ResourceSlice generators in
+				// driver.go, which derive the parent GpuInfo from
+				// MigDynamic.Parent when no full-GPU entry exists.
+
+				// We're inside the supportsDynamicMIG=true branch, which already excludes
+				// vGPUs, so supportsMIGModeToggle(d) here precisely means
+				// "non-vGPU Hopper+".
+				if !gpuInfo.migEnabled || supportsMIGModeToggle(d) {
+					thisGPUAllocatable[gpuInfo.CanonicalName()] = parentdev
+				}
+				for _, migspec := range migspecs {
+					dev := &AllocatableDevice{
+						MigDynamic: migspec,
+					}
+					thisGPUAllocatable[migspec.CanonicalName()] = dev
+				}
+
+				err = perGPUAllocatable.AddGPUAllocatables(gpuInfo.pciBusID, thisGPUAllocatable)
+				if err != nil {
+					return fmt.Errorf("error adding allocatables for PCI bus ID %q: %w", gpuInfo.pciBusID, err)
+				}
+
+				// Terminate this function -- this is mutually exclusive with static MIG and vfio/passthrough.
+				return nil
+			}
 		}
 
 		migdevs, err := l.discoverMigDevicesByGPU(gpuInfo)
@@ -1129,6 +1154,13 @@ func (l deviceLib) maybeDisableMigMode(uuid string, nvmldev nvml.Device) error {
 		return nil
 	}
 
+	// On Ampere/A100, SetMigMode sets a pending mode that requires a GPU reset to activate — leave MIG enabled.
+	if !supportsMIGModeToggle(nvmldev) {
+		klog.Infof("GPU %s (%s): skipping MIG mode disable (architecture does not support reset-less MIG toggling)",
+			gpu.String(), gpu.architecture)
+		return nil
+	}
+
 	klog.V(6).Infof("Attempting to disable MIG mode for device %s", gpu.String())
 	t0 := time.Now()
 	ret, activationStatus := nvmldev.SetMigMode(nvml.DEVICE_MIG_DISABLE)
@@ -1320,4 +1352,46 @@ func setMax(m map[resourceapi.QualifiedName]resourceapi.DeviceCapacity, k resour
 	if cur, ok := m[k]; !ok || v.Value.Value() > cur.Value.Value() {
 		m[k] = v
 	}
+}
+
+// supportsMIGModeToggle reports whether the GPU supports toggling MIG mode
+// without requiring a GPU reset. Hopper (H100) and newer support reset-less
+// MIG mode toggling. Ampere (A100) does not.
+func supportsMIGModeToggle(dev nvml.Device) bool {
+	arch, ret := dev.GetArchitecture()
+	if ret != nvml.SUCCESS {
+		return false
+	}
+	return arch >= nvml.DEVICE_ARCH_HOPPER
+}
+
+func supportsDynamicMIGDiscovery(gpuInfo *GpuInfo, dev nvdev.Device) (bool, error) {
+	vMode, vret := dev.GetVirtualizationMode()
+	if vret != nvml.SUCCESS {
+		return false, fmt.Errorf("error getting GPU virtualization mode: %v", vret)
+	}
+
+	// In a vGPU guest the MIG mode and partition size are fixed by the vGPU
+	// profile assigned to the VM — a guest cannot dynamically repartition a
+	// vGPU. Skip DynamicMIG.
+	if vMode == nvml.GPU_VIRTUALIZATION_MODE_VGPU {
+		klog.Warningf("GPU %s: vGPU guest detected — skipping DynamicMIG", gpuInfo.String())
+		return false, nil
+	}
+
+	// Hopper+ supports reset-less MIG mode toggling, so advertise both the full
+	// GPU and the dynamic MIG profiles irrespective of current MIG state.
+	if supportsMIGModeToggle(dev) {
+		return true, nil
+	}
+
+	// On Ampere/A100, once MIG is enabled we can still advertise the dynamic MIG
+	// profiles, but not the full GPU because disabling MIG would require a GPU reset.
+	if gpuInfo.migEnabled {
+		klog.Infof("GPU %s: MIG mode is enabled and cannot be toggled without GPU reset", gpuInfo.String())
+		return true, nil
+	}
+
+	klog.Infof("GPU %s: MIG mode is disabled and cannot be toggled without GPU reset", gpuInfo.String())
+	return false, nil
 }

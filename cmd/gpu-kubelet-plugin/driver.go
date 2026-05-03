@@ -202,19 +202,33 @@ func (d *driver) generateSplitResourceSlices(nodeName string) resourceslice.Driv
 	for _, pciBusID := range slices.Sorted(maps.Keys(d.state.perGPUAllocatable.allocatablesMap)) {
 		allocatable := d.state.perGPUAllocatable.allocatablesMap[pciBusID]
 		var deviceSlice resourceslice.Slice
+		var gpuInfo *GpuInfo
 
 		// Stable sort order by devicename
 		for _, devname := range slices.Sorted(maps.Keys(allocatable)) {
 			device := allocatable[devname]
 			klog.V(4).Infof("About to announce device %s", devname)
 
-			// Full GPU: collect its counter sets for the `sharedCountersSlice`.
-			if device.Gpu != nil {
-				allCounterSets = append(allCounterSets, device.Gpu.PartSharedCounterSets()...)
+			// Remember this GPU so we can emit exactly one shared counter
+			// set for it below. MIG partitions reference the parent GPU's
+			// counter set by name, so the counter set must be emitted even
+			// when the full GPU itself is not announced (e.g. on Ampere
+			// with MIG mode enabled, where MIG cannot be toggled without a
+			// GPU reset and so only MIG partitions are allocatable).
+			if gpuInfo == nil {
+				switch {
+				case device.Gpu != nil:
+					gpuInfo = device.Gpu
+				case device.MigDynamic != nil:
+					gpuInfo = device.MigDynamic.Parent
+				}
 			}
 
 			// Add device/partition to the device-only slice for this GPU.
 			deviceSlice.Devices = append(deviceSlice.Devices, device.PartGetDevice())
+		}
+		if gpuInfo != nil {
+			allCounterSets = append(allCounterSets, gpuInfo.PartSharedCounterSets()...)
 		}
 		gpuslices = append(gpuslices, deviceSlice)
 	}
@@ -244,7 +258,7 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 	for _, pciBusID := range slices.Sorted(maps.Keys(d.state.perGPUAllocatable.allocatablesMap)) {
 		allocatable := d.state.perGPUAllocatable.allocatablesMap[pciBusID]
 		var slice resourceslice.Slice
-		countersets := []resourceapi.CounterSet{}
+		var gpuInfo *GpuInfo
 
 		// Stable sort order by devicename -- makes the order of devices
 		// presented in a resource slice reproducible. Good for debuggability /
@@ -254,10 +268,19 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 			device := allocatable[devname]
 			klog.V(4).Infof("About to announce device %s", devname)
 
-			// Full GPU: take note of countersets, indicating absolute capacity.
-			// For now this is expected to be one counter set.
-			if device.Gpu != nil {
-				countersets = append(countersets, device.Gpu.PartSharedCounterSets()...)
+			// Remember this GPU so we can emit exactly one shared counter
+			// set for it below. MIG partitions reference the parent GPU's
+			// counter set by name, so the counter set must be emitted even
+			// when the full GPU itself is not announced (e.g. on Ampere
+			// with MIG mode enabled, where MIG cannot be toggled without a
+			// GPU reset and so only MIG partitions are allocatable).
+			if gpuInfo == nil {
+				switch {
+				case device.Gpu != nil:
+					gpuInfo = device.Gpu
+				case device.MigDynamic != nil:
+					gpuInfo = device.MigDynamic.Parent
+				}
 			}
 
 			// Add all allocatable devices for this physical GPU to this slice.
@@ -265,7 +288,10 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 			// GPU itself.
 			slice.Devices = append(slice.Devices, device.PartGetDevice())
 		}
-		slice.SharedCounters = countersets
+
+		if gpuInfo != nil {
+			slice.SharedCounters = gpuInfo.PartSharedCounterSets()
+		}
 		gpuslices = append(gpuslices, slice)
 	}
 
