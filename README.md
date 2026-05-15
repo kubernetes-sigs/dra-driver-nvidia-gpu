@@ -42,7 +42,7 @@ For exploration and demonstration purposes, see the "demo" section below, and al
 
 ## Installation
 
-Configuration and installation instructions can for now be found [in our Wiki](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/wiki/Installation).
+Configuration and installation instructions can for now be found in the [/docs folder](docs/install.md).
 
 ## A (kind) demo
 

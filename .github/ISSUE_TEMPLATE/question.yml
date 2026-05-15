@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         Before asking a question, please check:
-        - [Project Wiki](https://github.com/NVIDIA/k8s-dra-driver-gpu/wiki) for installation and troubleshooting
+        - [Project Documentation](https://github.com/NVIDIA/k8s-dra-driver-gpu/tree/main/docs) for installation and troubleshooting
         - [Release Notes](https://github.com/NVIDIA/k8s-dra-driver-gpu/releases) for recent changes and known issues
         - [Demo specs](https://github.com/NVIDIA/k8s-dra-driver-gpu/tree/main/demo/specs) for usage examples
         - [Kubernetes DRA documentation](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/)

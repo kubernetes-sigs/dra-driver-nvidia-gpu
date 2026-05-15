@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Installation & Troubleshooting Wiki
-    url: https://github.com/NVIDIA/k8s-dra-driver-gpu/wiki
-    about: Check the wiki for installation guides and common troubleshooting steps before opening an issue.
+  - name: DRA Driver for NVIDIA GPUs Documentation
+    url: https://github.com/NVIDIA/k8s-dra-driver-gpu/tree/main/docs
+    about: Check the our docs for installation guides and common troubleshooting steps before opening an issue.
   - name: Kubernetes DRA Documentation
     url: https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/
     about: Upstream Kubernetes Dynamic Resource Allocation documentation.

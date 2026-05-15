@@ -7,8 +7,7 @@ Cluster, software, and hardware requirements for the DRA Driver for NVIDIA GPUs.
 
 | Requirement | Version / Notes |
 |---|---|
-| Kubernetes | v1.34.2 or later, with at least one node that has one or more NVIDIA GPUs. |
-| `DynamicResourceAllocation` feature gate | Enabled by default in Kubernetes v1.34+. On v1.32 and v1.33, [enable it manually](#enable-dra-on-kubernetes-v132-and-v133). |
+| Kubernetes | v1.34.2 or later, with at least one node that has one or more NVIDIA GPUs. The DRA Driver requires the `DynamicResourceAllocation` feature gate, which is Enabled by default in Kubernetes v1.34+. |
 | Helm | v3.8 or later. |
 | NVIDIA Driver | v565 or later for GPU allocation. v570.158.01 or later if using [ComputeDomains](#computedomains-additional-prerequisites). |
 | CDI  | Enabled in your container runtime. This is enabled by default in containerd 2.0+ and CRIO v1.27+. The DRA Driver uses CDI to expose GPUs to containers.  |
@@ -39,47 +38,3 @@ It can manage the following DRA Driver for NVIDIA GPUs prerequisites for you:
 - GPU Feature Discovery (GFD), required for ComputeDomains.
 
 If you choose to install the GPU Operator, follow the [DRA Driver for NVIDIA GPUs install guide](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/dra-intro-install.html) in the GPU Operator documentation. It covers installing the GPU Operator with the NVIDIA Kubernetes Device Plugin disabled and installing the DRA Driver for NVIDIA GPUs.
-
-## Enable DRA on Kubernetes v1.32 and v1.33
-
-On Kubernetes v1.34 and later, `DynamicResourceAllocation` is enabled by default and no additional configuration is required.
-
-On Kubernetes v1.32 and v1.33, enable the following on each component:
-
-| Component | Requirement |
-|---|---|
-| kube-apiserver | Enable the `DynamicResourceAllocation` feature gate and the `resource.k8s.io/v1beta1` API group (available on v1.32 and v1.33). On v1.33, also enable `resource.k8s.io/v1beta2`. |
-| kube-controller-manager | Enable the `DynamicResourceAllocation` feature gate |
-| kube-scheduler | Enable the `DynamicResourceAllocation` feature gate |
-| kubelet | Enable the `DynamicResourceAllocation` feature gate |
-
-How you apply these depends on your cluster setup. For managed Kubernetes distributions (EKS, GKE, AKS, and others), refer to your provider's documentation. Not all providers support enabling `DynamicResourceAllocation` on v1.32 or v1.33 clusters.
-
-### Example: kubeadm
-
-The following `kubeadm-init.yaml` enables DRA for a new cluster using [kubeadm](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/control-plane-flags/):
-
-```yaml
-apiVersion: kubeadm.k8s.io/v1beta4
-kind: ClusterConfiguration
-apiServer:
-  extraArgs:
-  - name: "feature-gates"
-    value: "DynamicResourceAllocation=true"
-  - name: "runtime-config"
-    # On v1.32, omit "resource.k8s.io/v1beta2=true" 
-    value: "resource.k8s.io/v1beta1=true,resource.k8s.io/v1beta2=true"
-controllerManager:
-  extraArgs:
-  - name: "feature-gates"
-    value: "DynamicResourceAllocation=true"
-scheduler:
-  extraArgs:
-  - name: "feature-gates"
-    value: "DynamicResourceAllocation=true"
----
-apiVersion: kubelet.config.k8s.io/v1beta1
-kind: KubeletConfiguration
-featureGates:
-  DynamicResourceAllocation: true
-```
