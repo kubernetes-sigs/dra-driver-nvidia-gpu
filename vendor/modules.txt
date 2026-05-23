@@ -13,7 +13,7 @@ github.com/NVIDIA/go-nvlib/pkg/pciids
 ## explicit; go 1.20
 github.com/NVIDIA/go-nvml/pkg/dl
 github.com/NVIDIA/go-nvml/pkg/nvml
-# github.com/NVIDIA/nvidia-container-toolkit v1.19.0
+# github.com/NVIDIA/nvidia-container-toolkit v1.19.1
 ## explicit; go 1.25.0
 github.com/NVIDIA/nvidia-container-toolkit/internal/config/image
 github.com/NVIDIA/nvidia-container-toolkit/internal/devices
@@ -173,7 +173,7 @@ github.com/onsi/gomega/types
 # github.com/opencontainers/cgroups v0.0.6
 ## explicit; go 1.23.0
 github.com/opencontainers/cgroups/devices/config
-# github.com/opencontainers/runc v1.4.0
+# github.com/opencontainers/runc v1.4.2
 ## explicit; go 1.24.0
 github.com/opencontainers/runc/libcontainer/devices
 # github.com/opencontainers/runtime-spec v1.3.0
