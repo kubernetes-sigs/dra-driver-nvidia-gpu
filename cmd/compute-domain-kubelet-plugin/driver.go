@@ -32,6 +32,7 @@ import (
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
 
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
 	drametrics "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/workqueue"
@@ -57,6 +58,25 @@ type permanentError struct{ error }
 
 func isPermanentError(err error) bool {
 	return errors.As(err, &permanentError{})
+}
+
+// computeDomainPublishedDevices returns the devices the kubelet plugin should
+// advertise in its node ResourceSlice. ComputeDomain channels other than
+// channel 0 are not advertised here (they are advertised as a network resource
+// from the control plane). Under HostManagedIMEX the driver runs no
+// ComputeDomain daemons, so daemon devices are omitted as well.
+func computeDomainPublishedDevices(allocatable AllocatableDevices, hostManaged bool) []resourceapi.Device {
+	var devices []resourceapi.Device
+	for _, device := range allocatable {
+		if device.Type() == ComputeDomainChannelType && device.Channel.ID != 0 {
+			continue
+		}
+		if hostManaged && device.Type() == ComputeDomainDaemonType {
+			continue
+		}
+		devices = append(devices, device.GetDevice())
+	}
+	return devices
 }
 
 type driver struct {
@@ -102,16 +122,9 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	driver.pluginhelper = helper
 
-	// Enumerate the set of ComputeDomain daemon devices and publish them
+	// Enumerate the set of ComputeDomain devices to publish.
 	var resourceSlice resourceslice.Slice
-	for _, device := range state.allocatable {
-		// Explicitly exclude ComputeDomain channels from being advertised here. They
-		// are instead advertised in as a network resource from the control plane.
-		if device.Type() == ComputeDomainChannelType && device.Channel.ID != 0 {
-			continue
-		}
-		resourceSlice.Devices = append(resourceSlice.Devices, device.GetDevice())
-	}
+	resourceSlice.Devices = computeDomainPublishedDevices(state.allocatable, featuregates.Enabled(featuregates.HostManagedIMEX))
 
 	resources := resourceslice.DriverResources{
 		Pools: map[string]resourceslice.Pool{

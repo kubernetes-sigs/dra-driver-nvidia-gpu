@@ -28,6 +28,7 @@ import (
 	"k8s.io/klog/v2"
 
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
 	nvinformers "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/informers/externalversions"
 	nvlisters "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/listers/resource/v1beta1"
@@ -252,6 +253,14 @@ func (m *ComputeDomainManager) RemoveFinalizer(ctx context.Context, uid string) 
 }
 
 func (m *ComputeDomainManager) calculateGlobalStatus(cd *nvapi.ComputeDomain) string {
+	// In host-managed IMEX mode the controller does not track per-node daemon
+	// readiness (there are no driver-managed daemons), so Ready means only that
+	// the ComputeDomain was admitted and its workload ResourceClaimTemplate
+	// exists. spec.numNodes and status.nodes are not used.
+	if featuregates.Enabled(featuregates.HostManagedIMEX) {
+		return nvapi.ComputeDomainStatusReady
+	}
+
 	// Mark the ComputeDomain as not ready if not enough nodes are present in the nodes list.
 	if len(cd.Status.Nodes) < cd.Spec.NumNodes {
 		return nvapi.ComputeDomainStatusNotReady
@@ -314,6 +323,10 @@ func (m *ComputeDomainManager) onAddOrUpdate(ctx context.Context, obj any) error
 		return nil
 	}
 
+	if featuregates.Enabled(featuregates.HostManagedIMEX) {
+		return m.onAddOrUpdateHostManaged(ctx, cd)
+	}
+
 	if cd.GetDeletionTimestamp() != nil {
 		if err := m.resourceClaimTemplateManager.Delete(ctx, string(cd.UID)); err != nil {
 			return fmt.Errorf("error deleting ResourceClaimTemplate: %w", err)
@@ -372,6 +385,55 @@ func (m *ComputeDomainManager) onAddOrUpdate(ctx context.Context, obj any) error
 	// Change the global Status to reflect the number of ComputeDomain daemons connected.
 	if err := m.updateGlobalStatus(ctx, cd); err != nil {
 		return fmt.Errorf("error updating global status on ComputeDoimain '%s/%s': %w", cd.Namespace, cd.Name, err)
+	}
+
+	return nil
+}
+
+// onAddOrUpdateHostManaged reconciles a ComputeDomain when the HostManagedIMEX
+// feature gate is enabled. In that mode the cluster operator owns the host
+// nvidia-imex daemon lifecycle, so the controller only manages the workload
+// ResourceClaimTemplate and the ComputeDomain finalizer. It never creates
+// daemon DaemonSets, daemon ResourceClaimTemplates, or ComputeDomain node
+// labels, so the delete path has none of those to clean up.
+func (m *ComputeDomainManager) onAddOrUpdateHostManaged(ctx context.Context, cd *nvapi.ComputeDomain) error {
+	if cd.GetDeletionTimestamp() != nil {
+		if err := m.resourceClaimTemplateManager.Delete(ctx, string(cd.UID)); err != nil {
+			return fmt.Errorf("error deleting ResourceClaimTemplate: %w", err)
+		}
+
+		if err := m.resourceClaimTemplateManager.RemoveFinalizer(ctx, string(cd.UID)); err != nil {
+			return fmt.Errorf("error removing finalizer on ResourceClaimTemplate: %w", err)
+		}
+
+		if err := m.resourceClaimTemplateManager.AssertRemoved(ctx, string(cd.UID)); err != nil {
+			return fmt.Errorf("error asserting removal of ResourceClaimTemplate: %w", err)
+		}
+
+		if err := m.RemoveFinalizer(ctx, string(cd.UID)); err != nil {
+			return fmt.Errorf("error removing finalizer: %w", err)
+		}
+
+		metrics.ForgetComputeDomain(string(cd.UID))
+		return nil
+	}
+
+	// Add the finalizer.
+	if err := m.addFinalizer(ctx, cd); err != nil {
+		return fmt.Errorf("error adding finalizer: %w", err)
+	}
+
+	// Create the workload ResourceClaimTemplate. Its manager adds and tracks
+	// its own finalizer on the template.
+	if _, err := m.resourceClaimTemplateManager.Create(ctx, cd.Namespace, cd.Spec.Channel.ResourceClaimTemplate.Name, cd); err != nil {
+		return fmt.Errorf("error creating ResourceClaimTemplate '%s/%s': %w", cd.Namespace, cd.Spec.Channel.ResourceClaimTemplate.Name, err)
+	}
+
+	// Mark the ComputeDomain Ready. Under HostManagedIMEX this only means the
+	// ComputeDomain was admitted and the workload ResourceClaimTemplate exists;
+	// it says nothing about host nvidia-imex health.
+	if err := m.updateGlobalStatus(ctx, cd); err != nil {
+		return fmt.Errorf("error updating status on ComputeDomain '%s/%s': %w", cd.Namespace, cd.Name, err)
 	}
 
 	return nil
