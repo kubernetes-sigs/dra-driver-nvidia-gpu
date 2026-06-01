@@ -1,0 +1,50 @@
+# Host-managed IMEX smoke test.
+#
+# A ComputeDomain in host-managed mode (numNodes: 0, allocationMode: Single)
+# plus a pod that confirms channel0 is injected into the container. Requires
+# featureGates.HostManagedIMEX=true on the driver and host nvidia-imex running
+# on the node.
+#
+# The toleration + nodeAffinity below target DGXC GB200 nodes (tainted
+# skyhook.nvidia.com, labeled nvidia.com/gpu.clique). Drop both blocks on
+# clusters without that taint.
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: hostmanaged-smoke
+spec:
+  numNodes: 0
+  channel:
+    resourceClaimTemplate:
+      name: hostmanaged-smoke-channel
+    allocationMode: Single
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hostmanaged-smoke
+spec:
+  restartPolicy: Never
+  tolerations:
+  - key: skyhook.nvidia.com
+    operator: Exists
+    effect: NoSchedule
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: nvidia.com/gpu.clique
+            operator: Exists
+  containers:
+  - name: ctr
+    image: ubuntu:22.04
+    command: ["bash", "-c"]
+    args: ["ls -la /dev/nvidia-caps-imex-channels; trap 'exit 0' TERM; sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: imex
+  resourceClaims:
+  - name: imex
+    resourceClaimTemplateName: hostmanaged-smoke-channel

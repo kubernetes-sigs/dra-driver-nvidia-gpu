@@ -1,0 +1,48 @@
+# Host-managed IMEX NEGATIVE test: allocationMode: All is rejected.
+#
+# Under HostManagedIMEX only allocationMode Single (or unset) is allowed.
+# Expected: the pod never reaches Ready; the compute-domains kubelet-plugin logs
+# a PERMANENT prepare error (mentioning allocationMode "Single") and the pod
+# stays in ContainerCreating.
+#
+# Toleration + nodeAffinity target DGXC GB200 nodes; drop them elsewhere.
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: hostmanaged-all
+spec:
+  numNodes: 0
+  channel:
+    resourceClaimTemplate:
+      name: hostmanaged-all-channel
+    allocationMode: All
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hostmanaged-all
+spec:
+  restartPolicy: Never
+  tolerations:
+  - key: skyhook.nvidia.com
+    operator: Exists
+    effect: NoSchedule
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: nvidia.com/gpu.clique
+            operator: Exists
+  containers:
+  - name: ctr
+    image: ubuntu:22.04
+    command: ["bash", "-c"]
+    args: ["ls -la /dev/nvidia-caps-imex-channels; trap 'exit 0' TERM; sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: imex
+  resourceClaims:
+  - name: imex
+    resourceClaimTemplateName: hostmanaged-all-channel

@@ -1,0 +1,54 @@
+# Helm values overlay for host-managed IMEX on a DGXC GB200 cluster
+# (arm64 Grace GPU nodes tainted skyhook.nvidia.com). Use with:
+#
+#   helm upgrade --install dra-driver-nvidia-gpu \
+#     ./deployments/helm/dra-driver-nvidia-gpu \
+#     -n dra-driver-nvidia-gpu --create-namespace \
+#     -f demo/specs/imex/host-managed/dgxc-gb200-values.yaml --wait
+#
+# IMPORTANT: use a MULTI-ARCH driver image. Otherwise the single-replica
+# controller Deployment can be scheduled onto an amd64 node and a single-arch
+# arm64 image fails with `exec format error`. The controller nodeSelector below
+# pins it to an arm64 GB200 node, which works only if the image has an arm64
+# variant.
+# GPU Operator installs a containerized NVIDIA driver, so the driver root is
+# /run/nvidia/driver, not the chart default of /.
+nvidiaDriverRoot: /run/nvidia/driver
+
+featureGates:
+  HostManagedIMEX: true
+
+resources:
+  # compute-domains only by default. For the cross-node data-path tests
+  # (nvbandwidth/NCCL) the workers need GPUs: flip gpus.enabled=true and set
+  # gpuResourcesEnabledOverride=true so GPUs are served via GPU DRA.
+  gpus:
+    enabled: false
+  computeDomains:
+    enabled: true
+
+controller:
+  # Pin to an arm64 GB200 node so a native-arm64 image runs (see IMPORTANT above).
+  nodeSelector:
+    kubernetes.io/arch: arm64
+  # Replaces the chart default list, so the upstream tolerations are repeated
+  # here alongside the skyhook toleration.
+  tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: CriticalAddonsOnly
+    operator: Exists
+  - key: skyhook.nvidia.com
+    operator: Exists
+    effect: NoSchedule
+
+kubeletPlugin:
+  # Replaces the chart default (nvidia.com/gpu); keep it and add skyhook.
+  tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+  - key: skyhook.nvidia.com
+    operator: Exists
+    effect: NoSchedule

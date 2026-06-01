@@ -26,6 +26,28 @@ If you plan to use ComputeDomains, you also need:
 systemctl disable --now nvidia-imex.service && systemctl mask nvidia-imex.service
 ```
 
+### Host-managed IMEX (`HostManagedIMEX` feature gate)
+
+`HostManagedIMEX` is an alpha, install-wide mode for clusters where the cluster
+operator already owns the host `nvidia-imex` daemon. It **inverts** the rule
+above: the driver does not run per-ComputeDomain IMEX daemons, so the host
+`nvidia-imex.service` must be **configured and running** (not masked) on every
+participating GPU node before workloads use IMEX.
+
+Additional prerequisites when `featureGates.HostManagedIMEX=true`:
+
+- Host `nvidia-imex` installed and `nvidia-imex.service` **enabled and running**,
+  with a consistent `/etc/nvidia-imex/nodes_config.cfg` across the IMEX domain.
+- The `nvidia-caps-imex-channels` device major must be registered (in
+  `/proc/devices`) and channel `0` usable **before the kubelet plugin starts**
+  (the plugin discovers the major at startup and does not republish later).
+- `IMEXDaemonsWithDNSNames` and `ComputeDomainCliques` are forced off
+  automatically when the gate is enabled; no manual override is needed.
+
+Only `allocationMode: Single` (or unset) is supported, and at most one active
+isolated ComputeDomain per host IMEX domain. ComputeDomains should be created
+with `numNodes: 0`.
+
 ## Install prerequisites with NVIDIA GPU Operator
 
 The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/index.html) is a Kubernetes operator that automates the deployment and lifecycle management of all NVIDIA software components needed to provision and monitor GPUs in a cluster.
