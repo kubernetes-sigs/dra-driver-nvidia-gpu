@@ -7,6 +7,11 @@ github.com/NVIDIA/go-nvfm/pkg/dl
 github.com/NVIDIA/go-nvfm/pkg/nvfm
 # github.com/NVIDIA/go-nvlib v0.11.0
 ## explicit; go 1.25.0
+# github.com/NVIDIA/go-nvfm v0.0.0-20260528194329-0a8cb60d7cb1 => github.com/varunrsekar/go-nvfm v0.0.0-20260528194329-0a8cb60d7cb1
+## explicit; go 1.24
+github.com/NVIDIA/go-nvfm/pkg/dl
+github.com/NVIDIA/go-nvfm/pkg/nvfm
+## explicit; go 1.20
 github.com/NVIDIA/go-nvlib/pkg/nvlib/device
 github.com/NVIDIA/go-nvlib/pkg/nvlib/info
 github.com/NVIDIA/go-nvlib/pkg/nvpassthrough
@@ -960,3 +965,4 @@ tags.cncf.io/container-device-interface/pkg/parser
 # tags.cncf.io/container-device-interface/specs-go v1.1.0
 ## explicit; go 1.19
 tags.cncf.io/container-device-interface/specs-go
+# github.com/NVIDIA/go-nvfm => github.com/varunrsekar/go-nvfm v0.0.0-20260528194329-0a8cb60d7cb1

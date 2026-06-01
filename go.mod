@@ -35,6 +35,7 @@ require (
 )
 
 require (
+	github.com/NVIDIA/go-nvfm v0.0.0-20260528194329-0a8cb60d7cb1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -97,3 +98,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace github.com/NVIDIA/go-nvfm => github.com/varunrsekar/go-nvfm v0.0.0-20260528194329-0a8cb60d7cb1

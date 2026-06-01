@@ -24,6 +24,7 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 )
 
@@ -98,6 +99,20 @@ type VfioDeviceInfo struct {
 	iommuFDEnabled         bool
 	addressableMemoryBytes uint64
 	vfioModule             string
+
+	// Fabric Manager attributes (HGX systems with NVSwitch). Populated only
+	// when an FM Manager is available at discovery time
+	//
+	// gpuModuleID is the per-board physical ID returned by
+	// nvmlDeviceGetModuleId. It corresponds to the FM partition member
+	// physicalId
+	gpuModuleID int
+
+	// partitionsBySize maps an FM partition size (number of GPUs in the
+	// partition) to the partitionId of the partition of that size that
+	// includes this GPU. Used to publish the `partition1`/`partition2`/
+	// `partition4`/`partition8` device attributes.
+	partitionsBySize map[int]int
 }
 
 // CanonicalName returns the nameused for device announcement (in ResourceSlice
@@ -273,5 +288,30 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 		device.Attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}
 
+	d.addFabricManagerAttributes(device.Attributes)
+
 	return device
+}
+
+// addFabricManagerAttributes publishes the Fabric Manager-derived attributes
+func (d *VfioDeviceInfo) addFabricManagerAttributes(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute) {
+	if d.gpuModuleID == 0 && len(d.partitionsBySize) == 0 {
+		klog.V(4).Infof("No Fabric Manager attributes for %s", d.CanonicalName())
+		return
+	}
+
+	klog.V(4).Infof("Adding Fabric Manager attributes for %s: gpuModuleId=%d partitionsBySize=%v",
+		d.CanonicalName(), d.gpuModuleID, d.partitionsBySize)
+	if d.gpuModuleID != 0 {
+		attrs["gpuModuleId"] = resourceapi.DeviceAttribute{
+			IntValue: ptr.To(int64(d.gpuModuleID)),
+		}
+	}
+
+	for size, partitionID := range d.partitionsBySize {
+		key := resourceapi.QualifiedName(fmt.Sprintf("partition%d", size))
+		attrs[key] = resourceapi.DeviceAttribute{
+			IntValue: ptr.To(int64(partitionID)),
+		}
+	}
 }
