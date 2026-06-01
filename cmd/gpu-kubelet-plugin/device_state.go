@@ -954,6 +954,18 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 }
 
 func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices PreparedDeviceList) error {
+	// Release the NVSwitch fabric partition before rebinding the GPUs to the
+	// nvidia driver (reverse order of prepare).
+	pciBusIDs := []string{}
+	for _, device := range devices {
+		if device.Vfio.Info != nil && device.Vfio.Info.PciBusID != "" {
+			pciBusIDs = append(pciBusIDs, device.Vfio.Info.PciBusID)
+		}
+	}
+	if err := s.deactivateFabricPartition(pciBusIDs); err != nil {
+		return err
+	}
+
 	for _, device := range devices {
 		vfioAllocatable := s.perGPUAllocatable.GetAllocatableDevice(device.Vfio.Device.DeviceName)
 		if vfioAllocatable == nil {
@@ -1110,6 +1122,7 @@ func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configa
 
 	configState.containerEdits = commonEdits
 	// Configure the vfio-pci devices.
+	pciBusIDs := make([]string, 0, len(results))
 	for _, r := range results {
 		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
 		if device == nil {
@@ -1119,9 +1132,81 @@ func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configa
 		if err != nil {
 			return nil, fmt.Errorf("error configuring vfio device %q: %w", r.Device, err)
 		}
+		pciBusIDs = append(pciBusIDs, device.Vfio.PciBusID)
+	}
+
+	// Program the NVSwitch fabric for this set of passthrough GPUs via Fabric
+	// Manager. No-op on non-HGX nodes / when FM is not wired up.
+	if err := s.activateFabricPartition(pciBusIDs); err != nil {
+		return nil, err
 	}
 
 	return &configState, nil
+}
+
+// fabricPartitionForPCIBusIDs resolves the FM partition formed by the given set
+// of VFIO GPU PCI bus IDs. Returns ok=false (no error) when Fabric Manager is
+// not wired up, when a GPU is unknown to FM, or when the set does not map to a
+// single FM partition; in all of those cases partition (de)activation is
+// skipped.
+func (s *DeviceState) fabricPartitionForPCIBusIDs(pciBusIDs []string) (int, bool) {
+	fm := s.nvdevlib.fmManager
+	if fm == nil {
+		return 0, false
+	}
+	moduleIDs := make([]int, 0, len(pciBusIDs))
+	for _, pci := range pciBusIDs {
+		moduleID, ok := fm.GetModuleIDByPCI(pci)
+		if !ok {
+			klog.Warningf("Fabric Manager: no gpuModuleId for VFIO GPU at PCI %s; skipping partition (de)activation", pci)
+			return 0, false
+		}
+		moduleIDs = append(moduleIDs, moduleID)
+	}
+	partitionID, ok := fm.FindPartitionByModuleIDs(moduleIDs)
+	if !ok {
+		klog.Warningf("Fabric Manager: GPU module set %v does not match any FM partition; skipping partition (de)activation", moduleIDs)
+		return 0, false
+	}
+	return partitionID, true
+}
+
+// activateFabricPartition activates the FM partition formed by the given VFIO GPUs.
+func (s *DeviceState) activateFabricPartition(pciBusIDs []string) error {
+	partitionID, ok := s.fabricPartitionForPCIBusIDs(pciBusIDs)
+	if !ok {
+		return nil
+	}
+	// Idempotency: a retried Prepare (e.g. after a later step failed) must not
+	// re-activate a partition this Manager already activated, which FM would
+	// reject as in-use.
+	if slices.Contains(s.nvdevlib.fmManager.ActivatedPartitions(), partitionID) {
+		klog.V(4).Infof("Fabric Manager: partition %d already active; skipping activation", partitionID)
+		return nil
+	}
+	klog.V(2).Infof("Fabric Manager: activating partition %d for %d-GPU passthrough claim", partitionID, len(pciBusIDs))
+	if err := s.nvdevlib.fmManager.ActivatePartition(partitionID); err != nil {
+		return fmt.Errorf("activating fabric partition %d: %w", partitionID, err)
+	}
+	return nil
+}
+
+// deactivateFabricPartition releases the FM partition formed by the given VFIO
+// GPUs.
+func (s *DeviceState) deactivateFabricPartition(pciBusIDs []string) error {
+	partitionID, ok := s.fabricPartitionForPCIBusIDs(pciBusIDs)
+	if !ok {
+		return nil
+	}
+	if !slices.Contains(s.nvdevlib.fmManager.ActivatedPartitions(), partitionID) {
+		klog.V(4).Infof("Fabric Manager: partition %d already inactive; skipping deactivation", partitionID)
+		return nil
+	}
+	klog.V(2).Infof("Fabric Manager: deactivating partition %d for %d-GPU passthrough claim", partitionID, len(pciBusIDs))
+	if err := s.nvdevlib.fmManager.DeactivatePartition(partitionID); err != nil {
+		return fmt.Errorf("deactivating fabric partition %d: %w", partitionID, err)
+	}
+	return nil
 }
 
 // GetOpaqueDeviceConfigs returns an ordered list of the configs contained in possibleConfigs for this driver.
