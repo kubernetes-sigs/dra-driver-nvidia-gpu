@@ -6,7 +6,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/NVIDIA/go-nvlib v0.10.0
 	github.com/NVIDIA/go-nvml v0.13.0-1.0.20260212130905-92cf8c963449
-	github.com/NVIDIA/nvidia-container-toolkit v1.19.0
+	github.com/NVIDIA/nvidia-container-toolkit v1.19.1
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.28.3
 	github.com/onsi/gomega v1.40.0
@@ -60,7 +60,7 @@ require (
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/opencontainers/cgroups v0.0.6 // indirect
-	github.com/opencontainers/runc v1.4.0 // indirect
+	github.com/opencontainers/runc v1.4.2 // indirect
 	github.com/opencontainers/runtime-spec v1.3.0 // indirect
 	github.com/opencontainers/runtime-tools v0.9.1-0.20251114084447-edf4cb3d2116 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
