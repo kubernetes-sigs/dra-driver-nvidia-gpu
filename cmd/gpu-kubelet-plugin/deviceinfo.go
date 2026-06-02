@@ -27,6 +27,8 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+const compatibilityNumaNodeAttribute resourceapi.QualifiedName = "dra.net/numaNode"
+
 // Represents a specific, full, physical GPU device.
 type GpuInfo struct {
 	UUID                  string `json:"uuid"`
@@ -44,6 +46,7 @@ type GpuInfo struct {
 	pciBusID              string
 	pciBusIDAttr          *deviceattribute.DeviceAttribute
 	pcieRootAttr          *deviceattribute.DeviceAttribute
+	numaNode              *int
 	migProfiles           []*MigProfileInfo
 	addressingMode        *string
 
@@ -184,9 +187,7 @@ func (d *GpuInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.DeviceA
 		attrs[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}
 
-	if d.pciBusIDAttr != nil {
-		attrs[d.pciBusIDAttr.Name] = d.pciBusIDAttr.Value
-	}
+	addCompatibilityNumaNodeAttribute(attrs, d.numaNode)
 
 	if d.addressingMode != nil {
 		attrs["addressingMode"] = resourceapi.DeviceAttribute{
@@ -272,5 +273,16 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 		device.Attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}
 
+	addCompatibilityNumaNodeAttribute(device.Attributes, &d.numaNode)
+
 	return device
+}
+
+func addCompatibilityNumaNodeAttribute(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, numaNode *int) {
+	if numaNode == nil || *numaNode < 0 {
+		return
+	}
+	attrs[compatibilityNumaNodeAttribute] = resourceapi.DeviceAttribute{
+		IntValue: ptr.To(int64(*numaNode)),
+	}
 }

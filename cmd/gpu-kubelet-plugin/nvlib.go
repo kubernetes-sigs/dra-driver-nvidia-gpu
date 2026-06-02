@@ -516,6 +516,15 @@ func (l deviceLib) getGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		return nil, fmt.Errorf("error getting PCI bus ID for device %d: %w", index, err)
 	}
 
+	var numaNode *int
+	if node, ret := device.GetNumaNodeId(); ret == nvml.SUCCESS {
+		numaNode = &node
+	} else if ret == nvml.ERROR_NOT_SUPPORTED || ret == nvml.ERROR_FUNCTION_NOT_FOUND || ret == nvml.ERROR_NOT_FOUND {
+		klog.V(4).Infof("NUMA node ID unavailable for device %d, continuing without attribute: %v", index, ret)
+	} else {
+		return nil, fmt.Errorf("error getting NUMA node ID for device %d: %v", index, ret)
+	}
+
 	// Get the memory-addressing mode supported by the device.
 	// On coherent-memory systems, the possible modes are:
 	//   - HMM  (Hardware Memory Management)
@@ -611,6 +620,7 @@ func (l deviceLib) getGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		pciBusID:              pciBusID,
 		pciBusIDAttr:          pciBusIDAttr,
 		pcieRootAttr:          pcieRootAttr,
+		numaNode:              numaNode,
 		migProfiles:           migProfiles,
 		addressingMode:        addressingMode,
 	}
