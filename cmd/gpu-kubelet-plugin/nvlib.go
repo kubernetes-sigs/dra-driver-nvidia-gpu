@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,6 +50,7 @@ type deviceLib struct {
 	gpuInfosByUUID    map[string]*GpuInfo
 	gpuUUIDbyPCIBusID map[PCIBusID]string
 	devhandleByUUID   map[string]nvml.Device
+	devhandleMu       sync.RWMutex
 }
 
 func newDeviceLib(driverRoot root) (*deviceLib, error) {
@@ -879,7 +881,7 @@ func (l deviceLib) setComputeMode(uuids []string, mode string) error {
 // DynamicMIG mode, this function maintains an NVML handle cache and hence
 // guarantees fast lookups. This is meant to only be called for physical, full
 // GPUs (not MIG devices).
-func (l deviceLib) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.Return) {
+func (l *deviceLib) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.Return) {
 	shutdown, ret := l.ensureNVML()
 	if ret != nvml.SUCCESS {
 		return nil, ret
@@ -893,7 +895,9 @@ func (l deviceLib) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.Return)
 		return l.nvmllib.DeviceGetHandleByUUID(uuid)
 	}
 
+	l.devhandleMu.RLock()
 	dev, exists := l.devhandleByUUID[uuid]
+	l.devhandleMu.RUnlock()
 	if exists {
 		return dev, nvml.SUCCESS
 	}
@@ -918,7 +922,9 @@ func (l deviceLib) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.Return)
 	}
 
 	// Populate `devhandleByUUID` for fast lookup.
+	l.devhandleMu.Lock()
 	l.devhandleByUUID[uuid] = dev
+	l.devhandleMu.Unlock()
 	return dev, ret
 }
 
