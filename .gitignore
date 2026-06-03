@@ -14,3 +14,4 @@ tests-out
 *.tar
 *.tgz
 
+/.agent-shell/
