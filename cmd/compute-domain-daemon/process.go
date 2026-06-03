@@ -47,12 +47,15 @@ func NewProcessManager(cmd []string) *ProcessManager {
 
 // Restart starts or restarts the process.
 func (m *ProcessManager) Restart() error {
+	m.Lock()
+	defer m.Unlock()
+
 	if m.handle != nil {
-		if err := m.stop(); err != nil {
+		if err := m.stopLocked(); err != nil {
 			return fmt.Errorf("restart: stop failed: %w", err)
 		}
 	}
-	return m.start()
+	return m.startLocked()
 }
 
 // EnsureStarted starts the process if it is not already running. If the process
@@ -60,10 +63,13 @@ func (m *ProcessManager) Restart() error {
 // `new`, i.e. it is `true` if the process was _newly_ started. It must be
 // ignored when the returned error is non-nil.
 func (m *ProcessManager) EnsureStarted() (bool, error) {
+	m.Lock()
+	defer m.Unlock()
+
 	if m.handle != nil {
 		return false, nil
 	}
-	return true, m.start()
+	return true, m.startLocked()
 }
 
 // Signal() attempts to send the provided signal to the managed child process.
@@ -78,10 +84,23 @@ func (m *ProcessManager) Signal(s os.Signal) error {
 	return m.handle.Process.Signal(s)
 }
 
-func (m *ProcessManager) start() error {
+// Start starts the process. Returns an error if the process is already running.
+func (m *ProcessManager) Start() error {
 	m.Lock()
 	defer m.Unlock()
+	return m.startLocked()
+}
 
+// Stop gracefully stops the running process by sending SIGTERM and waiting for
+// it to exit. Returns an error if the process is not running.
+func (m *ProcessManager) Stop() error {
+	m.Lock()
+	defer m.Unlock()
+	return m.stopLocked()
+}
+
+// startLocked starts the process. The caller must hold m.Lock().
+func (m *ProcessManager) startLocked() error {
 	if m.handle != nil {
 		return fmt.Errorf("pm: start failed: already started")
 	}
@@ -105,8 +124,8 @@ func (m *ProcessManager) start() error {
 	// Start blocking wait() system call reaping this process once it exits. The
 	// result is written to a buffered channel (that can be peeked into; used to
 	// detect unexpected child termination in Watchdog()). It's OK to give up
-	// control over this goroutine; but it's critical that `m.wait()` is called
-	// at some point during each child's lifecycle to read from the channel.
+	// control over this goroutine; but it's critical that `m.waitLocked()` is
+	// called at some point during each child's lifecycle to read from the channel.
 	go func() {
 		m.waitResChan <- m.handle.Wait()
 	}()
@@ -115,11 +134,10 @@ func (m *ProcessManager) start() error {
 	return nil
 }
 
-// Wait for Wait() syscall result to appear on channel. Expected to block if
-// called from stop(). Log exit code and reset `m.handle` (after which it is
-// safe to call start() again). If the wait() system call that feeds the channel
-// returns an error: fatal.
-func (m *ProcessManager) wait() error {
+// waitLocked waits for the Wait() syscall result to appear on the channel,
+// logs the exit code, and resets m.handle. The caller must hold m.Lock().
+// If the wait() system call that feeds the channel returns an error: fatal.
+func (m *ProcessManager) waitLocked() error {
 	werr := <-m.waitResChan
 	if werr == nil {
 		klog.Infof("Child exited with code 0")
@@ -136,11 +154,9 @@ func (m *ProcessManager) wait() error {
 	return nil
 }
 
-func (m *ProcessManager) stop() error {
-	// Two places may call stop(): i) Restart(), ii) concext cancel handler
-	m.Lock()
-	defer m.Unlock()
-
+// stopLocked sends SIGTERM to the child and waits for it to exit. The caller
+// must hold m.Lock().
+func (m *ProcessManager) stopLocked() error {
 	if m.handle == nil {
 		return fmt.Errorf("pm: stop failed: not started")
 	}
@@ -155,7 +171,7 @@ func (m *ProcessManager) stop() error {
 	// SIGKILL upon timeout, wait again. Update: it's reasonable to leave this
 	// to the k8s orchestration layer.
 	klog.Infof("Wait() for child")
-	if err := m.wait(); err != nil {
+	if err := m.waitLocked(); err != nil {
 		return fmt.Errorf("pm: stop: wait failed: %w", err)
 	}
 
@@ -175,27 +191,41 @@ func (m *ProcessManager) Watchdog(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			m.Lock()
 			klog.Infof("Watchdog: context canceled, attempt to stop child process")
-			if err := m.stop(); err != nil {
+			if err := m.stopLocked(); err != nil {
+				m.Unlock()
 				return fmt.Errorf("watchdog: stop failed: %w", err)
 			}
+			m.Unlock()
 			return nil
 		case <-ticker.C:
 			if !m.lost() {
 				continue
 			}
 
+			m.Lock()
+			// Re-check state after acquiring the lock: another goroutine may
+			// have already reaped the child or restarted it while we were
+			// waiting for the lock.
+			if m.handle == nil || len(m.waitResChan) == 0 {
+				m.Unlock()
+				continue
+			}
+
 			klog.Warningf("Watchdog: child terminated unexpectedly")
-			// `m.wait()` is known to not block at this point.
-			if err := m.wait(); err != nil {
+			// `m.waitLocked()` is known to not block at this point.
+			if err := m.waitLocked(); err != nil {
+				m.Unlock()
 				return fmt.Errorf("watchdog: process lost, wait failed, treat fatal: %w", err)
 			}
 
 			klog.Warningf("Watchdog: start process again")
-			if err := m.Restart(); err != nil {
+			if err := m.startLocked(); err != nil {
+				m.Unlock()
 				return fmt.Errorf("watchdog: process lost, restart failed, treat fatal: %w", err)
 			}
-
+			m.Unlock()
 		}
 	}
 }
@@ -214,7 +244,7 @@ func (m *ProcessManager) lost() bool {
 	}
 
 	if len(m.waitResChan) == 0 {
-		// Currently running: background wait() did not return.
+		// Currently running: background waitLocked() did not return.
 		return false
 	}
 
