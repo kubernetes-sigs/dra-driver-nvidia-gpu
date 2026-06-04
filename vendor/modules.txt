@@ -1,6 +1,10 @@
 # github.com/Masterminds/semver/v3 v3.5.0
 ## explicit; go 1.21
 github.com/Masterminds/semver/v3
+# github.com/NVIDIA/go-nvfm v0.0.0-20260629235037-b587f11880ea
+## explicit; go 1.24
+github.com/NVIDIA/go-nvfm/pkg/dl
+github.com/NVIDIA/go-nvfm/pkg/nvfm
 # github.com/NVIDIA/go-nvlib v0.11.0
 ## explicit; go 1.25.0
 github.com/NVIDIA/go-nvlib/pkg/nvlib/device

@@ -4,6 +4,8 @@ github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAw
 github.com/Masterminds/semver/v3 v3.5.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
+github.com/NVIDIA/go-nvfm v0.0.0-20260629235037-b587f11880ea h1:kbbi2HzDk3dxEQyFqgsdZ6QAQrv1HGf850FjjQwm5Jw=
+github.com/NVIDIA/go-nvfm v0.0.0-20260629235037-b587f11880ea/go.mod h1:jz/LvQcib8nFWUx7JGnFDhi+hERE+PlFYK44wvl+U7M=
 github.com/NVIDIA/go-nvlib v0.11.0 h1:J6c9deWGJ1x4yY7fKg+aOdm2v5+WmCIeCLsuaO3tRtA=
 github.com/NVIDIA/go-nvlib v0.11.0/go.mod h1:uQNH63NoDuSfn/1lixD1D1Hvhko/xdnBHmc4H1mFUlY=
 github.com/NVIDIA/go-nvml v0.13.1-0 h1:iazm3YDW1mYzvuY0uGyFsDvU87Ahr8P9AATN/VD4PZg=

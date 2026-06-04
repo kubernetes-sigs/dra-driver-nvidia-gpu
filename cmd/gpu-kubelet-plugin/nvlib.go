@@ -35,6 +35,7 @@ import (
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/fabricmanager"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
@@ -52,6 +53,7 @@ type deviceLib struct {
 	gpuInfosByUUID    map[string]*GpuInfo
 	gpuUUIDbyPCIBusID map[PCIBusID]string
 	devhandleByUUID   map[string]nvml.Device
+	fmManager         *fabricmanager.Manager
 }
 
 func newDeviceLib(driverRoot root, hostRoot root) (*deviceLib, error) {
@@ -99,7 +101,68 @@ func newDeviceLib(driverRoot root, hostRoot root) (*deviceLib, error) {
 		}
 	}
 
+	// Fabric Manager partitioning is only relevant for GPU passthrough on
+	// NVSwitch-based HGX nodes. When PassthroughSupport is enabled, try to
+	// open a long-lived connection to nv-fabricmanager so VFIO devices can be
+	// published with their gpuModuleId / partition attributes. Failure is
+	// non-fatal: on non-HGX nodes (or when FM is simply not running) we log
+	// and leave d.fmManager nil, and all FM-derived attributes are omitted.
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		d.fmManager = d.tryOpenFabricManager()
+	}
+
 	return &d, nil
+}
+
+// Fabric Manager connection environment variables and their defaults.
+const (
+	// fmAddressEnvvar selects the FM TCP transport and sets the host to
+	// connect to. When this variable is set (even to ""), TCP is used and an
+	// empty value falls back to defaultFMAddress.
+	fmAddressEnvvar = "NVIDIA_FABRICMANAGER_ADDRESS"
+	// fmUnixSocketEnvvar overrides the unix socket path used when TCP is not
+	// selected. An empty value falls back to defaultFMUnixSocket.
+	fmUnixSocketEnvvar = "NVIDIA_FABRICMANAGER_UNIX_SOCKET"
+	// fmLibraryPathEnvvar overrides the libnvfm.so path. An empty value falls
+	// back to defaultFMLibraryPath.
+	fmLibraryPathEnvvar = "NVIDIA_FABRICMANAGER_LIBRARY_PATH"
+
+	defaultFMAddress     = "127.0.0.1"
+	defaultFMUnixSocket  = "/driver-root/run/nvidia-fabricmanager/socket"
+	defaultFMLibraryPath = "/driver-root/usr/lib/x86_64-linux-gnu/libnvfm.so"
+)
+
+// tryOpenFabricManager attempts to build an FM Manager backed by go-nvfm.
+func (l deviceLib) tryOpenFabricManager() *fabricmanager.Manager {
+	libPath := defaultFMLibraryPath
+	if v, ok := os.LookupEnv(fmLibraryPathEnvvar); ok && v != "" {
+		libPath = v
+	}
+	params := fabricmanager.ConnectParams{}
+	if addr, ok := os.LookupEnv(fmAddressEnvvar); ok {
+		if addr == "" {
+			addr = defaultFMAddress
+		}
+		params.AddressInfo = addr
+	} else {
+		socket := defaultFMUnixSocket
+		if v, ok := os.LookupEnv(fmUnixSocketEnvvar); ok && v != "" {
+			socket = v
+		}
+		params.AddressInfo = socket
+		params.AddressIsUnixSocket = true
+	}
+
+	client := fabricmanager.NewClient(libPath, params)
+
+	fmMgr, err := fabricmanager.Open(client)
+	if err != nil {
+		klog.Warningf("Fabric Manager not available, FM attributes will be omitted: %v", err)
+		return nil
+	}
+
+	klog.Infof("Fabric Manager connection established; FM partition attributes enabled")
+	return fmMgr
 }
 
 // prependPathListEnvvar prepends a specified list of strings to a specified envvar and returns its value.
@@ -715,7 +778,72 @@ func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*V
 		vfioModule:             vfioModule,
 	}
 
+	if err := l.attachFabricManagerInfo(vfioDeviceInfo, false); err != nil {
+		return nil, fmt.Errorf("error attaching fabric manager info for %s: %w", device.Address, err)
+	}
+
 	return vfioDeviceInfo, nil
+}
+
+// resolveGpuModuleID resolves a GPU's gpuModuleId directly from NVML by its PCI
+// bus ID. It returns (moduleID, true, nil) when the GPU is visible to NVML,
+// (0, false, nil) when the GPU is not present (e.g. currently bound to vfio-pci
+// and therefore invisible to NVML), and an error for any other NVML failure.
+func (l deviceLib) resolveGpuModuleID(pciBusID string) (int, bool, error) {
+	shutdown, ret := l.ensureNVML()
+	if ret != nvml.SUCCESS {
+		return 0, false, fmt.Errorf("ensureNVML failed: %w", ret)
+	}
+	defer shutdown()
+
+	dev, ret := l.nvmllib.DeviceGetHandleByPciBusId(pciBusID)
+	if ret == nvml.ERROR_NOT_FOUND {
+		return 0, false, nil
+	}
+	if ret != nvml.SUCCESS {
+		return 0, false, fmt.Errorf("getting NVML device handle for PCI %s: %v", pciBusID, ret)
+	}
+	moduleID, ret := dev.GetModuleId()
+	if ret != nvml.SUCCESS {
+		return 0, false, fmt.Errorf("getting gpuModuleId for PCI %s: %v", pciBusID, ret)
+	}
+	return moduleID, true, nil
+}
+
+// attachPartitionAttributes records the given gpuModuleId on the VFIO device
+// and populates its size->partitionId map from the FM partition catalogue.
+func (l deviceLib) attachPartitionAttributes(d *VfioDeviceInfo, moduleID int) error {
+	d.gpuModuleID = moduleID
+	bySize, err := l.fmManager.GetPartitionsBySizeByModuleID(moduleID)
+	if err != nil {
+		return fmt.Errorf("getting partition-by-size mapping for moduleId %d: %w", moduleID, err)
+	}
+	d.partitionsBySize = bySize
+	return nil
+}
+
+// attachFabricManagerInfo resolves the GPU's gpuModuleId from NVML (by PCI bus
+// ID) and (re-)attaches the FM attributes (gpuModuleId / partitionN) onto the
+// given VFIO device. The VFIO device is the source of truth for the PCI <->
+// gpuModuleId mapping.
+func (l deviceLib) attachFabricManagerInfo(d *VfioDeviceInfo, requireNVMLVisible bool) error {
+	if l.fmManager == nil {
+		return nil
+	}
+	moduleID, ok, err := l.resolveGpuModuleID(d.PciBusID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		if requireNVMLVisible {
+			return fmt.Errorf("GPU at PCI %s not yet visible to NVML", d.PciBusID)
+		}
+		klog.Warningf("GPU PCI bus ID %s is not visible to NVML; publishing %s without Fabric Manager attributes. "+
+			"This happens when the GPU was already bound to vfio-pci before discovery (e.g. an active passthrough claim across a plugin restart).",
+			d.PciBusID, d.CanonicalName())
+		return nil
+	}
+	return l.attachPartitionAttributes(d, moduleID)
 }
 
 func (l deviceLib) getMigDevices(gpuInfo *GpuInfo) (map[string]*MigDeviceInfo, error) {
