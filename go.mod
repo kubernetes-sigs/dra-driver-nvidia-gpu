@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
+	github.com/NVIDIA/go-nvfm v0.0.0-20260528194329-0a8cb60d7cb1
 	github.com/NVIDIA/go-nvlib v0.11.0
 	github.com/NVIDIA/go-nvml v0.13.1-0
 	github.com/NVIDIA/nvidia-container-toolkit v1.19.1
@@ -16,6 +17,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
 	github.com/urfave/cli/v2 v2.27.7
+	golang.org/x/sys v0.46.0
 	golang.org/x/time v0.15.0
 	google.golang.org/grpc v1.81.1
 	k8s.io/api v0.36.0-rc.0
@@ -81,7 +83,6 @@ require (
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/term v0.42.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
