@@ -291,6 +291,14 @@ spec:
         - name: HEALTHCHECK_PORT
           value: {{ .Values.kubeletPlugin.containers.gpus.healthcheckPort | quote }}
         {{- end }}
+        {{- if .Values.kubeletPlugin.containers.gpus.deviceEnumerationRetrySteps }}
+        - name: DEVICE_ENUMERATION_RETRY_STEPS
+          value: {{ .Values.kubeletPlugin.containers.gpus.deviceEnumerationRetrySteps | quote }}
+        {{- end }}
+        {{- if .Values.kubeletPlugin.containers.gpus.deviceEnumerationRetryMaxInterval }}
+        - name: DEVICE_ENUMERATION_RETRY_MAX_INTERVAL
+          value: {{ .Values.kubeletPlugin.containers.gpus.deviceEnumerationRetryMaxInterval | quote }}
+        {{- end }}
         {{- with .Values.kubeletPlugin.containers.gpus.env }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

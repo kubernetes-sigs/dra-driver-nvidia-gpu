@@ -65,6 +65,14 @@ type driver struct {
 	// Devices (required for k8s 1.35+) or combined SharedCounters and Devices
 	// in the same slice (required for k8s 1.34).
 	useSplitResourceSlices bool
+
+	// initErr receives at most one error from backgroundInit on terminal failure.
+	initErr chan error
+}
+
+// InitErrors returns a channel that receives at most one error if background init fails terminally.
+func (d *driver) InitErrors() <-chan error {
+	return d.initErr
 }
 
 func NewDriver(ctx context.Context, config *Config) (*driver, error) {
@@ -107,7 +115,9 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 			// completely prepared claims can stay; assuming that the central
 			// scheduler state is equivalent. TODO: review if this logic is correct;
 			// or if it potentially is too invasive for certain edge cases.
-			state.DestroyUnknownMIGDevices(ctx)
+			if state.AllocatableReady() {
+				state.DestroyUnknownMIGDevices(ctx)
+			}
 
 			// Read Kubernetes API server version to determine which ResourceSlice
 			// model to use.
@@ -126,6 +136,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		state:                  state,
 		pulock:                 flock.NewFlock(puLockPath),
 		useSplitResourceSlices: useSplitSlices,
+		initErr:                make(chan error, 1),
 	}
 
 	opts := []kubeletplugin.Option{
@@ -155,20 +166,11 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	driver.healthcheck = healthcheck
 
 	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
-		deviceHealthMonitor, err := newNvmlDeviceHealthMonitor(config, state.perGPUAllocatable, state.nvdevlib)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create NVML device health monitor: %w", err)
+		if state.AllocatableReady() {
+			if err := driver.startDeviceHealthMonitor(ctx, config); err != nil {
+				return nil, err
+			}
 		}
-		if err := deviceHealthMonitor.Start(ctx); err != nil {
-			return nil, fmt.Errorf("failed to start device health monitor: %w", err)
-		}
-		driver.deviceHealthMonitor = deviceHealthMonitor
-
-		driver.wg.Add(1)
-		go func() {
-			defer driver.wg.Done()
-			driver.deviceHealthEvents(ctx, config.flags.nodeName)
-		}()
 	}
 
 	// Pass `nodeUnprepareResource` function to the cleanup manager.
@@ -180,9 +182,82 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		return nil, err
 	}
 
+	// If no device was found during device enumeration in NewDeviceState (issue #1008),
+	// retry in the background instead of blocking startup.
+	//
+	// Why background — if we block, kubelet may time out while registering the gpu plugin.
+	// Helper.PublishResources can be called more than once, so the plugin starts with an empty ResourceSlice
+	// and updates it from backgroundInit once we have devices.
+	//
+	// backgroundInit also runs the steps that need the device list to be ready:
+	// MIG cleanup, health monitor startup, and republish.
+	if !state.AllocatableReady() {
+		driver.wg.Add(1)
+		go driver.backgroundInit(ctx, config)
+	}
+
 	klog.V(4).Infof("Current kubelet plugin registration status: %s", helper.RegistrationStatus())
 
 	return driver, nil
+}
+
+// startDeviceHealthMonitor wires up the NVML device health monitor, caller must ensure AllocatableReady() is true.
+func (d *driver) startDeviceHealthMonitor(ctx context.Context, config *Config) error {
+	deviceHealthMonitor, err := newNvmlDeviceHealthMonitor(config, d.state.perGPUAllocatable, d.state.nvdevlib)
+	if err != nil {
+		return fmt.Errorf("failed to create NVML device health monitor: %w", err)
+	}
+	if err := deviceHealthMonitor.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start device health monitor: %w", err)
+	}
+	d.deviceHealthMonitor = deviceHealthMonitor
+
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		d.deviceHealthEvents(ctx, config.flags.nodeName)
+	}()
+	return nil
+}
+
+// backgroundInit runs the deferred enumeration retry, MIG cleanup, health monitor startup, and ResourceSlice re-publish.
+// On terminal failure it signals via initErr so the process exits non-zero and kubelet restarts the pod.
+func (d *driver) backgroundInit(ctx context.Context, config *Config) {
+	defer d.wg.Done()
+
+	if err := d.state.InitAllocatableBackground(ctx); err != nil {
+		d.reportInitErr(fmt.Errorf("background device enumeration: %w", err))
+		return
+	}
+
+	if featuregates.Enabled(featuregates.DynamicMIG) {
+		if !d.state.IsMigCapable() {
+			klog.Warningf("DynamicMIG enabled but no MIG capable GPU found on this node; falling back to legacy Full GPU support")
+		} else {
+			d.state.DestroyUnknownMIGDevices(ctx)
+		}
+	}
+
+	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
+		if err := d.startDeviceHealthMonitor(ctx, config); err != nil {
+			d.reportInitErr(err)
+			return
+		}
+	}
+
+	if err := d.publishResources(ctx, config); err != nil {
+		d.reportInitErr(fmt.Errorf("republish resources after enumeration: %w", err))
+		return
+	}
+	klog.Infof("Background device enumeration complete; ResourceSlice republished with populated devices")
+}
+
+// reportInitErr writes err to the initErr channel if it is still empty.
+func (d *driver) reportInitErr(err error) {
+	select {
+	case d.initErr <- err:
+	default:
+	}
 }
 
 // GenerateDriverResources() returns the set of DRA ResourceSlices announced by

@@ -285,6 +285,11 @@ kubeletPlugin:
       # Port running a gRPC health service checked by a livenessProbe.
       # Set to a negative value to disable the service and the probe.
       healthcheckPort: 51516
+      # Maximum number of GPU enumeration attempts made at startup.
+      deviceEnumerationRetrySteps: 5
+      # Maximum wait between GPU enumeration retries; the interval grows
+      # exponentially from 1s and is capped here.
+      deviceEnumerationRetryMaxInterval: 30s
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:

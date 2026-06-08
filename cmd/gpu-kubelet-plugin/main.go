@@ -24,6 +24,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/urfave/cli/v2"
 
@@ -46,20 +47,22 @@ const (
 type Flags struct {
 	kubeClientConfig pkgflags.KubeClientConfig
 
-	nodeName                      string
-	namespace                     string
-	httpEndpoint                  string
-	metricsPath                   string
-	cdiRoot                       string
-	containerDriverRoot           string
-	hostDriverRoot                string
-	nvidiaCDIHookPath             string
-	imageName                     string
-	kubeletRegistrarDirectoryPath string
-	kubeletPluginsDirectoryPath   string
-	healthcheckPort               int
-	klogVerbosity                 int
-	additionalXidsToIgnore        string
+	nodeName                          string
+	namespace                         string
+	httpEndpoint                      string
+	metricsPath                       string
+	cdiRoot                           string
+	containerDriverRoot               string
+	hostDriverRoot                    string
+	nvidiaCDIHookPath                 string
+	imageName                         string
+	kubeletRegistrarDirectoryPath     string
+	kubeletPluginsDirectoryPath       string
+	healthcheckPort                   int
+	klogVerbosity                     int
+	additionalXidsToIgnore            string
+	deviceEnumerationRetrySteps       int
+	deviceEnumerationRetryMaxInterval time.Duration
 }
 
 type Config struct {
@@ -161,6 +164,20 @@ func newApp() *cli.App {
 			Value:       "",
 			Destination: &flags.additionalXidsToIgnore,
 			EnvVars:     []string{"ADDITIONAL_XIDS_TO_IGNORE"},
+		},
+		&cli.IntFlag{
+			Name:        "device-enumeration-retry-steps",
+			Usage:       "Maximum number of GPU enumeration attempts.",
+			Value:       5,
+			Destination: &flags.deviceEnumerationRetrySteps,
+			EnvVars:     []string{"DEVICE_ENUMERATION_RETRY_STEPS"},
+		},
+		&cli.DurationFlag{
+			Name:        "device-enumeration-retry-max-interval",
+			Usage:       "Maximum wait between GPU enumeration retries; the interval grows exponentially from 1s and is capped here.",
+			Value:       30 * time.Second,
+			Destination: &flags.deviceEnumerationRetryMaxInterval,
+			EnvVars:     []string{"DEVICE_ENUMERATION_RETRY_MAX_INTERVAL"},
 		},
 		&cli.StringFlag{
 			Name:        "http-endpoint",
@@ -283,11 +300,16 @@ func RunPlugin(ctx context.Context, config *Config) error {
 		return fmt.Errorf("error creating driver: %w", err)
 	}
 
-	<-ctx.Done()
-	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
-		// A canceled context is the normal case here when the process receives
-		// a signal. Only log the error for more interesting cases.
-		klog.Errorf("error from context: %v", err)
+	var initErr error
+	select {
+	case <-ctx.Done():
+		if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
+			// A canceled context is the normal case here when the process
+			// receives a signal. Only log the error for more interesting cases.
+			klog.Errorf("error from context: %v", err)
+		}
+	case initErr = <-driver.InitErrors():
+		klog.Errorf("fatal background init error: %v", initErr)
 	}
 
 	err = driver.Shutdown()
@@ -295,7 +317,7 @@ func RunPlugin(ctx context.Context, config *Config) error {
 		klog.Errorf("unable to cleanly shutdown driver: %v", err)
 	}
 
-	return nil
+	return initErr
 }
 
 // change to config

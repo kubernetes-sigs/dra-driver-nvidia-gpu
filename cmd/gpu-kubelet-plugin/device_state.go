@@ -73,6 +73,10 @@ type DeviceState struct {
 	// (e.g., when announcing one ResourceSlice per physical GPU).
 	perGPUAllocatable *PerGPUAllocatableDevices
 
+	// allocatableReady is closed exactly once when perGPUAllocatable has been populated.
+	allocatableReady     chan struct{}
+	allocatableReadyOnce sync.Once
+
 	nvdevlib          *deviceLib
 	checkpointManager checkpointmanager.CheckpointManager
 
@@ -88,11 +92,6 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	nvdevlib, err := newDeviceLib(containerDriverRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
-	}
-
-	perGPUAllocatable, err := nvdevlib.enumerateAllPossibleDevices()
-	if err != nil {
-		return nil, fmt.Errorf("error enumerating all possible devices: %w", err)
 	}
 
 	hostDriverRoot := config.flags.hostDriverRoot
@@ -128,18 +127,6 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("unable to create CDI handler: %w", err)
 	}
 
-	var fullGPUuuids []string
-	for _, devices := range perGPUAllocatable.allocatablesMap {
-		for _, dev := range devices {
-			if dev.Gpu != nil {
-				fullGPUuuids = append(fullGPUuuids, dev.Gpu.UUID)
-			}
-		}
-	}
-
-	klog.V(2).Infof("Warming up CDI device spec cache for GPUs %v", fullGPUuuids)
-	cdi.WarmupDevSpecCache(fullGPUuuids)
-
 	var tsManager *TimeSlicingManager
 	if featuregates.Enabled(featuregates.TimeSlicingSettings) {
 		tsManager = NewTimeSlicingManager(nvdevlib)
@@ -170,11 +157,12 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		tsManager:         tsManager,
 		mpsManager:        mpsManager,
 		vfioPciManager:    vfioPciManager,
-		perGPUAllocatable: perGPUAllocatable,
+		perGPUAllocatable: &PerGPUAllocatableDevices{allocatablesMap: map[PCIBusID]AllocatableDevices{}},
 		config:            config,
 		nvdevlib:          nvdevlib,
 		checkpointManager: checkpointManager,
 		cplock:            flock.NewFlock(cpLockPath),
+		allocatableReady:  make(chan struct{}),
 	}
 	state.checkpointCleanupManager = NewCheckpointCleanupManager(state, config.clientsets.Resource)
 
@@ -188,9 +176,10 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("read node boot id: %w", err)
 	}
 
+	var cp *Checkpoint
 	for _, c := range checkpoints {
 		if c == DriverPluginCheckpointFileBasename {
-			cp, err := state.getCheckpoint(ctx)
+			cp, err = state.getCheckpoint(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("unable to get checkpoint: %w", err)
 			}
@@ -207,22 +196,36 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 					return nil, fmt.Errorf("unable to update checkpoint: %w", err)
 				}
 				syncPreparedDevicesGaugeFromCheckpoint(config.flags.nodeName, cp)
-				return state, nil
+				break
 			} else if storedBootID == currentBootID {
 				syncPreparedDevicesGaugeFromCheckpoint(config.flags.nodeName, cp)
-				return state, nil
+				break
 			} else {
 				klog.Infof("Invalidating checkpoint: checkpoint nodeBootID %q != current %q", storedBootID, currentBootID)
+				cp = nil
 			}
 		}
 	}
 
-	klog.Infof("Create empty checkpoint")
-	newCheckpoint := &Checkpoint{V2: &CheckpointV2{NodeBootID: currentBootID}}
-	if err := state.createCheckpoint(ctx, newCheckpoint); err != nil {
-		return nil, fmt.Errorf("unable to create fresh checkpoint: %v", err)
+	if cp == nil {
+		klog.Infof("Create empty checkpoint")
+		newCheckpoint := &Checkpoint{V2: &CheckpointV2{NodeBootID: currentBootID}}
+		if err := state.createCheckpoint(ctx, newCheckpoint); err != nil {
+			return nil, fmt.Errorf("unable to create fresh checkpoint: %v", err)
+		}
+		cp = newCheckpoint
 	}
 
+	// Try enumerating devices
+	// If nothing is discovered yet, background retries take over via InitAllocatableBackground.
+	perGPUAllocatable, err := enumerateDevices(nvdevlib, cp)
+	if err != nil {
+		return nil, err
+	}
+	if perGPUAllocatable != nil {
+		warmupCDICache(cdi, perGPUAllocatable)
+		state.finalizeAllocatable(perGPUAllocatable)
+	}
 	return state, nil
 }
 
@@ -1316,7 +1319,7 @@ func (s *DeviceState) AddDeviceTaint(d *AllocatableDevice, taint *resourceapi.De
 	return d.AddOrUpdateTaint(taint)
 }
 
-// Returns false on nodes where GPU hardware is not MIG capable (L4/Ada,T4/Turing)
+// IsMigCapable returns false on nodes where GPU hardware is not MIG capable (L4/Ada, T4/Turing).
 // Used by the driver at startup to gate the DynamicMIG-specific code paths.
 func (s *DeviceState) IsMigCapable() bool {
 	for _, gpu := range s.nvdevlib.gpuInfosByUUID {
@@ -1325,4 +1328,59 @@ func (s *DeviceState) IsMigCapable() bool {
 		}
 	}
 	return false
+}
+
+// AllocatableReady reports whether perGPUAllocatable has been populated with at least one device.
+func (s *DeviceState) AllocatableReady() bool {
+	select {
+	case <-s.allocatableReady:
+		return true
+	default:
+		return false
+	}
+}
+
+// InitAllocatableBackground runs the enumeration retry loop, on success populates perGPUAllocatable and closes allocatableReady.
+func (s *DeviceState) InitAllocatableBackground(ctx context.Context) error {
+	if s.AllocatableReady() {
+		return nil
+	}
+
+	cp, err := s.getCheckpoint(ctx)
+	if err != nil {
+		return fmt.Errorf("unable to read checkpoint before background enumeration: %w", err)
+	}
+	backoff := deviceEnumerationBackoff(s.config.flags)
+	perGPU, err := enumerateDevicesWithRetry(ctx, s.nvdevlib, backoff, cp)
+	if err != nil {
+		return err
+	}
+	warmupCDICache(s.cdi, perGPU)
+	s.finalizeAllocatable(perGPU)
+	return nil
+}
+
+// finalizeAllocatable stores the enumeration result and marks the state ready.
+// Safe to call multiple times, only the first call has effect.
+func (s *DeviceState) finalizeAllocatable(perGPU *PerGPUAllocatableDevices) {
+	s.allocatableReadyOnce.Do(func() {
+		s.Lock()
+		s.perGPUAllocatable = perGPU
+		s.Unlock()
+		close(s.allocatableReady)
+	})
+}
+
+// warmupCDICache populates the CDI device spec cache for every full GPU in perGPU.
+func warmupCDICache(cdi *CDIHandler, perGPU *PerGPUAllocatableDevices) {
+	var fullGPUuuids []string
+	for _, devices := range perGPU.allocatablesMap {
+		for _, dev := range devices {
+			if dev.Gpu != nil {
+				fullGPUuuids = append(fullGPUuuids, dev.Gpu.UUID)
+			}
+		}
+	}
+	klog.V(2).Infof("Warming up CDI device spec cache for GPUs %v", fullGPUuuids)
+	cdi.WarmupDevSpecCache(fullGPUuuids)
 }
