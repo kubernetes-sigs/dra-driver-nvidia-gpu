@@ -54,10 +54,10 @@ func (cp *Checkpoint) MarshalCheckpoint() ([]byte, error) {
 	cp = cp.ToLatestVersion()
 	cp.V1 = cp.V2.ToV1()
 	if err := cp.SetChecksumV1(); err != nil {
-		return nil, fmt.Errorf("error setting v1 checksum: %v", err)
+		return nil, fmt.Errorf("error setting v1 checksum: %w", err)
 	}
 	if err := cp.SetChecksumV2(); err != nil {
-		return nil, fmt.Errorf("error setting v2 checksum: %v", err)
+		return nil, fmt.Errorf("error setting v2 checksum: %w", err)
 	}
 	return json.Marshal(*cp)
 }
