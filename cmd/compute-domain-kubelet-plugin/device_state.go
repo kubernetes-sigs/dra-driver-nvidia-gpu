@@ -514,6 +514,11 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, cs *resourceapi.Reso
 	for c := range configResultsMap {
 		switch config := c.(type) {
 		case *configapi.ComputeDomainChannelConfig:
+			// Host-managed mode never adds the ComputeDomain node label, so
+			// there is nothing to remove here.
+			if featuregates.Enabled(featuregates.HostManagedIMEX) {
+				continue
+			}
 			// If a channel type, remove the ComputeDomain label from the node
 			if err := s.computeDomainManager.RemoveNodeLabel(ctx, config.DomainID); err != nil {
 				return fmt.Errorf("error removing Node label for ComputeDomain: %w", err)
@@ -547,6 +552,18 @@ func (s *DeviceState) applyComputeDomainChannelConfig(ctx context.Context, confi
 		return nil, fmt.Errorf("applyComputeDomainChannelConfig: unexpected results %v", results)
 	}
 
+	hostManaged := featuregates.Enabled(featuregates.HostManagedIMEX)
+	if hostManaged {
+		// Host-managed IMEX exposes only channel 0 and supports only the
+		// default (Single) allocation mode. The opaque config the kubelet sees
+		// is not covered by the ComputeDomain CRD enum, so validate it here
+		// explicitly rather than relying on the AllocationModeAll branch below.
+		if config.AllocationMode != "" && config.AllocationMode != configapi.ComputeDomainChannelAllocationModeSingle {
+			return nil, permanentError{fmt.Errorf("host-managed IMEX supports only allocationMode %q (channel 0); got %q",
+				configapi.ComputeDomainChannelAllocationModeSingle, config.AllocationMode)}
+		}
+	}
+
 	// If explicitly requested, inject all channels instead of just one.
 	chancount := 1
 	if config.AllocationMode == configapi.ComputeDomainChannelAllocationModeAll {
@@ -570,15 +587,23 @@ func (s *DeviceState) applyComputeDomainChannelConfig(ctx context.Context, confi
 		return nil, permanentError{fmt.Errorf("error asserting ComputeDomain's namespace: %w", err)}
 	}
 
-	if err := s.computeDomainManager.AddNodeLabel(ctx, config.DomainID); err != nil {
-		return nil, fmt.Errorf("error adding Node label for ComputeDomain: %w", err)
-	}
+	if !hostManaged {
+		if err := s.computeDomainManager.AddNodeLabel(ctx, config.DomainID); err != nil {
+			return nil, fmt.Errorf("error adding Node label for ComputeDomain: %w", err)
+		}
 
-	if err := s.computeDomainManager.AssertComputeDomainReady(ctx, config.DomainID); err != nil {
-		return nil, fmt.Errorf("error asserting ComputeDomain Ready: %w", err)
+		if err := s.computeDomainManager.AssertComputeDomainReady(ctx, config.DomainID); err != nil {
+			return nil, fmt.Errorf("error asserting ComputeDomain Ready: %w", err)
+		}
 	}
 
 	if s.computeDomainManager.cliqueID == "" {
+		if hostManaged {
+			// Without a clique there is no NVLink fabric to join, so a
+			// host-managed channel claim can never work. Fail loudly instead
+			// of silently skipping device-node injection.
+			return nil, permanentError{fmt.Errorf("host-managed IMEX requires an NVLink clique on this node, but NVML reports none")}
+		}
 		// Do not inject IMEX channel device nodes.
 		return &configState, nil
 	}
@@ -592,6 +617,13 @@ func (s *DeviceState) applyComputeDomainChannelConfig(ctx context.Context, confi
 }
 
 func (s *DeviceState) applyComputeDomainDaemonConfig(ctx context.Context, config *configapi.ComputeDomainDaemonConfig, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult) (*DeviceConfigState, error) {
+	// Host-managed IMEX runs no driver-managed ComputeDomain daemons, so daemon
+	// devices are never published or allocated. A daemon claim reaching Prepare
+	// means a stale or hand-crafted object; reject it permanently.
+	if featuregates.Enabled(featuregates.HostManagedIMEX) {
+		return nil, permanentError{fmt.Errorf("ComputeDomain daemon claims are not supported under the HostManagedIMEX feature gate")}
+	}
+
 	// Get the list of claim requests this config is being applied over.
 	var requests []string
 	for _, r := range results {

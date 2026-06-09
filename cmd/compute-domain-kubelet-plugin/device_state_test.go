@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	"k8s.io/utils/ptr"
@@ -33,6 +34,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	nvfake "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/clientset/versioned/fake"
+	nvinformers "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/informers/externalversions"
 )
 
 type fakeCheckpointManager struct {
@@ -421,6 +425,104 @@ func TestUnprepareMissingClaimIsNoop(t *testing.T) {
 	err := state.Unprepare(context.Background(), claimRef)
 
 	require.NoError(t, err)
+}
+
+func enableHostManagedIMEX(t *testing.T) {
+	t.Helper()
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.HostManagedIMEX): true}))
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.HostManagedIMEX): false}))
+	})
+}
+
+func TestApplyComputeDomainChannelConfigHostManagedRejectsAllocationMode(t *testing.T) {
+	enableHostManagedIMEX(t)
+
+	for _, mode := range []string{configapi.ComputeDomainChannelAllocationModeAll, "foo"} {
+		t.Run(mode, func(t *testing.T) {
+			result := allocationResult("request", DriverName, "channel-0", nil)
+			config := channelConfig("cd-uid")
+			config.AllocationMode = mode
+
+			_, err := (&DeviceState{}).applyComputeDomainChannelConfig(
+				context.Background(),
+				config,
+				claimWithResults("claim-uid", result),
+				[]*resourceapi.DeviceRequestAllocationResult{&result},
+			)
+
+			require.Error(t, err)
+			assert.True(t, isPermanentError(err), "AllocationMode %q must be a permanent error under HostManagedIMEX", mode)
+		})
+	}
+}
+
+func TestApplyComputeDomainDaemonConfigHostManagedRejected(t *testing.T) {
+	enableHostManagedIMEX(t)
+
+	result := allocationResult("request", DriverName, "daemon-0", nil)
+
+	_, err := (&DeviceState{}).applyComputeDomainDaemonConfig(
+		context.Background(),
+		daemonConfig("cd-uid"),
+		claimWithResults("claim-uid", result),
+		[]*resourceapi.DeviceRequestAllocationResult{&result},
+	)
+
+	require.Error(t, err)
+	assert.True(t, isPermanentError(err), "daemon claims must be a permanent error under HostManagedIMEX")
+}
+
+func TestApplyComputeDomainChannelConfigHostManagedRequiresClique(t *testing.T) {
+	enableHostManagedIMEX(t)
+
+	cd := &configapi.ComputeDomain{
+		ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "test-ns", UID: "cd-uid"},
+	}
+
+	// A ComputeDomainManager whose informer already holds the CD (so the
+	// namespace assertion passes) but with an empty cliqueID.
+	factory := nvinformers.NewSharedInformerFactory(nvfake.NewSimpleClientset(), 0)
+	informer := factory.Resource().V1beta1().ComputeDomains().Informer()
+	require.NoError(t, informer.AddIndexers(cache.Indexers{"computeDomainUID": uidIndexer[*configapi.ComputeDomain]}))
+	require.NoError(t, informer.GetIndexer().Add(cd))
+
+	state := &DeviceState{
+		checkpointManager:    &fakeCheckpointManager{checkpoint: checkpointWithClaims(nil)},
+		computeDomainManager: &ComputeDomainManager{informer: informer, cliqueID: ""},
+	}
+
+	config := channelConfig("cd-uid")
+	config.AllocationMode = configapi.ComputeDomainChannelAllocationModeSingle
+	result := allocationResult("request", DriverName, "channel-0", nil)
+	claim := claimWithResults("claim-uid", result)
+	claim.Namespace = "test-ns"
+
+	// AddNodeLabel/AssertComputeDomainReady would dereference the manager's nil
+	// config if they were not skipped; reaching the clique check proves they are.
+	_, err := state.applyComputeDomainChannelConfig(
+		context.Background(),
+		config,
+		claim,
+		[]*resourceapi.DeviceRequestAllocationResult{&result},
+	)
+
+	require.Error(t, err)
+	assert.True(t, isPermanentError(err), "empty clique under HostManagedIMEX must be a permanent error")
+	assert.Contains(t, err.Error(), "clique")
+}
+
+func TestUnprepareDevicesHostManagedSkipsRemoveNodeLabel(t *testing.T) {
+	enableHostManagedIMEX(t)
+
+	// computeDomainManager is intentionally nil: the channel branch must skip
+	// RemoveNodeLabel under HostManagedIMEX, so it must never be dereferenced.
+	state := testDeviceState()
+	status := claimStatus([]resourceapi.DeviceRequestAllocationResult{
+		allocationResult("channel-request", DriverName, "channel-0", nil),
+	})
+
+	require.NoError(t, state.unprepareDevices(context.Background(), &status))
 }
 
 func testDeviceState() *DeviceState {

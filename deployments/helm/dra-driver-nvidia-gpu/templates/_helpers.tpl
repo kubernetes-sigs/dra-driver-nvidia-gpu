@@ -196,3 +196,21 @@ resource.k8s.io/v1beta1
 {{- else -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+HostManagedIMEX feature gate state.
+
+Returns the string "true" only when the HostManagedIMEX feature gate is
+explicitly enabled in .Values.featureGates (boolean true or the string
+"true"), and an empty string otherwise. Empty string is falsy in Helm
+conditionals, so callers can write:
+  {{- if not (include "dra-driver-nvidia-gpu.hostManagedIMEX" .) }}
+The explicit "true" comparison is required so that
+--set-string featureGates.HostManagedIMEX=false (a non-empty, hence
+truthy, string) is not mistaken for enabled.
+*/}}
+{{- define "dra-driver-nvidia-gpu.hostManagedIMEX" -}}
+{{- if eq (toString (dig "HostManagedIMEX" false (.Values.featureGates | default dict))) "true" -}}
+true
+{{- end -}}
+{{- end -}}

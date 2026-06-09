@@ -86,6 +86,7 @@ resources:
 # Examples:
 # featureGates:
 #   ExampleFeature: false              # Project-specific alpha feature
+#   HostManagedIMEX: false             # Operator owns host nvidia-imex; driver only advertises/injects channel 0
 #   ContextualLogging: true            # Kubernetes logging feature (enabled by default)
 #   LoggingAlphaOptions: false         # Kubernetes logging alpha features
 #   LoggingBetaOptions: true           # Kubernetes logging beta features

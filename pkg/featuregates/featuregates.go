@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/component-base/featuregate"
 	logsapi "k8s.io/component-base/logs/api/v1"
+	"k8s.io/klog/v2"
 )
 
 // featureGateEmulationVersion is the version passed to component-base's versioned
@@ -74,6 +75,11 @@ const (
 	// DeviceMetadata allows the kubelet plugin to generate device metadata files
 	// in the workloads for prepared devices.
 	DeviceMetadata featuregate.Feature = "DeviceMetadata"
+
+	// HostManagedIMEX assumes the cluster operator owns the host nvidia-imex
+	// daemon lifecycle. The driver keeps the ComputeDomain API and the channel
+	// injection path but stops creating per-ComputeDomain IMEX DaemonSets.
+	HostManagedIMEX featuregate.Feature = "HostManagedIMEX"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -148,6 +154,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(0, 4),
 		},
 	},
+	HostManagedIMEX: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 5),
+		},
+	},
 }
 
 var (
@@ -190,9 +203,32 @@ func newFeatureGates(version *version.Version) featuregate.MutableVersionedFeatu
 	return fg
 }
 
+// resolveHostManagedIMEXOverrides forces the two driver-managed IMEX gates off
+// when HostManagedIMEX is enabled. It runs before the dependency checks in
+// ValidateFeatureGates so the existing "ComputeDomainCliques requires
+// IMEXDaemonsWithDNSNames" rule trivially holds afterwards. Both overridden
+// gates default to true upstream, so this explicitly sets them false rather
+// than resetting to a default.
+func resolveHostManagedIMEXOverrides(gates featuregate.MutableFeatureGate) {
+	if !gates.Enabled(HostManagedIMEX) {
+		return
+	}
+	if gates.Enabled(IMEXDaemonsWithDNSNames) {
+		klog.Infof("HostManagedIMEX is enabled; forcing IMEXDaemonsWithDNSNames=false")
+		_ = gates.Set("IMEXDaemonsWithDNSNames=false")
+	}
+	if gates.Enabled(ComputeDomainCliques) {
+		klog.Infof("HostManagedIMEX is enabled; forcing ComputeDomainCliques=false")
+		_ = gates.Set("ComputeDomainCliques=false")
+	}
+}
+
 // ValidateFeatureGates validates feature gate dependencies and returns an error if
 // any dependencies are not satisfied.
 func ValidateFeatureGates() error {
+	// Resolve install-wide gate overrides before checking dependencies.
+	resolveHostManagedIMEXOverrides(FeatureGates())
+
 	// ComputeDomainCliques requires IMEXDaemonsWithDNSNames
 	if Enabled(ComputeDomainCliques) && !Enabled(IMEXDaemonsWithDNSNames) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", ComputeDomainCliques, IMEXDaemonsWithDNSNames)

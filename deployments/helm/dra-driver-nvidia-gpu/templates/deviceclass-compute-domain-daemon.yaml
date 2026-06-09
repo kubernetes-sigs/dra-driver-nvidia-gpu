@@ -1,4 +1,4 @@
-{{- if .Values.resources.computeDomains.enabled }}
+{{- if and .Values.resources.computeDomains.enabled (not (include "dra-driver-nvidia-gpu.hostManagedIMEX" .)) }}
 ---
 apiVersion: {{ include "dra-driver-nvidia-gpu.resourceApiVersion" . }}
 kind: DeviceClass

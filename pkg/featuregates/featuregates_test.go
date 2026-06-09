@@ -515,6 +515,18 @@ func TestValidateFeatureGates(t *testing.T) {
 			expectError: false,
 			description: "should be valid when both DeviceMetadata and PassthroughSupport are enabled",
 		},
+		{
+			name:        "HostManagedIMEX enabled alone",
+			fgMap:       map[featuregate.Feature]bool{HostManagedIMEX: true},
+			expectError: false,
+			description: "HostManagedIMEX forces the conflicting gates off, so validation passes",
+		},
+		{
+			name:        "HostManagedIMEX resolves CDCliques-without-DNSNames conflict",
+			fgMap:       map[featuregate.Feature]bool{HostManagedIMEX: true, ComputeDomainCliques: true, IMEXDaemonsWithDNSNames: false},
+			expectError: false,
+			description: "the override forces both gates off before the dependency check runs",
+		},
 	}
 
 	for _, tt := range tests {
@@ -544,4 +556,35 @@ func TestValidateFeatureGates(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveHostManagedIMEXOverrides(t *testing.T) {
+	t.Run("no-op when HostManagedIMEX is disabled", func(t *testing.T) {
+		fg := newFeatureGates(TestVersion)
+		// Both default to true upstream.
+		require.True(t, fg.Enabled(IMEXDaemonsWithDNSNames))
+		require.True(t, fg.Enabled(ComputeDomainCliques))
+
+		resolveHostManagedIMEXOverrides(fg)
+
+		require.True(t, fg.Enabled(IMEXDaemonsWithDNSNames), "should be untouched when HostManagedIMEX is off")
+		require.True(t, fg.Enabled(ComputeDomainCliques), "should be untouched when HostManagedIMEX is off")
+	})
+
+	t.Run("forces dependent gates off when HostManagedIMEX is enabled", func(t *testing.T) {
+		fg := newFeatureGates(TestVersion)
+		require.NoError(t, fg.SetFromMap(map[string]bool{string(HostManagedIMEX): true}))
+
+		resolveHostManagedIMEXOverrides(fg)
+
+		require.True(t, fg.Enabled(HostManagedIMEX))
+		require.False(t, fg.Enabled(IMEXDaemonsWithDNSNames), "HostManagedIMEX must force IMEXDaemonsWithDNSNames off")
+		require.False(t, fg.Enabled(ComputeDomainCliques), "HostManagedIMEX must force ComputeDomainCliques off")
+
+		// The existing dependency validation must pass after the override.
+		oldGates := featureGates
+		featureGates = fg
+		defer func() { featureGates = oldGates }()
+		require.NoError(t, ValidateFeatureGates())
+	})
 }
