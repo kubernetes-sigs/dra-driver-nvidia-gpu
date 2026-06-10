@@ -38,7 +38,6 @@ spec:
       labels:
         {{- include "dra-driver-nvidia-gpu.templateLabels" . | nindent 8 }}
         {{- include "dra-driver-nvidia-gpu.selectorLabels" (dict "context" . "componentName" "kubelet-plugin") | nindent 8 }}
-        nvidia-dra-driver-gpu-component: kubelet-plugin
     spec:
       {{- if .Values.kubeletPlugin.priorityClassName }}
       priorityClassName: {{ .Values.kubeletPlugin.priorityClassName }}
