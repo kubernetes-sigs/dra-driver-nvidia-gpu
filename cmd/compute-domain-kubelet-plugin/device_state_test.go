@@ -410,14 +410,12 @@ func TestPrepareReturnsCheckpointedDevicesForCompletedClaim(t *testing.T) {
 func TestPrepareRejectsMatchingUnpreparedEntry(t *testing.T) {
 	now := metav1.Now()
 	claim := claimWithResults("claim-uid", allocationResult("request", DriverName, "channel-0", nil))
-	claim.ResourceVersion = "rv-1"
 	checkpoint := checkpointWithClaims(map[string]PreparedClaim{
 		"claim-uid": {
 			CheckpointState: ClaimCheckpointStateUnprepareCompleted,
 			Status:          claim.Status,
 			Name:            claim.Name,
 			Namespace:       claim.Namespace,
-			ResourceVersion: claim.ResourceVersion,
 			UnpreparedAt:    &now,
 		},
 	})
@@ -436,21 +434,15 @@ func TestPrepareRejectsMatchingUnpreparedEntry(t *testing.T) {
 
 func TestClaimMatchesPreparedClaim(t *testing.T) {
 	claim := claimWithResults("claim-uid", allocationResult("request", DriverName, "channel-0", nil))
-	claim.ResourceVersion = "rv-1"
 
 	assert.True(t, claimMatchesPreparedClaim(PreparedClaim{
-		Status:          claim.Status,
-		ResourceVersion: "rv-1",
+		Status: claim.Status,
 	}, claim))
 
 	assert.False(t, claimMatchesPreparedClaim(PreparedClaim{
-		Status:          claim.Status,
-		ResourceVersion: "rv-2",
-	}, claim))
-
-	claim.ResourceVersion = ""
-	assert.True(t, claimMatchesPreparedClaim(PreparedClaim{
-		Status: claim.Status,
+		Status: claimStatus([]resourceapi.DeviceRequestAllocationResult{
+			allocationResult("request", DriverName, "daemon-0", nil),
+		}),
 	}, claim))
 }
 
@@ -462,7 +454,6 @@ func TestMarkClaimUnpreparedInCheckpointWritesEntry(t *testing.T) {
 			PreparedDevices: PreparedDevices{
 				{Devices: PreparedDeviceList{preparedChannel(0)}},
 			},
-			ResourceVersion: "rv-1",
 		},
 	})
 	state := testCheckpointDeviceState(checkpoint)
@@ -482,7 +473,6 @@ func TestMarkClaimUnpreparedInCheckpointWritesEntry(t *testing.T) {
 	assert.Equal(t, ClaimCheckpointStateUnprepareCompleted, stored.CheckpointState)
 	assert.Equal(t, "claim", stored.Name)
 	assert.Equal(t, "default", stored.Namespace)
-	assert.Equal(t, "rv-1", stored.ResourceVersion)
 	assert.Nil(t, stored.PreparedDevices)
 	require.NotNil(t, stored.UnpreparedAt)
 }

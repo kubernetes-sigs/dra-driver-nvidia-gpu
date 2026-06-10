@@ -224,7 +224,6 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 			Status:          claim.Status,
 			Name:            claim.Name,
 			Namespace:       claim.Namespace,
-			ResourceVersion: claim.ResourceVersion,
 		}
 	})
 	if err != nil {
@@ -252,7 +251,6 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 			PreparedDevices: preparedDevices,
 			Name:            claim.Name,
 			Namespace:       claim.Namespace,
-			ResourceVersion: claim.ResourceVersion,
 		}
 	})
 	if err != nil {
@@ -341,9 +339,6 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 }
 
 func claimMatchesPreparedClaim(pc PreparedClaim, claim *resourceapi.ResourceClaim) bool {
-	if pc.ResourceVersion != "" && claim.ResourceVersion != "" {
-		return pc.ResourceVersion == claim.ResourceVersion
-	}
 	return apiequality.Semantic.DeepEqual(pc.Status, claim.Status)
 }
 

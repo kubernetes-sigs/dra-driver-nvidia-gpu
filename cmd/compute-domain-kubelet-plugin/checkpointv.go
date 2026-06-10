@@ -90,7 +90,6 @@ type PreparedClaimV2 struct {
 	PreparedDevices PreparedDevices                 `json:"preparedDevices,omitempty"`
 	Name            string                          `json:"name,omitempty"`
 	Namespace       string                          `json:"namespace,omitempty"`
-	ResourceVersion string                          `json:"resourceVersion,omitempty"`
 	UnpreparedAt    *metav1.Time                    `json:"unpreparedAt,omitempty"`
 }
 
