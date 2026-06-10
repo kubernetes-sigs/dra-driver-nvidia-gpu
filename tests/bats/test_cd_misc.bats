@@ -244,6 +244,79 @@ bats::on_failure() {
 
 
 # bats test_tags=fastfeedback
+@test "CDs: daemon Ready -> NotReady transition (not in context of shutdown)" {
+  if [ "${MOCK_NVML:-}" = "true" ]; then skip "requires IMEX daemon"; fi
+  kubectl apply -f demo/specs/imex/channel-injection.yaml
+  kubectl wait --for=condition=READY pods imex-channel-injection --timeout=100s
+  run kubectl logs imex-channel-injection
+  assert_output --partial "channel0"
+
+  local CD_UID
+  CD_UID=$(kubectl describe computedomains.resource.nvidia.com imex-channel-injection | grep UID | awk '{print $2}')
+  log "CD UID: ${CD_UID}"
+
+  local DAEMON_POD
+  DAEMON_POD=$(kubectl get pods -n dra-driver-nvidia-gpu | grep "${CD_UID}" | awk '{print $1}')
+  log "CD daemon pod name: ${DAEMON_POD}"
+
+  sleep 4
+  # Expect global CD status to be Ready.
+  local CD_STATUS
+  CD_STATUS=$(kubectl get computedomain imex-channel-injection -o json | jq '.status.status')
+  log "CD status ${CD_STATUS}"
+  run bats_pipe kubectl get computedomain imex-channel-injection -o json \| jq '.status.status'
+  assert_output --partial 'Ready'
+  refute_output --partial 'NotReady'
+
+  # Find the PID of the IMEX daemon child process inside the daemon pod,
+  # using the /proc filesystem.
+  local IMEX_PID
+  IMEX_PID=$(kubectl exec -n dra-driver-nvidia-gpu "$DAEMON_POD" -- sh -c \
+    'for d in /proc/[0-9]*; do [ "$(cat $d/comm 2>/dev/null)" = "nvidia-imex" ] && echo ${d##*/} && break; done')
+  log "nvidia-imex PID in daemon pod: ${IMEX_PID}"
+
+  # Send SIGSTOP to pause the IMEX daemon child process.
+  kubectl exec -n dra-driver-nvidia-gpu "$DAEMON_POD" -- sh -c "kill -STOP ${IMEX_PID}"
+
+  # Wait for the daemon pod to transition to NotReady.
+  kubectl wait \
+    --for=condition=Ready=false \
+    -n dra-driver-nvidia-gpu pod/"$DAEMON_POD" \
+    --timeout=30s
+
+  # Expect global CD status to be NotReady. The node entry should still be
+  # present (unlike in a shutdown scenario where the node is removed entirely).
+  sleep 4
+  run bats_pipe kubectl get computedomain imex-channel-injection -o json \| jq '.status.status'
+  assert_output --partial 'NotReady'
+
+  # Confirm the node entry is still present with NotReady status — key
+  # distinction from shutdown where the node entry is removed entirely.
+  run bats_pipe kubectl get computedomain imex-channel-injection -o json \| jq '.status.nodes[0].status'
+  assert_output --partial 'NotReady'
+
+  # Resume the IMEX process, transitioning the pod back to Ready.
+  kubectl exec -n dra-driver-nvidia-gpu "$DAEMON_POD" -- sh -c "kill -CONT ${IMEX_PID}"
+
+  # Wait for the daemon pod to transition back to Ready.
+  kubectl wait \
+    --for=condition=Ready \
+    -n dra-driver-nvidia-gpu pod/"$DAEMON_POD" \
+    --timeout=60s
+
+  # Expect global CD status to recover to Ready.
+  sleep 4
+  run bats_pipe kubectl get computedomain imex-channel-injection -o json \| jq '.status.status'
+  assert_output --partial 'Ready'
+  refute_output --partial 'NotReady'
+
+  # Clean up.
+  kubectl delete -f demo/specs/imex/channel-injection.yaml
+  kubectl wait --for=delete pods imex-channel-injection --timeout=10s
+}
+
+
+# bats test_tags=fastfeedback
 @test "CDs: IMEX channel injection (featureGates.ComputeDomainClique=true)" {
   if [ "${MOCK_NVML:-}" = "true" ]; then skip "requires IMEX daemon"; fi
   local _iargs=("--set" "logVerbosity=6" "--set" "featureGates.ComputeDomainCliques=true")
