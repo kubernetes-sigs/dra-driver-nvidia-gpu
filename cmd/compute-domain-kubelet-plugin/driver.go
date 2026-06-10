@@ -123,8 +123,8 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		return nil, fmt.Errorf("error starting ComputeDomain manager: %w", err)
 	}
 
-	// Pass `nodeUnprepareResource` function in the cleanup manager.
-	if err := state.checkpointCleanupManager.Start(ctx, driver.nodeUnprepareResource); err != nil {
+	// Pass checkpoint mutation functions to the cleanup manager.
+	if err := state.checkpointCleanupManager.Start(ctx, driver.nodeUnprepareResource, driver.deleteExpiredUnpreparedClaimEntries); err != nil {
 		return nil, fmt.Errorf("error starting CheckpointCleanupManager: %w", err)
 	}
 
@@ -304,6 +304,16 @@ func (d *driver) nodeUnprepareResource(ctx context.Context, claimRef kubeletplug
 	klog.V(1).Infof("Unprepared devices for claim '%v'", claimRef.String())
 	drametrics.ObserveRequest(DriverName, "unprepare", time.Since(tstart))
 	return true, nil
+}
+
+func (d *driver) deleteExpiredUnpreparedClaimEntries(ctx context.Context, now time.Time, ttl time.Duration) (int, error) {
+	release, err := d.pulock.Acquire(ctx, flock.WithTimeout(10*time.Second))
+	if err != nil {
+		return 0, fmt.Errorf("error acquiring prep/unprep lock: %w", err)
+	}
+	defer release()
+
+	return d.state.deleteExpiredUnpreparedClaimsFromCheckpoint(now, ttl)
 }
 
 // TODO: implement loop to remove CDI files from the CDI path for claimUIDs

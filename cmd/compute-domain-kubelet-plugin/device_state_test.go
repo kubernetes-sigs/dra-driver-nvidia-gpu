@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -406,6 +407,115 @@ func TestPrepareReturnsCheckpointedDevicesForCompletedClaim(t *testing.T) {
 	assert.Equal(t, []kubeletplugin.Device{kubeletplugin.Device(expectedDevice)}, got)
 }
 
+func TestPrepareRejectsMatchingUnpreparedEntry(t *testing.T) {
+	now := metav1.Now()
+	claim := claimWithResults("claim-uid", allocationResult("request", DriverName, "channel-0", nil))
+	claim.ResourceVersion = "rv-1"
+	checkpoint := checkpointWithClaims(map[string]PreparedClaim{
+		"claim-uid": {
+			CheckpointState: ClaimCheckpointStateUnprepareCompleted,
+			Status:          claim.Status,
+			Name:            claim.Name,
+			Namespace:       claim.Namespace,
+			ResourceVersion: claim.ResourceVersion,
+			UnpreparedAt:    &now,
+		},
+	})
+	state := &DeviceState{
+		checkpointManager: &fakeCheckpointManager{checkpoint: checkpoint},
+	}
+
+	got, err := state.Prepare(context.Background(), claim)
+
+	require.Error(t, err)
+	assert.True(t, isPermanentError(err))
+	assert.Contains(t, err.Error(), "claim was already unprepared")
+	assert.Nil(t, got)
+	assert.Equal(t, ClaimCheckpointStateUnprepareCompleted, requireFakeCheckpointManager(t, state).checkpoint.V2.PreparedClaims["claim-uid"].CheckpointState)
+}
+
+func TestClaimMatchesPreparedClaim(t *testing.T) {
+	claim := claimWithResults("claim-uid", allocationResult("request", DriverName, "channel-0", nil))
+	claim.ResourceVersion = "rv-1"
+
+	assert.True(t, claimMatchesPreparedClaim(PreparedClaim{
+		Status:          claim.Status,
+		ResourceVersion: "rv-1",
+	}, claim))
+
+	assert.False(t, claimMatchesPreparedClaim(PreparedClaim{
+		Status:          claim.Status,
+		ResourceVersion: "rv-2",
+	}, claim))
+
+	claim.ResourceVersion = ""
+	assert.True(t, claimMatchesPreparedClaim(PreparedClaim{
+		Status: claim.Status,
+	}, claim))
+}
+
+func TestMarkClaimUnpreparedInCheckpointWritesEntry(t *testing.T) {
+	checkpoint := checkpointWithClaims(map[string]PreparedClaim{
+		"claim-uid": {
+			CheckpointState: ClaimCheckpointStatePrepareCompleted,
+			Status:          claimStatus([]resourceapi.DeviceRequestAllocationResult{allocationResult("request", DriverName, "channel-0", nil)}),
+			PreparedDevices: PreparedDevices{
+				{Devices: PreparedDeviceList{preparedChannel(0)}},
+			},
+			ResourceVersion: "rv-1",
+		},
+	})
+	state := testCheckpointDeviceState(checkpoint)
+	claimRef := kubeletplugin.NamespacedObject{
+		NamespacedName: types.NamespacedName{
+			Namespace: "default",
+			Name:      "claim",
+		},
+		UID: "claim-uid",
+	}
+	pc := checkpoint.V2.PreparedClaims["claim-uid"]
+
+	err := state.markClaimUnpreparedInCheckpoint(claimRef, pc)
+
+	require.NoError(t, err)
+	stored := requireFakeCheckpointManager(t, state).checkpoint.V2.PreparedClaims["claim-uid"]
+	assert.Equal(t, ClaimCheckpointStateUnprepareCompleted, stored.CheckpointState)
+	assert.Equal(t, "claim", stored.Name)
+	assert.Equal(t, "default", stored.Namespace)
+	assert.Equal(t, "rv-1", stored.ResourceVersion)
+	assert.Nil(t, stored.PreparedDevices)
+	require.NotNil(t, stored.UnpreparedAt)
+}
+
+func TestDeleteExpiredUnpreparedClaimsFromCheckpoint(t *testing.T) {
+	now := time.Now()
+	old := metav1.NewTime(now.Add(-UnpreparedClaimEntryTTL - time.Second))
+	fresh := metav1.NewTime(now.Add(-UnpreparedClaimEntryTTL + time.Second))
+	checkpoint := checkpointWithClaims(map[string]PreparedClaim{
+		"old": {
+			CheckpointState: ClaimCheckpointStateUnprepareCompleted,
+			UnpreparedAt:    &old,
+		},
+		"fresh": {
+			CheckpointState: ClaimCheckpointStateUnprepareCompleted,
+			UnpreparedAt:    &fresh,
+		},
+		"completed": {
+			CheckpointState: ClaimCheckpointStatePrepareCompleted,
+		},
+	})
+	state := testCheckpointDeviceState(checkpoint)
+
+	deleted, err := state.deleteExpiredUnpreparedClaimsFromCheckpoint(now, UnpreparedClaimEntryTTL)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, deleted)
+	stored := requireFakeCheckpointManager(t, state).checkpoint.V2.PreparedClaims
+	assert.NotContains(t, stored, "old")
+	assert.Contains(t, stored, "fresh")
+	assert.Contains(t, stored, "completed")
+}
+
 func TestUnprepareMissingClaimIsNoop(t *testing.T) {
 	state := &DeviceState{
 		checkpointManager: &fakeCheckpointManager{checkpoint: checkpointWithClaims(nil)},
@@ -430,6 +540,23 @@ func testDeviceState() *DeviceState {
 			"daemon-0":  &AllocatableDevice{Daemon: &ComputeDomainDaemonInfo{ID: 0}},
 		},
 	}
+}
+
+func testCheckpointDeviceState(checkpoint *Checkpoint) *DeviceState {
+	return &DeviceState{
+		checkpointManager: &fakeCheckpointManager{checkpoint: checkpoint},
+		config: &Config{
+			flags: &Flags{nodeName: "test-node"},
+		},
+	}
+}
+
+func requireFakeCheckpointManager(t *testing.T, state *DeviceState) *fakeCheckpointManager {
+	t.Helper()
+
+	manager, ok := state.checkpointManager.(*fakeCheckpointManager)
+	require.True(t, ok)
+	return manager
 }
 
 func channelConfig(domainID string) *configapi.ComputeDomainChannelConfig {

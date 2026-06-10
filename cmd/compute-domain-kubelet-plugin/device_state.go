@@ -27,9 +27,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pmezard/go-difflib/difflib"
 	resourceapi "k8s.io/api/resource/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/version"
@@ -202,6 +204,9 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		klog.V(4).Infof("Skip prepare: claim already in PrepareCompleted state: %s", ResourceClaimToString(claim))
 		return preparedClaim.PreparedDevices.GetDevices(), nil
 	}
+	if exists && preparedClaim.CheckpointState == ClaimCheckpointStateUnprepareCompleted && claimMatchesPreparedClaim(preparedClaim, claim) {
+		return nil, permanentError{fmt.Errorf("stale prepare for claim %s: claim was already unprepared", ResourceClaimToString(claim))}
+	}
 
 	// In certain scenarios, the same device can be prepared/allocated more than once for different claims
 	// due to races between data processing in different goroutines in the scheduler, or when pods are
@@ -219,6 +224,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 			Status:          claim.Status,
 			Name:            claim.Name,
 			Namespace:       claim.Namespace,
+			ResourceVersion: claim.ResourceVersion,
 		}
 	})
 	if err != nil {
@@ -244,6 +250,9 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 			CheckpointState: ClaimCheckpointStatePrepareCompleted,
 			Status:          claim.Status,
 			PreparedDevices: preparedDevices,
+			Name:            claim.Name,
+			Namespace:       claim.Namespace,
+			ResourceVersion: claim.ResourceVersion,
 		}
 	})
 	if err != nil {
@@ -274,6 +283,10 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 		// Prepare+Checkpoint are done transactionally). Note that
 		// claimRef.String() contains namespace, name, UID.
 		klog.V(2).Infof("Unprepare noop: claim not found in checkpoint data: %v", claimRef.String())
+		return nil
+	}
+	if pc.CheckpointState == ClaimCheckpointStateUnprepareCompleted {
+		klog.V(2).Infof("Unprepare noop: claim already in UnprepareCompleted state: %v", claimRef.String())
 		return nil
 	}
 
@@ -318,12 +331,20 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 	}
 
 	// Mutate checkpoint reflecting that all devices for this claim have been
-	// unprepared, by virtue of removing its UID from the PreparedClaims map.
-	err = s.deleteClaimFromCheckpoint(claimRef)
+	// unprepared. Keep a short-lived entry so stale prepare retries for the
+	// same claim version cannot recreate device state after unprepare.
+	err = s.markClaimUnpreparedInCheckpoint(claimRef, pc)
 	if err != nil {
-		return fmt.Errorf("error deleting claim from checkpoint: %w", err)
+		return fmt.Errorf("error marking claim unprepared in checkpoint: %w", err)
 	}
 	return nil
+}
+
+func claimMatchesPreparedClaim(pc PreparedClaim, claim *resourceapi.ResourceClaim) bool {
+	if pc.ResourceVersion != "" && claim.ResourceVersion != "" {
+		return pc.ResourceVersion == claim.ResourceVersion
+	}
+	return apiequality.Semantic.DeepEqual(pc.Status, claim.Status)
 }
 
 func (s *DeviceState) createCheckpoint(cp *Checkpoint) error {
@@ -398,15 +419,64 @@ func (s *DeviceState) updateCheckpoint(mutate func(*Checkpoint)) error {
 	return nil
 }
 
-func (s *DeviceState) deleteClaimFromCheckpoint(claimRef kubeletplugin.NamespacedObject) error {
+func (s *DeviceState) markClaimUnpreparedInCheckpoint(claimRef kubeletplugin.NamespacedObject, pc PreparedClaim) error {
+	unpreparedAt := metav1.Now()
+	pc.CheckpointState = ClaimCheckpointStateUnprepareCompleted
+	pc.PreparedDevices = nil
+	pc.Name = claimRef.Name
+	pc.Namespace = claimRef.Namespace
+	pc.UnpreparedAt = &unpreparedAt
+
 	err := s.updateCheckpoint(func(cp *Checkpoint) {
-		delete(cp.V2.PreparedClaims, string(claimRef.UID))
+		cp.V2.PreparedClaims[string(claimRef.UID)] = pc
 	})
 	if err != nil {
 		return fmt.Errorf("unable to update checkpoint: %w", err)
 	}
-	klog.V(6).Infof("Deleted claim from checkpoint: %s", claimRef.String())
+	klog.V(6).Infof("Marked claim unprepared in checkpoint: %s", claimRef.String())
 	return nil
+}
+
+func (s *DeviceState) deleteExpiredUnpreparedClaimsFromCheckpoint(now time.Time, ttl time.Duration) (int, error) {
+	s.Lock()
+	defer s.Unlock()
+
+	checkpoint, err := s.getCheckpoint()
+	if err != nil {
+		return 0, fmt.Errorf("unable to get checkpoint: %w", err)
+	}
+
+	expired := expiredUnpreparedClaimEntries(checkpoint, now, ttl)
+	if len(expired) == 0 {
+		return 0, nil
+	}
+
+	err = s.updateCheckpoint(func(cp *Checkpoint) {
+		for _, uid := range expired {
+			delete(cp.V2.PreparedClaims, uid)
+		}
+	})
+	if err != nil {
+		return 0, fmt.Errorf("unable to update checkpoint: %w", err)
+	}
+	return len(expired), nil
+}
+
+func expiredUnpreparedClaimEntries(cp *Checkpoint, now time.Time, ttl time.Duration) []string {
+	var expired []string
+	if cp == nil || cp.V2 == nil {
+		return expired
+	}
+	for uid, claim := range cp.V2.PreparedClaims {
+		if claim.CheckpointState != ClaimCheckpointStateUnprepareCompleted {
+			continue
+		}
+		if claim.UnpreparedAt == nil || now.Sub(claim.UnpreparedAt.Time) >= ttl {
+			expired = append(expired, uid)
+		}
+	}
+	slices.Sort(expired)
+	return expired
 }
 
 func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.ResourceClaim) (PreparedDevices, error) {

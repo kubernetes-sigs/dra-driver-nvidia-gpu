@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 
 	resourceapi "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 
@@ -59,9 +60,10 @@ func (c CheckpointedDevice) MarshalJSON() ([]byte, error) {
 type ClaimCheckpointState string
 
 const (
-	ClaimCheckpointStateUnset            ClaimCheckpointState = ""
-	ClaimCheckpointStatePrepareStarted   ClaimCheckpointState = "PrepareStarted"
-	ClaimCheckpointStatePrepareCompleted ClaimCheckpointState = "PrepareCompleted"
+	ClaimCheckpointStateUnset              ClaimCheckpointState = ""
+	ClaimCheckpointStatePrepareStarted     ClaimCheckpointState = "PrepareStarted"
+	ClaimCheckpointStatePrepareCompleted   ClaimCheckpointState = "PrepareCompleted"
+	ClaimCheckpointStateUnprepareCompleted ClaimCheckpointState = "UnprepareCompleted"
 )
 
 // Latest version type aliases
@@ -88,6 +90,8 @@ type PreparedClaimV2 struct {
 	PreparedDevices PreparedDevices                 `json:"preparedDevices,omitempty"`
 	Name            string                          `json:"name,omitempty"`
 	Namespace       string                          `json:"namespace,omitempty"`
+	ResourceVersion string                          `json:"resourceVersion,omitempty"`
+	UnpreparedAt    *metav1.Time                    `json:"unpreparedAt,omitempty"`
 }
 
 // V1 types
