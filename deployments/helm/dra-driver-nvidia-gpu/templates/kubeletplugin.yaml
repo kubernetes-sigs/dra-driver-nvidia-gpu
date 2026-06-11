@@ -303,6 +303,8 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
         volumeMounts:
+        - name: run-nvidia-fabricmanager
+          mountPath: /run/nvidia-fabricmanager
         - name: plugins-registry
           mountPath: {{ .Values.kubeletPlugin.kubeletRegistrarDirectoryPath | quote }}
         - name: plugins
@@ -327,6 +329,10 @@ spec:
         {{- end }}
       {{- end }}
       volumes:
+      - name: run-nvidia-fabricmanager
+        hostPath:
+          path: /run/nvidia-fabricmanager
+          type: DirectoryOrCreate
       - name: plugins-registry
         hostPath:
           path: {{ .Values.kubeletPlugin.kubeletRegistrarDirectoryPath | quote }}
