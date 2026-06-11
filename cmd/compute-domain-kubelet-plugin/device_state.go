@@ -283,10 +283,6 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 		klog.V(2).Infof("Unprepare noop: claim not found in checkpoint data: %v", claimRef.String())
 		return nil
 	}
-	if pc.CheckpointState == ClaimCheckpointStatePrepareAborted {
-		klog.V(2).Infof("Unprepare noop: claim in PrepareAborted state: %v", claimRef.String())
-		return nil
-	}
 
 	// If pc.Status.Allocation is 'nil', attempt to pull the status from the API
 	// server. This should only ever happen if we have unmarshaled from a legacy
@@ -318,6 +314,9 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 		if err := s.unprepareDevices(ctx, &pc.Status); err != nil {
 			return fmt.Errorf("unprepare devices failed: %w", err)
 		}
+	case ClaimCheckpointStatePrepareAborted:
+		klog.V(2).Infof("Unprepare noop: claim in PrepareAborted state: %v", claimRef.String())
+		return nil
 	default:
 		return fmt.Errorf("unsupported ClaimCheckpointState: %v", pc.CheckpointState)
 	}
