@@ -125,14 +125,12 @@ const (
 
 // tryOpenFabricManager attempts to build an FM Manager backed by go-nvfm.
 func (l deviceLib) tryOpenFabricManager() *fabricmanager.Manager {
-	klog.Infof("!!!!!!!!!!!tryOpenFabricManager")
 	shutdown, ret := l.ensureNVML()
 	if ret != nvml.SUCCESS {
 		klog.Warningf("Fabric Manager: NVML unavailable, skipping FM discovery: %s", ret)
 		return nil
 	}
 	defer shutdown()
-	klog.Infof("!!!!!!!!!!!ensureNVML done")
 
 	libPath := defaultFMLibraryPath
 	if v, ok := os.LookupEnv(fmLibraryPathEnvvar); ok && v != "" {
@@ -161,7 +159,7 @@ func (l deviceLib) tryOpenFabricManager() *fabricmanager.Manager {
 		return nil
 	}
 
-	klog.Infof("!!!!!!!!!!!Fabric Manager connection established; FM partition attributes enabled")
+	klog.Infof("Fabric Manager connection established; FM partition attributes enabled")
 	return fmMgr
 }
 
@@ -791,7 +789,9 @@ func (l deviceLib) attachFabricManagerInfo(d *VfioDeviceInfo) error {
 	}
 	moduleID, ok := l.fmManager.GetModuleIDByPCI(d.PciBusID)
 	if !ok {
-		klog.V(2).Infof("Fabric Manager has no record of GPU PCI bus ID %s; skipping FM attributes", d.PciBusID)
+		klog.Warningf("Fabric Manager has no gpuModuleId for GPU PCI bus ID %s; publishing %s without FM attributes. "+
+			"This happens when FM could not supply a PCI address for this GPU (e.g. it was already bound to vfio-pci before nv-fabricmanager started).",
+			d.PciBusID, d.CanonicalName())
 		return nil
 	}
 	d.gpuModuleID = moduleID

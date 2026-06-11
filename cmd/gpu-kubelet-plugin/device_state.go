@@ -954,18 +954,6 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 }
 
 func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices PreparedDeviceList) error {
-	// Release the NVSwitch fabric partition before rebinding the GPUs to the
-	// nvidia driver (reverse order of prepare).
-	pciBusIDs := []string{}
-	for _, device := range devices {
-		if device.Vfio.Info != nil && device.Vfio.Info.PciBusID != "" {
-			pciBusIDs = append(pciBusIDs, device.Vfio.Info.PciBusID)
-		}
-	}
-	if err := s.deactivateFabricPartition(pciBusIDs); err != nil {
-		return err
-	}
-
 	for _, device := range devices {
 		vfioAllocatable := s.perGPUAllocatable.GetAllocatableDevice(device.Vfio.Device.DeviceName)
 		if vfioAllocatable == nil {
@@ -974,6 +962,18 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 		if err := s.vfioPciManager.Unconfigure(ctx, vfioAllocatable.Vfio); err != nil {
 			return fmt.Errorf("error unconfiguring vfio device %q: %w", device.Vfio.Device.DeviceName, err)
 		}
+	}
+
+	// Release the NVSwitch fabric partition before rebinding the GPUs to the
+	// nvidia driver
+	pciBusIDs := []string{}
+	for _, device := range devices {
+		if device.Vfio.Info != nil && device.Vfio.Info.PciBusID != "" {
+			pciBusIDs = append(pciBusIDs, device.Vfio.Info.PciBusID)
+		}
+	}
+	if err := s.deactivateFabricPartition(pciBusIDs); err != nil {
+		return err
 	}
 	return nil
 }
