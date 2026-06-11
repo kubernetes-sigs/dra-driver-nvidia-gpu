@@ -85,10 +85,8 @@ iupgrade_wait() {
   # not natively supported by `kubectl wait`, hence this must be something of
   # the shape
   # `kubectl get pods ... | xargs -I{} kubectl wait --for=condition=Ready pod/{} `
-  # TODO: change `nvidia-dra-driver-gpu-component` when last stable supports both, the
-  # new and the old label key
   sleep 1
-  kubectl wait --for=condition=READY pods -A -l nvidia-dra-driver-gpu-component=kubelet-plugin --timeout=15s
+  kubectl wait --for=condition=READY pods -A -l dra-driver-nvidia-gpu-component=kubelet-plugin --timeout=15s
 
   # Again, log current state.
   kubectl get pods -n dra-driver-nvidia-gpu
@@ -96,7 +94,7 @@ iupgrade_wait() {
   # That one should be obvious now, but make that guarantee explicit for
   # consuming tests. Skip when compute domains are disabled (no controller deployment).
   if [ "${DISABLE_COMPUTE_DOMAINS:-}" != "true" ]; then
-    kubectl wait --for=condition=READY pods -A -l nvidia-dra-driver-gpu-component=controller --timeout=10s
+    kubectl wait --for=condition=READY pods -A -l dra-driver-nvidia-gpu-component=controller --timeout=10s
   fi
   # maybe: check version on labels (to confirm that we set labels correctly)
   log "iupgrade_wait: done"

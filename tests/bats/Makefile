@@ -20,8 +20,8 @@ TEST_CHART_REPO ?= "oci://gcr.io/k8s-staging-nvidia/charts/dra-driver-nvidia-gpu
 TEST_CHART_VERSION ?= "$(VERSION_STAGING_CHART)"
 
 # The baseline Helm chart to test upgrades from and downgrades to.
-TEST_CHART_LASTSTABLE_REPO ?= "oci://ghcr.io/nvidia/k8s-dra-driver-gpu"
-TEST_CHART_LASTSTABLE_VERSION ?= "25.12.0-0882da87-chart"
+TEST_CHART_LASTSTABLE_REPO ?= "oci://registry.k8s.io/dra-driver-nvidia/charts/dra-driver-nvidia-gpu"
+TEST_CHART_LASTSTABLE_VERSION ?= "0.4.0"
 
 # If not "false": the to-be-tested Helm chart is installed from the local
 # filesystem (from `deployments/helm/dra-driver-nvidia-gpu`). Make sure

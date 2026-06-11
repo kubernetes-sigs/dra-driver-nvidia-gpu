@@ -35,7 +35,6 @@ spec:
       labels:
         {{- include "dra-driver-nvidia-gpu.templateLabels" . | nindent 8 }}
         {{- include "dra-driver-nvidia-gpu.selectorLabels" (dict "context" . "componentName" "controller") | nindent 8 }}
-        nvidia-dra-driver-gpu-component: controller
     spec:
       {{- if .Values.controller.priorityClassName }}
       priorityClassName: {{ .Values.controller.priorityClassName }}

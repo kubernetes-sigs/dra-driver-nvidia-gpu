@@ -54,7 +54,7 @@ bats::on_failure() {
   _node=$(kubectl get pod "${_podname}" -o jsonpath='{.spec.nodeName}')
   log "workload runs on node: ${_node}"
   _kpod=$(kubectl get pods -n dra-driver-nvidia-gpu \
-    -l nvidia-dra-driver-gpu-component=kubelet-plugin \
+    -l dra-driver-nvidia-gpu-component=kubelet-plugin \
     --field-selector spec.nodeName="${_node}" \
     -o jsonpath='{.items[0].metadata.name}')
   log "kubelet-plugin pod on that node: ${_kpod}"
@@ -119,7 +119,7 @@ bats::on_failure() {
   _node=$(kubectl get pod "${_podname}" -o jsonpath='{.spec.nodeName}')
   log "workload runs on node: ${_node}"
   _kpod=$(kubectl get pods -n dra-driver-nvidia-gpu \
-    -l nvidia-dra-driver-gpu-component=kubelet-plugin \
+    -l dra-driver-nvidia-gpu-component=kubelet-plugin \
     --field-selector spec.nodeName="${_node}" \
     -o jsonpath='{.items[0].metadata.name}')
   log "kubelet-plugin pod on that node: ${_kpod}"
@@ -172,7 +172,7 @@ bats::on_failure() {
   # Stage 2: pick any kubelet plugin pod.
   local _kpod _node
   _kpod=$(kubectl get pods -n dra-driver-nvidia-gpu \
-    -l nvidia-dra-driver-gpu-component=kubelet-plugin \
+    -l dra-driver-nvidia-gpu-component=kubelet-plugin \
     -o jsonpath='{.items[0].metadata.name}')
   _node=$(kubectl get pod -n dra-driver-nvidia-gpu "${_kpod}" -o jsonpath='{.spec.nodeName}')
   log "targeting plugin pod ${_kpod} on node ${_node}"
@@ -200,7 +200,7 @@ bats::on_failure() {
   local _newkpod="" _deadline=$((SECONDS + 60))
   while true; do
     _newkpod=$(kubectl get pods -n dra-driver-nvidia-gpu \
-      -l nvidia-dra-driver-gpu-component=kubelet-plugin \
+      -l dra-driver-nvidia-gpu-component=kubelet-plugin \
       --field-selector spec.nodeName="${_node}" \
       -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
     if [ -n "${_newkpod}" ] && [ "${_newkpod}" != "${_kpod}" ]; then
