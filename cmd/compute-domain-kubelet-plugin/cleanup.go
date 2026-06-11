@@ -33,7 +33,7 @@ import (
 
 const (
 	ResourceClaimCleanupInterval = 10 * time.Minute
-	UnpreparedClaimEntryTTL      = 2 * ErrorRetryMaxTimeout
+	PrepareAbortedClaimEntryTTL  = 2 * ErrorRetryMaxTimeout
 )
 
 type TypeUnprepCallable = func(ctx context.Context, claimRef kubeletplugin.NamespacedObject) (bool, error)
@@ -96,7 +96,7 @@ func (m *CheckpointCleanupManager) Stop() error {
 // cleanup() is the high-level cleanup routine run once upon plugin startup and
 // then periodically. It gets all claims in PrepareStarted state from the
 // current checkpoint, and runs `unprepareIfStale()` for each of them. It also
-// removes expired UnprepareCompleted entries. Each invocation of `cleanup()`
+// removes expired PrepareAborted entries. Each invocation of `cleanup()`
 // and each invocation of `unprepareIfStale()` is best-effort: errors do not
 // need to be propagated (but are expected to be properly logged).
 //
@@ -132,13 +132,13 @@ func (m *CheckpointCleanupManager) cleanup(ctx context.Context) {
 		m.unprepareIfStale(ctx, cpuid, cpclaim)
 	}
 
-	expiredEntries, err := m.expiredEntryCleanupFn(ctx, time.Now(), UnpreparedClaimEntryTTL)
+	expiredEntries, err := m.expiredEntryCleanupFn(ctx, time.Now(), PrepareAbortedClaimEntryTTL)
 	if err != nil {
-		klog.Warningf("Checkpointed RC cleanup: unable to delete expired unprepared claim entries: %s", err)
+		klog.Warningf("Checkpointed RC cleanup: unable to delete expired PrepareAborted claim entries: %s", err)
 		return
 	}
 	if expiredEntries > 0 {
-		klog.V(4).Infof("Checkpointed RC cleanup: deleted expired unprepared claim entries: %d", expiredEntries)
+		klog.V(4).Infof("Checkpointed RC cleanup: deleted expired PrepareAborted claim entries: %d", expiredEntries)
 	}
 }
 

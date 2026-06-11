@@ -124,7 +124,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 
 	// Pass checkpoint mutation functions to the cleanup manager.
-	if err := state.checkpointCleanupManager.Start(ctx, driver.nodeUnprepareResource, driver.deleteExpiredUnpreparedClaimEntries); err != nil {
+	if err := state.checkpointCleanupManager.Start(ctx, driver.nodeUnprepareResource, driver.deleteExpiredPrepareAbortedClaimEntries); err != nil {
 		return nil, fmt.Errorf("error starting CheckpointCleanupManager: %w", err)
 	}
 
@@ -306,14 +306,14 @@ func (d *driver) nodeUnprepareResource(ctx context.Context, claimRef kubeletplug
 	return true, nil
 }
 
-func (d *driver) deleteExpiredUnpreparedClaimEntries(ctx context.Context, now time.Time, ttl time.Duration) (int, error) {
+func (d *driver) deleteExpiredPrepareAbortedClaimEntries(ctx context.Context, now time.Time, ttl time.Duration) (int, error) {
 	release, err := d.pulock.Acquire(ctx, flock.WithTimeout(10*time.Second))
 	if err != nil {
 		return 0, fmt.Errorf("error acquiring prep/unprep lock: %w", err)
 	}
 	defer release()
 
-	return d.state.deleteExpiredUnpreparedClaimsFromCheckpoint(now, ttl)
+	return d.state.deleteExpiredPrepareAbortedClaimsFromCheckpoint(now, ttl)
 }
 
 // TODO: implement loop to remove CDI files from the CDI path for claimUIDs

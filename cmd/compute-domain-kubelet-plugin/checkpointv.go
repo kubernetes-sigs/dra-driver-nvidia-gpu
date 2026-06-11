@@ -60,10 +60,10 @@ func (c CheckpointedDevice) MarshalJSON() ([]byte, error) {
 type ClaimCheckpointState string
 
 const (
-	ClaimCheckpointStateUnset              ClaimCheckpointState = ""
-	ClaimCheckpointStatePrepareStarted     ClaimCheckpointState = "PrepareStarted"
-	ClaimCheckpointStatePrepareCompleted   ClaimCheckpointState = "PrepareCompleted"
-	ClaimCheckpointStateUnprepareCompleted ClaimCheckpointState = "UnprepareCompleted"
+	ClaimCheckpointStateUnset            ClaimCheckpointState = ""
+	ClaimCheckpointStatePrepareStarted   ClaimCheckpointState = "PrepareStarted"
+	ClaimCheckpointStatePrepareCompleted ClaimCheckpointState = "PrepareCompleted"
+	ClaimCheckpointStatePrepareAborted   ClaimCheckpointState = "PrepareAborted"
 )
 
 // Latest version type aliases
@@ -90,7 +90,7 @@ type PreparedClaimV2 struct {
 	PreparedDevices PreparedDevices                 `json:"preparedDevices,omitempty"`
 	Name            string                          `json:"name,omitempty"`
 	Namespace       string                          `json:"namespace,omitempty"`
-	UnpreparedAt    *metav1.Time                    `json:"unpreparedAt,omitempty"`
+	AbortedAt       *metav1.Time                    `json:"abortedAt,omitempty"`
 }
 
 // V1 types

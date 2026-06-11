@@ -407,16 +407,16 @@ func TestPrepareReturnsCheckpointedDevicesForCompletedClaim(t *testing.T) {
 	assert.Equal(t, []kubeletplugin.Device{kubeletplugin.Device(expectedDevice)}, got)
 }
 
-func TestPrepareRejectsMatchingUnpreparedEntry(t *testing.T) {
+func TestPrepareRejectsMatchingPrepareAbortedEntry(t *testing.T) {
 	now := metav1.Now()
 	claim := claimWithResults("claim-uid", allocationResult("request", DriverName, "channel-0", nil))
 	checkpoint := checkpointWithClaims(map[string]PreparedClaim{
 		"claim-uid": {
-			CheckpointState: ClaimCheckpointStateUnprepareCompleted,
+			CheckpointState: ClaimCheckpointStatePrepareAborted,
 			Status:          claim.Status,
 			Name:            claim.Name,
 			Namespace:       claim.Namespace,
-			UnpreparedAt:    &now,
+			AbortedAt:       &now,
 		},
 	})
 	state := &DeviceState{
@@ -427,9 +427,9 @@ func TestPrepareRejectsMatchingUnpreparedEntry(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, isPermanentError(err))
-	assert.Contains(t, err.Error(), "claim was already unprepared")
+	assert.Contains(t, err.Error(), "claim prepare was already aborted")
 	assert.Nil(t, got)
-	assert.Equal(t, ClaimCheckpointStateUnprepareCompleted, requireFakeCheckpointManager(t, state).checkpoint.V2.PreparedClaims["claim-uid"].CheckpointState)
+	assert.Equal(t, ClaimCheckpointStatePrepareAborted, requireFakeCheckpointManager(t, state).checkpoint.V2.PreparedClaims["claim-uid"].CheckpointState)
 }
 
 func TestClaimMatchesPreparedClaim(t *testing.T) {
@@ -446,10 +446,10 @@ func TestClaimMatchesPreparedClaim(t *testing.T) {
 	}, claim))
 }
 
-func TestMarkClaimUnpreparedInCheckpointWritesEntry(t *testing.T) {
+func TestMarkClaimPrepareAbortedInCheckpointWritesEntry(t *testing.T) {
 	checkpoint := checkpointWithClaims(map[string]PreparedClaim{
 		"claim-uid": {
-			CheckpointState: ClaimCheckpointStatePrepareCompleted,
+			CheckpointState: ClaimCheckpointStatePrepareStarted,
 			Status:          claimStatus([]resourceapi.DeviceRequestAllocationResult{allocationResult("request", DriverName, "channel-0", nil)}),
 			PreparedDevices: PreparedDevices{
 				{Devices: PreparedDeviceList{preparedChannel(0)}},
@@ -466,29 +466,50 @@ func TestMarkClaimUnpreparedInCheckpointWritesEntry(t *testing.T) {
 	}
 	pc := checkpoint.V2.PreparedClaims["claim-uid"]
 
-	err := state.markClaimUnpreparedInCheckpoint(claimRef, pc)
+	err := state.markClaimPrepareAbortedInCheckpoint(claimRef, pc)
 
 	require.NoError(t, err)
 	stored := requireFakeCheckpointManager(t, state).checkpoint.V2.PreparedClaims["claim-uid"]
-	assert.Equal(t, ClaimCheckpointStateUnprepareCompleted, stored.CheckpointState)
+	assert.Equal(t, ClaimCheckpointStatePrepareAborted, stored.CheckpointState)
 	assert.Equal(t, "claim", stored.Name)
 	assert.Equal(t, "default", stored.Namespace)
 	assert.Nil(t, stored.PreparedDevices)
-	require.NotNil(t, stored.UnpreparedAt)
+	require.NotNil(t, stored.AbortedAt)
 }
 
-func TestDeleteExpiredUnpreparedClaimsFromCheckpoint(t *testing.T) {
+func TestDeleteClaimFromCheckpoint(t *testing.T) {
+	checkpoint := checkpointWithClaims(map[string]PreparedClaim{
+		"claim-uid": {
+			CheckpointState: ClaimCheckpointStatePrepareCompleted,
+		},
+	})
+	state := testCheckpointDeviceState(checkpoint)
+	claimRef := kubeletplugin.NamespacedObject{
+		NamespacedName: types.NamespacedName{
+			Namespace: "default",
+			Name:      "claim",
+		},
+		UID: "claim-uid",
+	}
+
+	err := state.deleteClaimFromCheckpoint(claimRef)
+
+	require.NoError(t, err)
+	assert.NotContains(t, requireFakeCheckpointManager(t, state).checkpoint.V2.PreparedClaims, "claim-uid")
+}
+
+func TestDeleteExpiredPrepareAbortedClaimsFromCheckpoint(t *testing.T) {
 	now := time.Now()
-	old := metav1.NewTime(now.Add(-UnpreparedClaimEntryTTL - time.Second))
-	fresh := metav1.NewTime(now.Add(-UnpreparedClaimEntryTTL + time.Second))
+	old := metav1.NewTime(now.Add(-PrepareAbortedClaimEntryTTL - time.Second))
+	fresh := metav1.NewTime(now.Add(-PrepareAbortedClaimEntryTTL + time.Second))
 	checkpoint := checkpointWithClaims(map[string]PreparedClaim{
 		"old": {
-			CheckpointState: ClaimCheckpointStateUnprepareCompleted,
-			UnpreparedAt:    &old,
+			CheckpointState: ClaimCheckpointStatePrepareAborted,
+			AbortedAt:       &old,
 		},
 		"fresh": {
-			CheckpointState: ClaimCheckpointStateUnprepareCompleted,
-			UnpreparedAt:    &fresh,
+			CheckpointState: ClaimCheckpointStatePrepareAborted,
+			AbortedAt:       &fresh,
 		},
 		"completed": {
 			CheckpointState: ClaimCheckpointStatePrepareCompleted,
@@ -496,7 +517,7 @@ func TestDeleteExpiredUnpreparedClaimsFromCheckpoint(t *testing.T) {
 	})
 	state := testCheckpointDeviceState(checkpoint)
 
-	deleted, err := state.deleteExpiredUnpreparedClaimsFromCheckpoint(now, UnpreparedClaimEntryTTL)
+	deleted, err := state.deleteExpiredPrepareAbortedClaimsFromCheckpoint(now, PrepareAbortedClaimEntryTTL)
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, deleted)
