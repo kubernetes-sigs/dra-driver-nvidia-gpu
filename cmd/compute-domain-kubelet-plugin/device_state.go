@@ -310,9 +310,21 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 	}
 
 	switch pc.CheckpointState {
-	case ClaimCheckpointStatePrepareStarted, ClaimCheckpointStatePrepareCompleted:
+	case ClaimCheckpointStatePrepareCompleted:
 		if err := s.unprepareDevices(ctx, &pc.Status); err != nil {
 			return fmt.Errorf("unprepare devices failed: %w", err)
+		}
+		if err := s.deleteClaimFromCheckpoint(claimRef); err != nil {
+			return fmt.Errorf("error deleting completed claim from checkpoint: %w", err)
+		}
+	case ClaimCheckpointStatePrepareStarted:
+		if err := s.unprepareDevices(ctx, &pc.Status); err != nil {
+			return fmt.Errorf("unprepare devices failed: %w", err)
+		}
+		// Keep a short-lived PrepareAborted entry so stale prepare retries for the
+		// same claim version cannot recreate device state after unprepare.
+		if err := s.markClaimPrepareAbortedInCheckpoint(claimRef, pc); err != nil {
+			return fmt.Errorf("error marking claim PrepareAborted in checkpoint: %w", err)
 		}
 	case ClaimCheckpointStatePrepareAborted:
 		klog.V(2).Infof("Unprepare noop: claim in PrepareAborted state: %v", claimRef.String())
@@ -325,19 +337,6 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 	// error to be permanent: drop the claim from checkpoint then regardless?
 	if err := s.cdi.DeleteClaimSpecFileIfExists(claimUID); err != nil {
 		return fmt.Errorf("unable to delete CDI spec file for claim: %w", err)
-	}
-
-	if pc.CheckpointState == ClaimCheckpointStatePrepareCompleted {
-		if err := s.deleteClaimFromCheckpoint(claimRef); err != nil {
-			return fmt.Errorf("error deleting completed claim from checkpoint: %w", err)
-		}
-		return nil
-	}
-
-	// Keep a short-lived PrepareAborted entry so stale prepare retries for the
-	// same claim version cannot recreate device state after unprepare.
-	if err := s.markClaimPrepareAbortedInCheckpoint(claimRef, pc); err != nil {
-		return fmt.Errorf("error marking claim PrepareAborted in checkpoint: %w", err)
 	}
 	return nil
 }
