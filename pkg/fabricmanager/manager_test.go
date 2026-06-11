@@ -172,6 +172,17 @@ func gpus(ids ...int) []PartitionGPU {
 	return out
 }
 
+// gpusWithPCI builds partition GPU members that carry both a moduleId and the
+// PCI bus ID FM would report for it, as on a real node. pci maps moduleId ->
+// PCI bus ID.
+func gpusWithPCI(pci map[int]string, ids ...int) []PartitionGPU {
+	out := make([]PartitionGPU, len(ids))
+	for i, id := range ids {
+		out[i] = PartitionGPU{PhysicalID: id, PCIBusID: pci[id]}
+	}
+	return out
+}
+
 // eightGPUNode returns an NVML mock with 8 GPUs whose moduleIds are 1..8 and
 // whose PCI bus IDs follow the canonical 8-digit-domain form NVML reports.
 func eightGPUNode() *fakeLib {
@@ -299,6 +310,82 @@ func TestDiscoverFMPartitionReferencesUnknownGPU(t *testing.T) {
 	}}
 	if _, err := Open(eightGPUNode(), client, ConnectParams{}); err == nil {
 		t.Errorf("expected error for unknown gpuModuleId, got nil")
+	}
+}
+
+// TestDiscoverPassthroughGPUVisibleOnlyToFM covers a GPU bound to vfio-pci at
+// Open time: NVML cannot enumerate it, but FM still reports it (with its PCI
+// bus ID) across its partitions. The module map must be completed from FM data
+// so the passthrough GPU is resolvable and recordsPartitions does not fail.
+func TestDiscoverPassthroughGPUVisibleOnlyToFM(t *testing.T) {
+	// NVML sees only modules 1 and 2; module 3 is bound to vfio-pci and is
+	// therefore invisible to NVML.
+	lib := newFakeLib(
+		fakeDevice{moduleID: 1, pciBusID: "00000000:3B:00.0"},
+		fakeDevice{moduleID: 2, pciBusID: "00000000:5C:00.0"},
+	)
+
+	pci := map[int]string{
+		1: "00000000:3B:00.0",
+		2: "00000000:5C:00.0",
+		3: "0000:9d:00.0", // passthrough GPU, not in NVML; lower-case 4-digit form
+	}
+	client := &fakeClient{partitions: []Partition{
+		{ID: 1, GPUs: gpusWithPCI(pci, 1, 2, 3)},
+		{ID: 2, GPUs: gpusWithPCI(pci, 3)},
+	}}
+
+	m, err := Open(lib, client, ConnectParams{})
+	if err != nil {
+		t.Fatalf("Open with passthrough GPU: %v", err)
+	}
+	defer m.Close()
+
+	// The FM-only GPU must be resolvable in both directions, with the PCI bus
+	// ID normalized to the canonical 8-digit-domain upper-case form.
+	if id, ok := m.GetModuleIDByPCI("00000000:9D:00.0"); !ok || id != 3 {
+		t.Errorf("GetModuleIDByPCI(passthrough) = (%d, %v), want (3, true)", id, ok)
+	}
+	if pciID, ok := m.GetPCIByModuleID(3); !ok || pciID != "00000000:9D:00.0" {
+		t.Errorf("GetPCIByModuleID(3) = (%q, %v), want (00000000:9D:00.0, true)", pciID, ok)
+	}
+
+	// NVML-visible GPUs still resolve as before.
+	if id, ok := m.GetModuleIDByPCI("00000000:3B:00.0"); !ok || id != 1 {
+		t.Errorf("GetModuleIDByPCI(nvml) = (%d, %v), want (1, true)", id, ok)
+	}
+
+	// The passthrough GPU's partitions are discoverable.
+	if parts := m.GetPartitionsByModuleID(3); !reflect.DeepEqual(parts, []int{1, 2}) {
+		t.Errorf("GetPartitionsByModuleID(3) = %v, want [1 2]", parts)
+	}
+}
+
+// TestDiscoverAllGPUsInPassthrough covers a node where every GPU is bound to
+// vfio-pci, so NVML enumerates zero devices (a count of 0 is not an NVML
+// error). The entire module map must come from FM.
+func TestDiscoverAllGPUsInPassthrough(t *testing.T) {
+	lib := newFakeLib() // NVML sees nothing.
+
+	pci := map[int]string{
+		1: "00000000:3B:00.0",
+		2: "00000000:5C:00.0",
+	}
+	client := &fakeClient{partitions: []Partition{
+		{ID: 1, GPUs: gpusWithPCI(pci, 1, 2)},
+		{ID: 8, GPUs: gpusWithPCI(pci, 1)},
+	}}
+
+	m, err := Open(lib, client, ConnectParams{})
+	if err != nil {
+		t.Fatalf("Open with all GPUs in passthrough: %v", err)
+	}
+	defer m.Close()
+
+	for mod, want := range pci {
+		if got, ok := m.GetPCIByModuleID(mod); !ok || got != want {
+			t.Errorf("GetPCIByModuleID(%d) = (%q, %v), want (%q, true)", mod, got, ok, want)
+		}
 	}
 }
 

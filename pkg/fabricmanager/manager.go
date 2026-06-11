@@ -24,6 +24,7 @@ import (
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"golang.org/x/sys/unix"
+	"k8s.io/klog/v2"
 )
 
 // Manager is the in-memory view this package exposes to the rest of the DRA
@@ -99,6 +100,9 @@ func Open(lib NVMLDeviceLister, client Client, params ConnectParams) (*Manager, 
 		_ = client.Shutdown()
 		return nil, fmt.Errorf("fabricmanager: fmGetSupportedFabricPartitions: %w", err)
 	}
+
+	m.augmentPCIModuleIDMapFromFM(partitions)
+
 	if err := m.recordsPartitions(partitions); err != nil {
 		_ = client.Disconnect()
 		_ = client.Shutdown()
@@ -189,10 +193,54 @@ func (m *Manager) pciIdToGpuModuleIdMap(lib NVMLDeviceLister) error {
 	return nil
 }
 
+// augmentPCIModuleIDMapFromFM fills in (PCI bus ID, gpuModuleId) entries for
+// GPUs that FM reports but NVML could not enumerate. For example, when there is
+// a GPU already bound to the vfio-pci driver for passthrough when the Manager
+// opens: such a GPU is invisible to NVML (which depends on the nvidia kernel
+// driver) yet still reported by FM, which enumerates over the NVLink fabric
+// independent of the host PCI driver binding.
+func (m *Manager) augmentPCIModuleIDMapFromFM(parts []Partition) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, p := range parts {
+		for _, g := range p.GPUs {
+			pciBusID := normalizePCIBusID(g.PCIBusID)
+			if pciBusID == "" {
+				continue
+			}
+
+			// NVML remains authoritative for GPUs bound to the nvidia driver; this only
+			// adds module IDs that are not already present, and never overwrites an
+			// existing NVML-derived entry. The same GPU normally appears in several FM
+			// partitions of different sizes, so repeated (PCI, moduleId) pairs are
+			// expected and de-duplicated here. FM GPUs whose PCIBusID is empty are skipped
+			// (nothing to map). Conflicts between the NVML- and FM-derived views are
+			// logged and the NVML value is kept, since NVML is authoritative for devices
+			// it can actually see.
+			if existingPCI, ok := m.pciByGpuModuleID[g.PhysicalID]; ok {
+				if existingPCI != pciBusID {
+					klog.Warningf("fabricmanager: NVML and FM disagree on PCI bus ID for gpuModuleId %d (NVML=%q, FM=%q); keeping NVML value",
+						g.PhysicalID, existingPCI, pciBusID)
+				}
+				continue
+			}
+			if existingMod, ok := m.gpuModuleIDByPCI[pciBusID]; ok && existingMod != g.PhysicalID {
+				klog.Warningf("fabricmanager: FM reports PCI bus ID %q as gpuModuleId %d but it is already mapped to gpuModuleId %d; skipping",
+					pciBusID, g.PhysicalID, existingMod)
+				continue
+			}
+
+			klog.V(2).Infof("fabricmanager: adding FM-only GPU to module map: PCI=%s gpuModuleId=%d (not visible to NVML, e.g. vfio-pci passthrough)",
+				pciBusID, g.PhysicalID)
+			m.gpuModuleIDByPCI[pciBusID] = g.PhysicalID
+			m.pciByGpuModuleID[g.PhysicalID] = pciBusID
+		}
+	}
+}
+
 // recordsPartitions records the FM-supplied partitions, validating that every
-// gpuModuleId referenced by FM corresponds to a GPU NVML enumerated on this
-// node. A mismatch usually indicates that NVML and FM disagree about the
-// node's GPU inventory and is treated as an error.
+// gpuModuleId referenced by FM corresponds to a GPU present in the module map.
 func (m *Manager) recordsPartitions(parts []Partition) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -215,7 +263,7 @@ func (m *Manager) recordsPartitions(parts []Partition) error {
 			}
 			seen[g.PhysicalID] = struct{}{}
 			if _, known := pciByGpuModuleID[g.PhysicalID]; !known {
-				return fmt.Errorf("fabricmanager: partition %d references unknown gpuModuleId %d (not present in NVML)",
+				return fmt.Errorf("fabricmanager: partition %d references unknown gpuModuleId %d (not present in NVML or FM PCI inventory)",
 					p.ID, g.PhysicalID)
 			}
 		}

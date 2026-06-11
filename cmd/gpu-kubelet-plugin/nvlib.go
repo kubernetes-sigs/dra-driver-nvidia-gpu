@@ -50,13 +50,7 @@ type deviceLib struct {
 	gpuInfosByUUID    map[string]*GpuInfo
 	gpuUUIDbyPCIBusID map[PCIBusID]string
 	devhandleByUUID   map[string]nvml.Device
-
-	// fmManager talks to nv-fabricmanager and exposes the per-GPU
-	// gpuModuleId / partition mapping that drives Fabric Manager-aware
-	// ResourceSlice publishing on HGX nodes. It is nil on nodes where
-	// Fabric Manager is not available; all FM-derived attributes are then
-	// silently omitted from announced devices.
-	fmManager *fabricmanager.Manager
+	fmManager         *fabricmanager.Manager
 }
 
 func newDeviceLib(driverRoot root) (*deviceLib, error) {
@@ -111,10 +105,7 @@ func newDeviceLib(driverRoot root) (*deviceLib, error) {
 	return &d, nil
 }
 
-// Fabric Manager connection environment variables and their defaults. By
-// default the driver connects to nv-fabricmanager over its unix socket; set
-// NVIDIA_FABRICMANAGER_ADDRESS to connect over TCP instead (the FM port is
-// implied by the SDK).
+// Fabric Manager connection environment variables and their defaults.
 const (
 	// fmAddressEnvvar selects the FM TCP transport and sets the host to
 	// connect to. When this variable is set (even to ""), TCP is used and an
@@ -132,11 +123,7 @@ const (
 	defaultFMLibraryPath = "/usr/lib/libnvfm.so"
 )
 
-// tryOpenFabricManager attempts to build an FM Manager backed by go-nvfm. It
-// returns nil (and logs a warning) on any failure so the kubelet plugin keeps
-// running with FM-derived attributes omitted. NVML must be available while
-// Open walks the GPUs to build the gpuModuleId <-> PCI map; ensureNVML
-// guarantees that for the duration of the call.
+// tryOpenFabricManager attempts to build an FM Manager backed by go-nvfm.
 func (l deviceLib) tryOpenFabricManager() *fabricmanager.Manager {
 	klog.Infof("!!!!!!!!!!!tryOpenFabricManager")
 	shutdown, ret := l.ensureNVML()
@@ -153,8 +140,6 @@ func (l deviceLib) tryOpenFabricManager() *fabricmanager.Manager {
 	}
 	client := fabricmanager.NewClient(libPath)
 
-	// Prefer TCP only when NVIDIA_FABRICMANAGER_ADDRESS is explicitly set;
-	// otherwise connect over the unix socket (the default transport).
 	params := fabricmanager.ConnectParams{}
 	if addr, ok := os.LookupEnv(fmAddressEnvvar); ok {
 		if addr == "" {
@@ -796,15 +781,11 @@ func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*V
 
 // attachFabricManagerInfo populates the gpuModuleId and partitionN attributes
 // on the given VFIO device from the FM Manager, if one is wired up. It is a
-// no-op when fmManager is nil so non-HGX nodes (or nodes where FM is not
-// available) continue to publish ResourceSlices unchanged.
+// no-op when fmManager is nil.
 //
 // A PCI bus ID known to the host but unknown to FM is treated as
-// non-fatal: we log and skip the FM attributes for that GPU. This avoids
-// failing the entire kubelet plugin if FM and NVML disagree about a single
-// device, while still surfacing the discrepancy in logs.
+// non-fatal: we log and skip the FM attributes for that GPU.
 func (l deviceLib) attachFabricManagerInfo(d *VfioDeviceInfo) error {
-	klog.Infof("!!!!!!!!!!!attachFabricManagerInfo: %s", d.CanonicalName())
 	if l.fmManager == nil {
 		return nil
 	}

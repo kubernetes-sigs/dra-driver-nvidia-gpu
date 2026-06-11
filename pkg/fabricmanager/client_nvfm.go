@@ -24,13 +24,7 @@ import (
 
 // nvfmClient is a Client backed by NVIDIA's go-nvfm bindings, which wrap the
 // Fabric Manager C SDK (libnvfm.so / libnvidia-fabricmanager.so) loaded at
-// runtime via dlopen. It translates this package's transport-neutral types to
-// and from the nvfm package's generated types.
-//
-// A working nv-fabricmanager daemon and the FM shared library are required at
-// runtime; the constructor itself does not load anything (the library is
-// opened lazily by Init), so constructing an nvfmClient on a node without FM
-// is harmless until Init/Connect are called.
+// runtime via dlopen.
 type nvfmClient struct {
 	lib    nvfm.Interface
 	handle nvfm.Handle
