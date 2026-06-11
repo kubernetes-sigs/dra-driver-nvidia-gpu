@@ -37,16 +37,19 @@ const (
 	nvidiaDriver                 = "nvidia"
 	hostRoot                     = "/host-root"
 	sysModulePath                = "/sys/module"
-	pciDevicesPath               = "/sys/bus/pci/devices"
 	vfioDevicesRoot              = "/dev/vfio"
 	vfioDevicesPath              = "/dev/vfio/devices"
 	iommuDevicePath              = "/dev/iommu"
 	nvidiaPersistencedSocketPath = "/run/nvidia-persistenced/socket"
 	unbindFromDriverScript       = "/usr/bin/unbind_from_driver.sh"
 	bindToDriverScript           = "/usr/bin/bind_to_driver.sh"
+	pciDriversProbePath          = "/sys/bus/pci/drivers_probe"
 	gpuFreeCheckInterval         = 1 * time.Second
 	gpuFreeCheckTimeout          = 60 * time.Second
 )
+
+// pciDevicesPath is a variable (not const) to allow test overrides with a mock sysfs.
+var pciDevicesPath = "/sys/bus/pci/devices"
 
 type VfioPciManager struct {
 	sync.Mutex
@@ -55,10 +58,12 @@ type VfioPciManager struct {
 	driver              string
 	nvlib               *deviceLib
 	nvidiaEnabled       bool
-	// companionDrivers tracks the original driver of each non-GPU device in the
-	// GPU's IOMMU group that was switched to vfio-pci during Configure().
-	// Key: PCI address, Value: original driver name (empty string = had no driver).
-	companionDrivers map[string]string
+	// companionMu protects companionDrivers from concurrent access.
+	companionMu sync.Mutex
+	// companionDrivers tracks the original driver of each non-GPU companion device
+	// that was switched to vfio-pci during Configure(), keyed by GPU PCI address.
+	// Outer key: GPU PCI address, inner key: companion PCI address, value: original driver.
+	companionDrivers map[string]map[string]string
 }
 
 func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib *deviceLib, nvidiaEnabled bool) (*VfioPciManager, error) {
@@ -87,7 +92,7 @@ func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib 
 		driver:              vfioPciDriver,
 		nvlib:               nvlib,
 		nvidiaEnabled:       nvidiaEnabled,
-		companionDrivers:    make(map[string]string),
+		companionDrivers:    make(map[string]map[string]string),
 	}
 
 	return vm, nil
@@ -390,19 +395,14 @@ func execCommand(cmd string, args []string) ([]byte, error) {
 // PCIe root ports and bridges (class 0x06xx) are skipped as they do not need to
 // be bound to vfio-pci for VFIO group viability.
 func getIommuGroupCompanions(gpuPciBusID string) ([]string, error) {
-	// /sys/bus/pci/devices/<gpu>/iommu_group is a symlink like
-	// "../../kernel/iommu_groups/<N>". Resolve the devices subdirectory.
-	iommuGroupLink := filepath.Join(pciDevicesPath, gpuPciBusID, "iommu_group")
-	iommuGroupTarget, err := os.Readlink(iommuGroupLink)
+	iommuGroupPath, err := resolveIommuGroupDevicesPath(gpuPciBusID)
 	if err != nil {
-		return nil, fmt.Errorf("error reading iommu_group symlink for %q: %w", gpuPciBusID, err)
+		return nil, err
 	}
-	// iommuGroupTarget is relative to the symlink location, e.g. "../../kernel/iommu_groups/6"
-	devicesPath := filepath.Join(pciDevicesPath, gpuPciBusID, iommuGroupTarget, "devices")
 
-	entries, err := os.ReadDir(devicesPath)
+	entries, err := os.ReadDir(iommuGroupPath)
 	if err != nil {
-		return nil, fmt.Errorf("error reading IOMMU group devices at %q: %w", devicesPath, err)
+		return nil, fmt.Errorf("error reading IOMMU group devices at %q: %w", iommuGroupPath, err)
 	}
 
 	var companions []string
@@ -412,14 +412,12 @@ func getIommuGroupCompanions(gpuPciBusID string) ([]string, error) {
 			continue // skip the GPU itself
 		}
 
-		// Skip PCIe bridges and root ports (PCI class code 0x06xx).
-		classPath := filepath.Join(pciDevicesPath, devName, "class")
-		classBytes, err := os.ReadFile(classPath)
+		isBridge, err := isPCIBridgeDevice(devName)
 		if err != nil {
 			klog.Warningf("Could not read PCI class for %s, skipping: %v", devName, err)
 			continue
 		}
-		if strings.HasPrefix(strings.TrimSpace(string(classBytes)), "0x06") {
+		if isBridge {
 			klog.V(4).Infof("Skipping PCIe bridge/port %s in IOMMU group", devName)
 			continue
 		}
@@ -427,6 +425,26 @@ func getIommuGroupCompanions(gpuPciBusID string) ([]string, error) {
 		companions = append(companions, devName)
 	}
 	return companions, nil
+}
+
+// resolveIommuGroupDevicesPath resolves the IOMMU group devices directory for a PCI device.
+func resolveIommuGroupDevicesPath(pciBusID string) (string, error) {
+	iommuGroupLink := filepath.Join(pciDevicesPath, pciBusID, "iommu_group")
+	iommuGroupTarget, err := os.Readlink(iommuGroupLink)
+	if err != nil {
+		return "", fmt.Errorf("error reading iommu_group symlink for %q: %w", pciBusID, err)
+	}
+	return filepath.Join(pciDevicesPath, pciBusID, iommuGroupTarget, "devices"), nil
+}
+
+// isPCIBridgeDevice returns true if the PCI device is a bridge or root port (class 0x06xx).
+func isPCIBridgeDevice(pciBusID string) (bool, error) {
+	classPath := filepath.Join(pciDevicesPath, pciBusID, "class")
+	classBytes, err := os.ReadFile(classPath)
+	if err != nil {
+		return false, err
+	}
+	return strings.HasPrefix(strings.TrimSpace(string(classBytes)), "0x06"), nil
 }
 
 // bindIommuGroupCompanions switches every non-bridge companion device in the GPU's
@@ -437,6 +455,11 @@ func (vm *VfioPciManager) bindIommuGroupCompanions(gpuPciBusID string) error {
 		return err
 	}
 
+	vm.companionMu.Lock()
+	defer vm.companionMu.Unlock()
+
+	gpuCompanions := make(map[string]string)
+
 	for _, dev := range companions {
 		origDriver := ""
 		if d, err := getDriver(pciDevicesPath, dev); err == nil {
@@ -445,7 +468,7 @@ func (vm *VfioPciManager) bindIommuGroupCompanions(gpuPciBusID string) error {
 
 		if origDriver == vfioPciDriver {
 			klog.V(4).Infof("IOMMU companion %s already bound to vfio-pci", dev)
-			vm.companionDrivers[dev] = origDriver
+			gpuCompanions[dev] = origDriver
 			continue
 		}
 
@@ -463,19 +486,46 @@ func (vm *VfioPciManager) bindIommuGroupCompanions(gpuPciBusID string) error {
 			return fmt.Errorf("error binding companion %s to vfio-pci: %w (output: %s)", dev, err, string(out))
 		}
 
-		vm.companionDrivers[dev] = origDriver
+		gpuCompanions[dev] = origDriver
 	}
+
+	vm.companionDrivers[gpuPciBusID] = gpuCompanions
 	return nil
+}
+
+// isCompanionStillNeeded returns true if the companion device is still referenced
+// by another configured GPU (i.e. a GPU other than excludeGPU).
+func (vm *VfioPciManager) isCompanionStillNeeded(companionDev, excludeGPU string) bool {
+	for gpu, companions := range vm.companionDrivers {
+		if gpu == excludeGPU {
+			continue
+		}
+		if _, ok := companions[companionDev]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // restoreIommuGroupCompanions unbinds companion devices from vfio-pci and
 // triggers re-probe so the kernel re-attaches their original drivers.
+// Only companions that are not still needed by other configured GPUs are restored.
 func (vm *VfioPciManager) restoreIommuGroupCompanions(gpuPciBusID string) {
-	if len(vm.companionDrivers) == 0 {
+	vm.companionMu.Lock()
+	defer vm.companionMu.Unlock()
+
+	gpuCompanions, ok := vm.companionDrivers[gpuPciBusID]
+	if !ok || len(gpuCompanions) == 0 {
 		return
 	}
 
-	for dev, origDriver := range vm.companionDrivers {
+	for dev, origDriver := range gpuCompanions {
+		// Skip if another configured GPU still needs this companion bound to vfio-pci.
+		if vm.isCompanionStillNeeded(dev, gpuPciBusID) {
+			klog.V(4).Infof("Companion %s still needed by another GPU, skipping restore", dev)
+			continue
+		}
+
 		klog.Infof("Restoring IOMMU group companion %s to %q for GPU %s", dev, origDriver, gpuPciBusID)
 
 		// Unbind from vfio-pci.
@@ -484,18 +534,17 @@ func (vm *VfioPciManager) restoreIommuGroupCompanions(gpuPciBusID string) {
 		}
 
 		// Clear driver_override so the kernel will use its normal probe logic.
+		// Writing "\n" triggers the kernel's driver_override_store to free the override.
 		overridePath := filepath.Join(pciDevicesPath, dev, "driver_override")
-		if err := os.WriteFile(overridePath, []byte(""), 0600); err != nil {
+		if err := os.WriteFile(overridePath, []byte("\n"), 0600); err != nil {
 			klog.Warningf("Could not clear driver_override for %s: %v", dev, err)
 		}
 
-		// Trigger re-probe: write the PCI address to /sys/bus/pci/drivers_probe.
-		probePath := "/sys/bus/pci/drivers_probe"
-		if err := os.WriteFile(probePath, []byte(dev), 0600); err != nil {
+		// Trigger re-probe so the kernel re-attaches the original driver.
+		if err := os.WriteFile(pciDriversProbePath, []byte(dev), 0600); err != nil {
 			klog.Warningf("Could not trigger re-probe for %s: %v — companion may need manual rebind", dev, err)
 		}
 	}
 
-	// Clear the map after restoration.
-	vm.companionDrivers = make(map[string]string)
+	delete(vm.companionDrivers, gpuPciBusID)
 }
