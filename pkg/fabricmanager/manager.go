@@ -140,13 +140,14 @@ func (m *Manager) Close() error {
 	return firstErr
 }
 
-// pciIdToGpuModuleIdMap populates the gpuModuleId <-> PCI bus ID maps by walking
-// every NVML-visible GPU. The maps are replaced atomically so concurrent
-// readers always see a consistent snapshot.
-func (m *Manager) pciIdToGpuModuleIdMap(lib NVMLDeviceLister) error {
+// walkPCIModuleMapping walks every NVML-visible GPU and returns freshly built
+// gpuModuleId <-> PCI bus ID maps. Duplicate moduleIds or PCI bus IDs among the
+// visible GPUs are reported as errors. GPUs bound to vfio-pci are invisible to
+// NVML and therefore absent from the returned maps.
+func walkPCIModuleMapping(lib NVMLDeviceLister) (map[string]int, map[int]string, error) {
 	count, ret := lib.DeviceGetCount()
 	if ret != nvml.SUCCESS {
-		return fmt.Errorf("fabricmanager: NVML DeviceGetCount: %v", ret)
+		return nil, nil, fmt.Errorf("fabricmanager: NVML DeviceGetCount: %v", ret)
 	}
 
 	gpuModuleIDByPCI := make(map[string]int, count)
@@ -155,39 +156,93 @@ func (m *Manager) pciIdToGpuModuleIdMap(lib NVMLDeviceLister) error {
 	for i := 0; i < count; i++ {
 		dev, ret := lib.DeviceGetHandleByIndex(i)
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("fabricmanager: NVML DeviceGetHandleByIndex(%d): %v", i, ret)
+			return nil, nil, fmt.Errorf("fabricmanager: NVML DeviceGetHandleByIndex(%d): %v", i, ret)
 		}
 
 		moduleID, ret := dev.GetModuleId()
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("fabricmanager: NVML GetModuleId for device %d: %v", i, ret)
+			return nil, nil, fmt.Errorf("fabricmanager: NVML GetModuleId for device %d: %v", i, ret)
 		}
 
 		pciInfo, ret := dev.GetPciInfo()
 		if ret != nvml.SUCCESS {
-			return fmt.Errorf("fabricmanager: NVML GetPciInfo for device %d: %v", i, ret)
+			return nil, nil, fmt.Errorf("fabricmanager: NVML GetPciInfo for device %d: %v", i, ret)
 		}
 		pciBusID := normalizePCIBusID(unix.ByteSliceToString(pciInfo.BusId[:]))
 		if pciBusID == "" {
-			return fmt.Errorf("fabricmanager: empty PCI bus ID for device %d (moduleId=%d)", i, moduleID)
+			return nil, nil, fmt.Errorf("fabricmanager: empty PCI bus ID for device %d (moduleId=%d)", i, moduleID)
 		}
 
 		if existing, ok := pciByGpuModuleID[moduleID]; ok {
-			return fmt.Errorf("fabricmanager: duplicate gpuModuleId %d for PCI bus IDs %q and %q",
+			return nil, nil, fmt.Errorf("fabricmanager: duplicate gpuModuleId %d for PCI bus IDs %q and %q",
 				moduleID, existing, pciBusID)
 		}
 		if existing, ok := gpuModuleIDByPCI[pciBusID]; ok {
-			return fmt.Errorf("fabricmanager: duplicate PCI bus ID %q for gpuModuleIds %d and %d",
+			return nil, nil, fmt.Errorf("fabricmanager: duplicate PCI bus ID %q for gpuModuleIds %d and %d",
 				pciBusID, existing, moduleID)
 		}
 		gpuModuleIDByPCI[pciBusID] = moduleID
 		pciByGpuModuleID[moduleID] = pciBusID
+	}
+	return gpuModuleIDByPCI, pciByGpuModuleID, nil
+}
+
+// pciIdToGpuModuleIdMap populates the gpuModuleId <-> PCI bus ID maps by walking
+// every NVML-visible GPU. The maps are replaced atomically so concurrent
+// readers always see a consistent snapshot.
+func (m *Manager) pciIdToGpuModuleIdMap(lib NVMLDeviceLister) error {
+	gpuModuleIDByPCI, pciByGpuModuleID, err := walkPCIModuleMapping(lib)
+	if err != nil {
+		return err
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.gpuModuleIDByPCI = gpuModuleIDByPCI
 	m.pciByGpuModuleID = pciByGpuModuleID
+	return nil
+}
+
+// RefreshModuleMapping re-walks every NVML-visible GPU and merges any newly
+// discovered (PCI bus ID, gpuModuleId) entries into the existing maps.
+//
+// This is used after a GPU is rebound from the vfio-pci driver back to the
+// nvidia driver. At Open() such a GPU was bound to vfio-pci -- hence invisible
+// to NVML and absent from the maps -- so its VFIO device was published without
+// gpuModuleId/partitionN attributes. Once it is back on the nvidia driver it
+// becomes visible to NVML and its (PCI, gpuModuleId) pair can finally be
+// recorded.
+func (m *Manager) RefreshModuleMapping(lib NVMLDeviceLister) error {
+	if err := m.checkOpen(); err != nil {
+		return err
+	}
+
+	gpuModuleIDByPCI, _, err := walkPCIModuleMapping(lib)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for pciBusID, moduleID := range gpuModuleIDByPCI {
+		// If the freshly observed (PCI, gpuModuleId) pair conflicts with an existing
+		// entry, overwrite it with the NVML value and prune the now-stale
+		// reverse mapping so both maps stay consistent.
+		if existing, ok := m.gpuModuleIDByPCI[pciBusID]; ok && existing != moduleID {
+			klog.Warningf("fabricmanager: PCI bus ID %q was mapped to gpuModuleId %d but NVML now reports %d; updating",
+				pciBusID, existing, moduleID)
+			delete(m.pciByGpuModuleID, existing)
+		}
+		if existing, ok := m.pciByGpuModuleID[moduleID]; ok && existing != pciBusID {
+			klog.Warningf("fabricmanager: gpuModuleId %d was mapped to PCI bus ID %q but NVML now reports %q; updating",
+				moduleID, existing, pciBusID)
+			delete(m.gpuModuleIDByPCI, existing)
+		}
+		m.gpuModuleIDByPCI[pciBusID] = moduleID
+		m.pciByGpuModuleID[moduleID] = pciBusID
+		klog.V(2).Infof("fabricmanager: recorded GPU module mapping after rebind to nvidia driver: PCI=%s gpuModuleId=%d",
+			pciBusID, moduleID)
+	}
 	return nil
 }
 

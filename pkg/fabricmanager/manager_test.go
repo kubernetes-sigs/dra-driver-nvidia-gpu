@@ -172,17 +172,6 @@ func gpus(ids ...int) []PartitionGPU {
 	return out
 }
 
-// gpusWithPCI builds partition GPU members that carry both a moduleId and the
-// PCI bus ID FM would report for it, as on a real node. pci maps moduleId ->
-// PCI bus ID.
-func gpusWithPCI(pci map[int]string, ids ...int) []PartitionGPU {
-	out := make([]PartitionGPU, len(ids))
-	for i, id := range ids {
-		out[i] = PartitionGPU{PhysicalID: id, PCIBusID: pci[id]}
-	}
-	return out
-}
-
 // eightGPUNode returns an NVML mock with 8 GPUs whose moduleIds are 1..8 and
 // whose PCI bus IDs follow the canonical 8-digit-domain form NVML reports.
 func eightGPUNode() *fakeLib {
@@ -304,76 +293,133 @@ func TestDiscoverLookups(t *testing.T) {
 	}
 }
 
-func TestDiscoverFMPartitionReferencesUnknownGPU(t *testing.T) {
+// TestDiscoverFMPartitionReferencesGPUUnknownToNVML covers FM reporting a
+// gpuModuleId that NVML cannot resolve to a PCI bus ID (e.g. a GPU bound to
+// vfio-pci before nv-fabricmanager started, for which FM supplies no usable
+// PCI). Open must not fail: the partition is recorded and the GPU is simply
+// published without FM attributes until it is rebound to the nvidia driver and
+// the module mapping is refreshed.
+func TestDiscoverFMPartitionReferencesGPUUnknownToNVML(t *testing.T) {
 	client := &fakeClient{partitions: []Partition{
 		{ID: 1, GPUs: gpus(1, 2, 99)}, // 99 not present in NVML
 	}}
-	if _, err := Open(eightGPUNode(), client, ConnectParams{}); err == nil {
-		t.Errorf("expected error for unknown gpuModuleId, got nil")
+	m, err := Open(eightGPUNode(), client, ConnectParams{})
+	if err != nil {
+		t.Fatalf("Open should tolerate an unresolvable gpuModuleId: %v", err)
+	}
+	defer m.Close()
+
+	if _, ok := m.GetPCIByModuleID(99); ok {
+		t.Errorf("gpuModuleId 99 unexpectedly resolvable")
+	}
+	// The partition is still recorded despite the unresolvable member.
+	if _, ok := m.GetPartition(1); !ok {
+		t.Errorf("partition 1 not recorded")
 	}
 }
 
-// TestDiscoverPassthroughGPUVisibleOnlyToFM covers a GPU bound to vfio-pci at
-// Open time: NVML cannot enumerate it, but FM still reports it (with its PCI
-// bus ID) across its partitions. The module map must be completed from FM data
-// so the passthrough GPU is resolvable and recordsPartitions does not fail.
-func TestDiscoverPassthroughGPUVisibleOnlyToFM(t *testing.T) {
-	// NVML sees only modules 1 and 2; module 3 is bound to vfio-pci and is
-	// therefore invisible to NVML.
-	lib := newFakeLib(
+// TestRefreshModuleMappingAfterRebind covers a GPU bound to vfio-pci at Open
+// time: NVML cannot enumerate it and FM cannot supply a usable PCI bus ID, so
+// it is unresolvable. Once it is rebound from vfio-pci to the nvidia driver it
+// becomes visible to NVML, and RefreshModuleMapping records its (PCI,
+// gpuModuleId) pair so its FM attributes can be published.
+func TestRefreshModuleMappingAfterRebind(t *testing.T) {
+	// At Open, NVML sees only modules 1 and 2; module 3 is bound to vfio-pci
+	// and therefore invisible to NVML. FM reports all three across its
+	// partitions but supplies no PCI bus ID for the passthrough GPU.
+	libAtOpen := newFakeLib(
 		fakeDevice{moduleID: 1, pciBusID: "00000000:3B:00.0"},
 		fakeDevice{moduleID: 2, pciBusID: "00000000:5C:00.0"},
 	)
-
-	pci := map[int]string{
-		1: "00000000:3B:00.0",
-		2: "00000000:5C:00.0",
-		3: "0000:9d:00.0", // passthrough GPU, not in NVML; lower-case 4-digit form
-	}
 	client := &fakeClient{partitions: []Partition{
-		{ID: 1, GPUs: gpusWithPCI(pci, 1, 2, 3)},
-		{ID: 2, GPUs: gpusWithPCI(pci, 3)},
+		{ID: 1, GPUs: gpus(1, 2, 3)},
+		{ID: 2, GPUs: gpus(3)},
 	}}
 
-	m, err := Open(lib, client, ConnectParams{})
+	m, err := Open(libAtOpen, client, ConnectParams{})
 	if err != nil {
 		t.Fatalf("Open with passthrough GPU: %v", err)
 	}
 	defer m.Close()
 
-	// The FM-only GPU must be resolvable in both directions, with the PCI bus
-	// ID normalized to the canonical 8-digit-domain upper-case form.
-	if id, ok := m.GetModuleIDByPCI("00000000:9D:00.0"); !ok || id != 3 {
-		t.Errorf("GetModuleIDByPCI(passthrough) = (%d, %v), want (3, true)", id, ok)
-	}
-	if pciID, ok := m.GetPCIByModuleID(3); !ok || pciID != "00000000:9D:00.0" {
-		t.Errorf("GetPCIByModuleID(3) = (%q, %v), want (00000000:9D:00.0, true)", pciID, ok)
+	// Before the rebind the passthrough GPU is not resolvable.
+	if _, ok := m.GetModuleIDByPCI("00000000:9D:00.0"); ok {
+		t.Errorf("module 3 unexpectedly resolvable before rebind")
 	}
 
+	// The GPU is rebound from vfio-pci to the nvidia driver and becomes
+	// visible to NVML. Refreshing records its (PCI, moduleId) pair.
+	libAfterRebind := newFakeLib(
+		fakeDevice{moduleID: 1, pciBusID: "00000000:3B:00.0"},
+		fakeDevice{moduleID: 2, pciBusID: "00000000:5C:00.0"},
+		fakeDevice{moduleID: 3, pciBusID: "0000:9d:00.0"}, // lower-case 4-digit form
+	)
+	if err := m.RefreshModuleMapping(libAfterRebind); err != nil {
+		t.Fatalf("RefreshModuleMapping: %v", err)
+	}
+
+	// The (formerly) passthrough GPU is now resolvable in both directions,
+	// normalized to the canonical 8-digit-domain upper-case form.
+	if id, ok := m.GetModuleIDByPCI("00000000:9D:00.0"); !ok || id != 3 {
+		t.Errorf("GetModuleIDByPCI(passthrough) after refresh = (%d, %v), want (3, true)", id, ok)
+	}
+	if pciID, ok := m.GetPCIByModuleID(3); !ok || pciID != "00000000:9D:00.0" {
+		t.Errorf("GetPCIByModuleID(3) after refresh = (%q, %v), want (00000000:9D:00.0, true)", pciID, ok)
+	}
 	// NVML-visible GPUs still resolve as before.
 	if id, ok := m.GetModuleIDByPCI("00000000:3B:00.0"); !ok || id != 1 {
 		t.Errorf("GetModuleIDByPCI(nvml) = (%d, %v), want (1, true)", id, ok)
 	}
-
-	// The passthrough GPU's partitions are discoverable.
+	// The partitions for the GPU were recorded from FM at Open already.
 	if parts := m.GetPartitionsByModuleID(3); !reflect.DeepEqual(parts, []int{1, 2}) {
 		t.Errorf("GetPartitionsByModuleID(3) = %v, want [1 2]", parts)
 	}
 }
 
-// TestDiscoverAllGPUsInPassthrough covers a node where every GPU is bound to
-// vfio-pci, so NVML enumerates zero devices (a count of 0 is not an NVML
-// error). The entire module map must come from FM.
-func TestDiscoverAllGPUsInPassthrough(t *testing.T) {
-	lib := newFakeLib() // NVML sees nothing.
+// TestRefreshModuleMappingRetainsVfioBoundEntries verifies that a refresh
+// merges newly visible GPUs without dropping entries for GPUs that are still
+// bound to vfio-pci (invisible to NVML). Those entries are still needed to
+// deactivate the GPUs' fabric partitions on a later unprepare.
+func TestRefreshModuleMappingRetainsVfioBoundEntries(t *testing.T) {
+	// All three GPUs are visible at Open.
+	m, err := Open(newFakeLib(
+		fakeDevice{moduleID: 1, pciBusID: "00000000:3B:00.0"},
+		fakeDevice{moduleID: 2, pciBusID: "00000000:5C:00.0"},
+		fakeDevice{moduleID: 3, pciBusID: "00000000:9D:00.0"},
+	), &fakeClient{partitions: []Partition{{ID: 1, GPUs: gpus(1, 2, 3)}}}, ConnectParams{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer m.Close()
 
-	pci := map[int]string{
+	// Modules 2 and 3 are now bound to vfio-pci; only module 1 stays visible.
+	if err := m.RefreshModuleMapping(newFakeLib(
+		fakeDevice{moduleID: 1, pciBusID: "00000000:3B:00.0"},
+	)); err != nil {
+		t.Fatalf("RefreshModuleMapping: %v", err)
+	}
+
+	for mod, pci := range map[int]string{
 		1: "00000000:3B:00.0",
 		2: "00000000:5C:00.0",
+		3: "00000000:9D:00.0",
+	} {
+		if got, ok := m.GetPCIByModuleID(mod); !ok || got != pci {
+			t.Errorf("GetPCIByModuleID(%d) = (%q, %v), want (%q, true)", mod, got, ok, pci)
+		}
 	}
+}
+
+// TestDiscoverAllGPUsInPassthrough covers a node where every GPU is bound to
+// vfio-pci, so NVML enumerates zero devices (a count of 0 is not an NVML
+// error). Open must still succeed (FM partitions are recorded); the GPUs are
+// simply unresolvable until they are rebound to the nvidia driver and the
+// module mapping is refreshed.
+func TestDiscoverAllGPUsInPassthrough(t *testing.T) {
+	lib := newFakeLib() // NVML sees nothing.
 	client := &fakeClient{partitions: []Partition{
-		{ID: 1, GPUs: gpusWithPCI(pci, 1, 2)},
-		{ID: 8, GPUs: gpusWithPCI(pci, 1)},
+		{ID: 1, GPUs: gpus(1, 2)},
+		{ID: 8, GPUs: gpus(1)},
 	}}
 
 	m, err := Open(lib, client, ConnectParams{})
@@ -382,7 +428,23 @@ func TestDiscoverAllGPUsInPassthrough(t *testing.T) {
 	}
 	defer m.Close()
 
-	for mod, want := range pci {
+	// No GPU is resolvable yet (none visible to NVML, FM supplies no PCI).
+	if _, ok := m.GetPCIByModuleID(1); ok {
+		t.Errorf("module 1 unexpectedly resolvable before rebind")
+	}
+	// Partitions are still recorded.
+	if parts := m.GetPartitionsByModuleID(1); !reflect.DeepEqual(parts, []int{1, 8}) {
+		t.Errorf("GetPartitionsByModuleID(1) = %v, want [1 8]", parts)
+	}
+
+	// After all GPUs are rebound to the nvidia driver they become resolvable.
+	if err := m.RefreshModuleMapping(newFakeLib(
+		fakeDevice{moduleID: 1, pciBusID: "00000000:3B:00.0"},
+		fakeDevice{moduleID: 2, pciBusID: "00000000:5C:00.0"},
+	)); err != nil {
+		t.Fatalf("RefreshModuleMapping: %v", err)
+	}
+	for mod, want := range map[int]string{1: "00000000:3B:00.0", 2: "00000000:5C:00.0"} {
 		if got, ok := m.GetPCIByModuleID(mod); !ok || got != want {
 			t.Errorf("GetPCIByModuleID(%d) = (%q, %v), want (%q, true)", mod, got, ok, want)
 		}
@@ -628,6 +690,9 @@ func TestOperationsOnClosedManager(t *testing.T) {
 	}
 	if _, err := m.UnsupportedPartitions(); err == nil {
 		t.Errorf("expected error fetching unsupported on closed manager")
+	}
+	if err := m.RefreshModuleMapping(eightGPUNode()); err == nil {
+		t.Errorf("expected error refreshing module mapping on closed manager")
 	}
 }
 

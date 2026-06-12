@@ -1009,6 +1009,16 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 			return fmt.Errorf("error adding allocatable device: %w", err)
 		}
 		device.Vfio.parent = gpu.Gpu
+
+		// The GPU has just switched from the vfio-pci driver back to the nvidia
+		// driver and is visible to NVML again. If its Fabric Manager attributes
+		// could not be discovered at startup (because it was already bound to
+		// vfio-pci then), refresh the FM module mapping from NVML and re-attach
+		// the gpuModuleId/partitionN attributes to the in-memory VFIO device so
+		// the republished ResourceSlice carries them.
+		if err := s.nvdevlib.refreshFabricManagerInfo(device.Vfio); err != nil {
+			return fmt.Errorf("error refreshing fabric manager info for vfio device %q: %w", device.Vfio.CanonicalName(), err)
+		}
 	case MigStaticDeviceType:
 		// TODO: Implement once partitionable device is supported with PassthroughSupport feature gate.
 		return nil

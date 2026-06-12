@@ -804,6 +804,36 @@ func (l deviceLib) attachFabricManagerInfo(d *VfioDeviceInfo) error {
 	return nil
 }
 
+// refreshFabricManagerInfo refreshes the FM module mapping from NVML and
+// re-attaches the FM attributes (gpuModuleId / partitionN) to the given VFIO
+// device.
+//
+// It is used after a GPU has switched from the vfio-pci driver back to the
+// nvidia driver (during unprepare). A GPU already bound to vfio-pci at plugin
+// startup is invisible to NVML, so its gpuModuleId could not be discovered and
+// its VFIO device was published without FM attributes. Once the GPU is back on
+// the nvidia driver NVML can see it again: refresh the FM module mapping so the
+// (PCI, gpuModuleId) pair is recorded, then re-attach the attributes so they
+// are repopulated in the in-memory device and republished to the ResourceSlice.
+//
+// No-op when fmManager is nil (non-HGX nodes / FM not wired up).
+func (l deviceLib) refreshFabricManagerInfo(d *VfioDeviceInfo) error {
+	if l.fmManager == nil {
+		return nil
+	}
+
+	shutdown, ret := l.ensureNVML()
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("ensureNVML failed: %w", ret)
+	}
+	defer shutdown()
+
+	if err := l.fmManager.RefreshModuleMapping(l.nvmllib); err != nil {
+		return fmt.Errorf("refreshing fabric manager module mapping: %w", err)
+	}
+	return l.attachFabricManagerInfo(d)
+}
+
 func (l deviceLib) getMigDevices(gpuInfo *GpuInfo) (map[string]*MigDeviceInfo, error) {
 	if !gpuInfo.migEnabled {
 		return nil, nil
