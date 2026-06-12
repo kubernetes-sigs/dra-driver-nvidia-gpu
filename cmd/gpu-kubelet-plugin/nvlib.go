@@ -30,6 +30,7 @@ import (
 	"k8s.io/klog/v2"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
+	"github.com/NVIDIA/go-nvlib/pkg/nvpassthrough"
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
@@ -43,15 +44,17 @@ type deviceLib struct {
 	nvdev.Interface
 	nvmllib           nvml.Interface
 	nvpci             nvpci.Interface
+	nvpasst           nvpassthrough.Interface
 	driverLibraryPath string
 	devRoot           string
+	hostRoot          string
 	nvidiaSMIPath     string
 	gpuInfosByUUID    map[string]*GpuInfo
 	gpuUUIDbyPCIBusID map[PCIBusID]string
 	devhandleByUUID   map[string]nvml.Device
 }
 
-func newDeviceLib(driverRoot root) (*deviceLib, error) {
+func newDeviceLib(driverRoot root, hostRoot root) (*deviceLib, error) {
 	driverLibraryPath, err := driverRoot.getDriverLibraryPath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to locate driver libraries: %w", err)
@@ -68,14 +71,20 @@ func newDeviceLib(driverRoot root) (*deviceLib, error) {
 		nvml.WithLibraryPath(driverLibraryPath),
 	)
 	nvpci := nvpci.New()
+	nvpassthrough := nvpassthrough.New(
+		nvpassthrough.WithNvpciLib(nvpci),
+		nvpassthrough.WithHostRoot(string(hostRoot)),
+	)
 
 	d := deviceLib{
 		Interface:         nvdev.New(nvmllib),
 		nvmllib:           nvmllib,
 		driverLibraryPath: driverLibraryPath,
 		devRoot:           driverRoot.getDevRoot(),
+		hostRoot:          string(hostRoot),
 		nvidiaSMIPath:     nvidiaSMIPath,
 		nvpci:             nvpci,
+		nvpasst:           nvpassthrough,
 		gpuInfosByUUID:    make(map[string]*GpuInfo),
 		gpuUUIDbyPCIBusID: make(map[PCIBusID]string),
 		devhandleByUUID:   make(map[string]nvml.Device),
@@ -661,7 +670,7 @@ func (l deviceLib) enumerateGpuVfioDevices(perGPUAllocatable *PerGPUAllocatableD
 }
 
 func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*VfioDeviceInfo, error) {
-	iommuFDEnabled, err := checkIommuFDEnabled()
+	iommuFDEnabled, err := checkIommuFDEnabled(l.hostRoot)
 	if err != nil {
 		return nil, fmt.Errorf("error checking if IOMMUFD is supported: %w", err)
 	}
@@ -669,7 +678,7 @@ func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*V
 	var pciBusIDAttr *deviceattribute.DeviceAttribute
 	attr, err := deviceattribute.GetPCIBusIDAttribute(device.Address)
 	if err != nil {
-		return nil, fmt.Errorf("error getting PCI bus ID for device %s: %w", device.Address, err)
+		return nil, fmt.Errorf("error getting PCI bus ID for device %q: %w", device.Address, err)
 	}
 	pciBusIDAttr = &attr
 
@@ -677,10 +686,15 @@ func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*V
 	if attr, err := deviceattribute.GetPCIeRootAttributeByPCIBusID(device.Address); err == nil {
 		pcieRootAttr = &attr
 	} else {
-		klog.Warningf("error getting PCIe root for device %s, continuing without attribute: %v", device.Address, err)
+		klog.Warningf("error getting PCIe root for device %q, continuing without attribute: %v", device.Address, err)
 	}
 
 	_, memoryBytes := device.Resources.GetTotalAddressableMemory(true)
+
+	vfioModule, err := l.nvpasst.FindBestVFIOVariant(device.Address)
+	if err != nil {
+		return nil, fmt.Errorf("error finding best VFIO driver for device %q: %w", device.Address, err)
+	}
 
 	// Generate a unique UUID for the VFIO device based on the PCI bus ID.
 	// This will always map to the same PCI bus ID.
@@ -698,6 +712,7 @@ func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*V
 		iommuGroup:             device.IommuGroup,
 		iommuFDEnabled:         iommuFDEnabled,
 		addressableMemoryBytes: memoryBytes,
+		vfioModule:             vfioModule,
 	}
 
 	return vfioDeviceInfo, nil

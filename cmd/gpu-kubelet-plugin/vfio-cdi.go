@@ -21,22 +21,23 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 )
 
 type vfioCDIHandler struct {
+	deviceLib      *deviceLib
 	iommuFDEnabled bool
 }
 
-func NewVfioCDIHandler() (*vfioCDIHandler, error) {
-	iommuFDEnabled, err := checkIommuFDEnabled()
+func NewVfioCDIHandler(deviceLib *deviceLib) (*vfioCDIHandler, error) {
+	iommuFDEnabled, err := checkIommuFDEnabled(deviceLib.hostRoot)
 	if err != nil {
 		return nil, err
 	}
 
 	handler := &vfioCDIHandler{
+		deviceLib:      deviceLib,
 		iommuFDEnabled: iommuFDEnabled,
 	}
 	return handler, nil
@@ -85,8 +86,7 @@ func (h *vfioCDIHandler) GetCommonEdits(enableAPIDevice bool, preferIommuFD bool
 // We automatically assume we want the legacy device if PreferIommuFD policy is not selected.
 // If more policies are added in the future, the handler needs to be enhanced to support them.
 func (h *vfioCDIHandler) GetDeviceSpecsByPCIBusID(pciBusID string, preferIommuFD bool) ([]cdispec.Device, error) {
-	nvpci := nvpci.New()
-	pciDeviceInfo, err := nvpci.GetGPUByPciBusID(pciBusID)
+	pciDeviceInfo, err := h.deviceLib.nvpci.GetGPUByPciBusID(pciBusID)
 	if err != nil {
 		return nil, fmt.Errorf("error getting PCI device info for GPU %q: %w", pciBusID, err)
 	}

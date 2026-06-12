@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -54,6 +55,7 @@ type Flags struct {
 	cdiRoot                       string
 	containerDriverRoot           string
 	hostDriverRoot                string
+	hostRoot                      string
 	nvidiaCDIHookPath             string
 	imageName                     string
 	imagePullSecrets              string
@@ -124,6 +126,13 @@ func newApp() *cli.App {
 			Usage:       "the path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications",
 			Destination: &flags.containerDriverRoot,
 			EnvVars:     []string{"DRIVER_ROOT_CTR_PATH"},
+		},
+		&cli.StringFlag{
+			Name:        "host-root",
+			Value:       "/host-root",
+			Destination: &flags.hostRoot,
+			EnvVars:     []string{"HOST_ROOT"},
+			Usage:       "the path where the root path of the host file system is mounted in the container (required when PassthroughSupport feature gate is enabled)",
 		},
 		&cli.StringFlag{
 			Name:        "nvidia-cdi-hook-path",
@@ -222,6 +231,10 @@ func newApp() *cli.App {
 				return fmt.Errorf("feature gate validation failed: %w", err)
 			}
 
+			if err := validateCLIFlags(flags); err != nil {
+				return fmt.Errorf("invalid CLI flags: %w", err)
+			}
+
 			clientSets, err := flags.kubeClientConfig.NewClientSets()
 			if err != nil {
 				return fmt.Errorf("create client: %w", err)
@@ -254,6 +267,24 @@ func newApp() *cli.App {
 	}
 
 	return app
+}
+
+// Input validation of CLI flags.
+func validateCLIFlags(flags *Flags) error {
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		if flags.hostRoot == "" {
+			return fmt.Errorf("host root is required when PassthroughSupport feature gate is enabled")
+		}
+		// Host root FS must be mounted in the container for passthrough support to work.
+		if _, err := os.Stat(flags.hostRoot); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("host root is not mounted at %q", flags.hostRoot)
+			}
+			return fmt.Errorf("error checking if host root is mounted at %q: %w", flags.hostRoot, err)
+		}
+	}
+
+	return nil
 }
 
 // RunPlugin initializes and runs the GPU kubelet plugin.

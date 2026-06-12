@@ -85,7 +85,8 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	devRoot := containerDriverRoot.getDevRoot()
 	klog.Infof("Using devRoot=%v", devRoot)
 
-	nvdevlib, err := newDeviceLib(containerDriverRoot)
+	hostRoot := root(config.flags.hostRoot)
+	nvdevlib, err := newDeviceLib(containerDriverRoot, hostRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
 	}
@@ -117,7 +118,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	}
 	var vfioCDIHandler *vfioCDIHandler
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		vfioCDIHandler, err = NewVfioCDIHandler()
+		vfioCDIHandler, err = NewVfioCDIHandler(nvdevlib)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create vfio CDI handler: %w", err)
 		}

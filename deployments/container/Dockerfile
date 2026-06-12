@@ -138,8 +138,6 @@ COPY --from=build   /artifacts/compute-domain-daemon          /usr/bin/compute-d
 COPY --from=build   /artifacts/gpu-kubelet-plugin             /usr/bin/gpu-kubelet-plugin
 COPY --from=build   /artifacts/webhook                        /usr/bin/webhook
 
-COPY /scripts/bind_to_driver.sh                               /usr/bin/bind_to_driver.sh
-COPY /scripts/unbind_from_driver.sh                           /usr/bin/unbind_from_driver.sh
 COPY /hack/kubelet-plugin-prestart.sh                         /usr/bin/kubelet-plugin-prestart.sh
 COPY /templates /templates
 
