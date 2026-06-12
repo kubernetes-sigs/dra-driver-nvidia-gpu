@@ -41,6 +41,9 @@ spec:
           if [ -x /driver-root/bin/sh ] || [ -x /driver-root/usr/bin/sh ]; then
             # Use chroot to avoid library mismatch between container and host
             # when driver root is / (default value) or /run/nvidia/driver (default location for driver installation by GPU Operator)
+            # Export the paths explicitly for the chroot environment
+            export CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps
+            export CUDA_MPS_LOG_DIRECTORY=/var/log/nvidia-mps
             RUN="chroot /driver-root sh -c"
           else
             # No shell in driver root (e.g. GKE COS): run directly with PATH/LD_LIBRARY_PATH
