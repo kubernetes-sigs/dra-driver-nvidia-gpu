@@ -18,13 +18,13 @@ description: Official Helm chart for the DRA Driver for NVIDIA GPUs
 type: application
 
 # Note(JP): strict semver: no v prefix allowed
-version: "0.4.0"
+version: "0.4.1-rc.1"
 
 # Note(JP): templating logic consumes `appVersion` for building the default
 # `tag` value used in a k8s image specification. That logic expects the version
 # number below to not have a "v" prefix (a "v" is added by said logic to yield a
 # valid image reference).
-appVersion: "0.4.0"
+appVersion: "0.4.1-rc.1"
 
 # The kubeVersion puts constraints on the Kubernetes versions where this helm
 # chart can be installed. Note a '-0' at the end of a version string in the
