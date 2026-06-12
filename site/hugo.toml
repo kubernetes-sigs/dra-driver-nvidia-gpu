@@ -61,6 +61,9 @@ enableGitInfo = true
   github_project_repo = "https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu"
   offlineSearch = false
   prism_syntax_highlighting = false
+  # Latest published release. Update both when cutting a new release.
+  driver_version = "0.4.0"       # Helm chart version (no "v" prefix; used with --version)
+  driver_release_tag = "v0.4.0"  # GitHub release tag (used for source links)
 
   [params.taxonomy]
     taxonomyCloud = []

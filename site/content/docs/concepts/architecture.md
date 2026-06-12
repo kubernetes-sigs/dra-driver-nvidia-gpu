@@ -10,7 +10,7 @@ This repo ships two independent Kubernetes DRA drivers:
 - `gpu.nvidia.com` - manages allocation of GPUs, including GPU sharing through MIG, Time-Slicing, and MPS, across both bare-metal and sandboxed environments.
 - `compute-domain.nvidia.com` - manages IMEX daemons and allocation of IMEX channel devices required for GPU memory sharing across OS domains on Multi-Node NVLink systems.
 
-Both are delivered by the Helm chart in [`deployments/helm/dra-driver-nvidia-gpu/`](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/tree/main/deployments/helm/dra-driver-nvidia-gpu).
+Both are delivered by the Helm chart in [`deployments/helm/dra-driver-nvidia-gpu/`](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/tree/{{< param driver_release_tag >}}/deployments/helm/dra-driver-nvidia-gpu).
 
 ## Components
 
@@ -92,10 +92,12 @@ sequenceDiagram
 
 ## Reference
 
-For opaque config types and CRD definitions: [API types](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/tree/main/api/nvidia.com/resource/v1beta1)
+For opaque config types and CRD definitions: [API reference](../reference/api/)
 
-For available feature flags and their defaults: [Feature gates](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/blob/main/pkg/featuregates/featuregates.go)
+For available feature flags and their defaults: [Feature gates](../reference/feature-gates/)
 
-For DeviceClasses shipped by the chart: [`deviceclass-*.yaml`](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/tree/main/deployments/helm/dra-driver-nvidia-gpu/templates)
+For Helm configuration: [Helm chart values](../reference/helm-values/)
 
-For example workloads: [`demo/specs/quickstart/`](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/tree/main/demo/specs/quickstart)
+For DeviceClasses shipped by the chart: [`deviceclass-*.yaml`](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/tree/{{< param driver_release_tag >}}/deployments/helm/dra-driver-nvidia-gpu/templates)
+
+For example workloads: [`demo/specs/quickstart/`](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/tree/{{< param driver_release_tag >}}/demo/specs/quickstart)
