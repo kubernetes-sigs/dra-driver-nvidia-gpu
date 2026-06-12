@@ -97,6 +97,7 @@ type VfioDeviceInfo struct {
 	iommuGroup             int
 	iommuFDEnabled         bool
 	addressableMemoryBytes uint64
+	preConfigureDriver     string
 }
 
 // CanonicalName returns the nameused for device announcement (in ResourceSlice

@@ -630,6 +630,16 @@ func (l deviceLib) enumerateGpuVfioDevices(perGPUAllocatable *PerGPUAllocatableD
 	for idx, pci := range gpuPciDevices {
 		klog.Infof("Adding VFIO device for discovered GPU PCI device: %s", pci.Address)
 
+		driver, err := getDriver(pciDevicesPath, pci.Address)
+		if err != nil {
+			klog.Warningf("Skipping VFIO device %s: unable to read driver: %v", pci.Address, err)
+			continue
+		}
+		if driver != vfioPciDriver {
+			klog.Infof("Skipping VFIO device %s: bound to %q, not %q", pci.Address, driver, vfioPciDriver)
+			continue
+		}
+
 		parent := perGPUAllocatable.GetGPUDeviceByPCIBusID(pci.Address)
 		if parent != nil && !parent.Gpu.vfioEnabled {
 			klog.Infof("Skipping VFIO device for discovered GPU PCI device: %s, vfio is not enabled", pci.Address)

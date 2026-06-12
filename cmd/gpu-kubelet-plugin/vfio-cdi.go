@@ -18,6 +18,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -59,7 +60,13 @@ func (h *vfioCDIHandler) GetCommonEdits(enableAPIDevice bool, preferIommuFD bool
 		},
 	}
 
-	// IOMMU API device is not requested. Exit early.
+	// Always include /dev/vfio/vfio for legacy VFIO — it's required by
+	// libvirt to detect VFIO support. enableAPIDevice controls whether the
+	// preferred IOMMU backend device is also added.
+	edits.DeviceNodes = append(edits.DeviceNodes, &cdispec.DeviceNode{
+		Path: filepath.Join(vfioDevicesRoot, "vfio"),
+	})
+
 	if !enableAPIDevice {
 		return edits, nil
 	}
@@ -68,10 +75,6 @@ func (h *vfioCDIHandler) GetCommonEdits(enableAPIDevice bool, preferIommuFD bool
 	if preferIommuFD && h.iommuFDEnabled {
 		edits.DeviceNodes = append(edits.DeviceNodes, &cdispec.DeviceNode{
 			Path: iommuDevicePath,
-		})
-	} else {
-		edits.DeviceNodes = append(edits.DeviceNodes, &cdispec.DeviceNode{
-			Path: filepath.Join(vfioDevicesRoot, "vfio"),
 		})
 	}
 
@@ -85,18 +88,14 @@ func (h *vfioCDIHandler) GetCommonEdits(enableAPIDevice bool, preferIommuFD bool
 // We automatically assume we want the legacy device if PreferIommuFD policy is not selected.
 // If more policies are added in the future, the handler needs to be enhanced to support them.
 func (h *vfioCDIHandler) GetDeviceSpecsByPCIBusID(pciBusID string, preferIommuFD bool) ([]cdispec.Device, error) {
-	nvpci := nvpci.New()
-	pciDeviceInfo, err := nvpci.GetGPUByPciBusID(pciBusID)
-	if err != nil {
-		return nil, fmt.Errorf("error getting PCI device info for GPU %q: %w", pciBusID, err)
-	}
-
 	devNodes := make([]*cdispec.DeviceNode, 0)
 
 	if preferIommuFD && h.iommuFDEnabled {
-		// The IOMMUFD cdev is located at /dev/vfio/devices/<vfioX> and is
-		// expected to be available if IOMMUFD is enabled on the node and the GPU is
-		// bound to the vfio driver.
+		nvpci := nvpci.New()
+		pciDeviceInfo, err := nvpci.GetGPUByPciBusID(pciBusID)
+		if err != nil {
+			return nil, fmt.Errorf("error getting PCI device info for GPU %q: %w", pciBusID, err)
+		}
 		if !strings.HasPrefix(pciDeviceInfo.IommuFD, "vfio") {
 			return nil, fmt.Errorf("missing iommufd cdev for GPU %q", pciDeviceInfo.Address)
 		}
@@ -104,8 +103,14 @@ func (h *vfioCDIHandler) GetDeviceSpecsByPCIBusID(pciBusID string, preferIommuFD
 			Path: filepath.Join(vfioDevicesPath, pciDeviceInfo.IommuFD),
 		})
 	} else {
+		// Read IOMMU group directly from sysfs — works for GPUs on any
+		// driver including vfio-pci (nvpci may not find vfio-bound GPUs).
+		iommuGroup, err := getIommuGroupFromSysfs(pciBusID)
+		if err != nil {
+			return nil, fmt.Errorf("error getting IOMMU group for GPU %q: %w", pciBusID, err)
+		}
 		devNodes = append(devNodes, &cdispec.DeviceNode{
-			Path: filepath.Join(vfioDevicesRoot, fmt.Sprintf("%d", pciDeviceInfo.IommuGroup)),
+			Path: filepath.Join(vfioDevicesRoot, iommuGroup),
 		})
 	}
 	devSpecs := []cdispec.Device{
@@ -116,4 +121,13 @@ func (h *vfioCDIHandler) GetDeviceSpecsByPCIBusID(pciBusID string, preferIommuFD
 		},
 	}
 	return devSpecs, nil
+}
+
+func getIommuGroupFromSysfs(pciBusID string) (string, error) {
+	iommuLink := filepath.Join(pciDevicesPath, pciBusID, "iommu_group")
+	target, err := os.Readlink(iommuLink)
+	if err != nil {
+		return "", fmt.Errorf("failed to read IOMMU group symlink for %s: %w", pciBusID, err)
+	}
+	return filepath.Base(target), nil
 }
