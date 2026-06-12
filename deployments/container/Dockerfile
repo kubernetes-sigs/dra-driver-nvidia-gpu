@@ -92,7 +92,7 @@ RUN --mount=type=cache,target=/mc/go/build-cache,id=gocache \
 # issues/502 and issues/743) and dominated CI duration on the happy
 # path. Pinned by image digest for reproducibility; bash version follows
 # the trixie suite. Currently delivers bash 5.2.37, statically linked.
-FROM debian:trixie-slim@sha256:8d7a3dca57e62717b0f10897aca189da5d7acde3cc1ced657bdfd06ef5379576 AS bash
+FROM debian:trixie-slim@sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8 AS bash
 RUN apt-get update \
  && apt-get install -y --no-install-recommends bash-static \
  && rm -rf /var/lib/apt/lists/* \
