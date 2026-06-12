@@ -32,7 +32,7 @@ CMD_TARGETS := $(patsubst %,cmd-%, $(CMDS))
 
 CHECK_TARGETS := golangci-lint check-generate
 
-MAKE_TARGETS := binaries build build-image check fmt lint-internal test examples cmds coverage generate vendor check-modules helm-lint helm-package $(CHECK_TARGETS)
+MAKE_TARGETS := binaries build build-image check clean fmt lint-internal test examples cmds coverage generate vendor check-modules helm-lint helm-package $(CHECK_TARGETS)
 
 TARGETS := $(MAKE_TARGETS) $(CMD_TARGETS)
 
@@ -60,6 +60,12 @@ $(CMD_TARGETS): cmd-%:
 
 build:
 	CC=$(CC) GOOS=$(GOOS) GOARCH=$(GOARCH) go build ./...
+
+clean:
+	@for cmd in $(CMDS); do \
+		rm -f $(CURDIR)/$$cmd; \
+		[ -n "$(PREFIX)" ] && rm -f $(PREFIX)/$$cmd || true; \
+	done
 
 examples: $(EXAMPLE_TARGETS)
 $(EXAMPLE_TARGETS): example-%:
