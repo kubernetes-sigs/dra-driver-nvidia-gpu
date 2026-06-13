@@ -25,6 +25,8 @@ on:
 jobs:
   variables:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       golang_version: ${{ steps.golang_version.outputs.golang_version }}

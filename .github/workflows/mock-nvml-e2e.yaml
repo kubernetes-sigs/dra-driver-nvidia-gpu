@@ -34,6 +34,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   mock-gpu-e2e:
     runs-on: ubuntu-latest

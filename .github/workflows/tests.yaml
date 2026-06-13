@@ -18,6 +18,9 @@ name: tests
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   skipped:
     runs-on: ubuntu-latest
