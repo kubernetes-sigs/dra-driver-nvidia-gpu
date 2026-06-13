@@ -104,7 +104,7 @@ func (r root) findFile(name string, searchIn ...string) (string, error) {
 func resolveLink(l string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(l)
 	if err != nil {
-		return "", fmt.Errorf("error resolving link '%v': %v", l, err)
+		return "", fmt.Errorf("error resolving link %q: %w", l, err)
 	}
 	return resolved, nil
 }
