@@ -180,7 +180,7 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 				wg.Done()
 				return nil
 			}
-			return fmt.Errorf("%w", res.Err)
+			return res.Err
 		})
 	}
 
@@ -217,7 +217,7 @@ func (d *driver) UnprepareResourceClaims(ctx context.Context, claimRefs []kubele
 				}
 				return nil
 			}
-			return fmt.Errorf("%w", err)
+			return err
 		})
 	}
 
