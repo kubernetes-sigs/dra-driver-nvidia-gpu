@@ -17,11 +17,14 @@
 # Packages the Helm chart for release or for Prow / Cloud Build jobs that push
 # OCI charts to staging/promotion registries.
 
-set -o pipefail
+set -euo pipefail
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "${REPO_ROOT}"
 
 # if arg1 is set, it will be used as the version number
-if [ -z "$1" ]; then
-  VERSION=$(awk -F= '/^VERSION/ { print $2 }' versions.mk | tr -d '[:space:]')
+if [ -z "${1:-}" ]; then
+  VERSION=$(make --no-print-directory -f "${REPO_ROOT}/versions.mk" print-VERSION)
 else
   VERSION=$1
 fi
@@ -36,4 +39,4 @@ VERSION="${VERSION#v}"
 # should be used here.
 
 # Create release assets to be uploaded
-helm package deployments/helm/dra-driver-nvidia-gpu/ --version $VERSION --app-version $VERSION
+helm package "${REPO_ROOT}/deployments/helm/dra-driver-nvidia-gpu/" --version "${VERSION}" --app-version "${VERSION}"
