@@ -293,7 +293,7 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 	return device
 }
 
-// addFabricManagerAttributes publishes the Fabric Manager-derived attributes
+// addFabricManagerAttributes publishes the Fabric Manager-derived attributes.
 func (d *VfioDeviceInfo) addFabricManagerAttributes(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute) {
 	if d.gpuModuleID == 0 && len(d.partitionsBySize) == 0 {
 		klog.V(4).Infof("No Fabric Manager attributes for %s", d.CanonicalName())

@@ -23,7 +23,6 @@ import (
 	"sync"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
-	"golang.org/x/sys/unix"
 	"k8s.io/klog/v2"
 )
 
@@ -51,6 +50,7 @@ type Manager struct {
 
 // NVMLDeviceLister is the minimal subset of nvml.Interface required to build
 // the gpuModuleId <-> PCI bus ID mapping.
+// can be mocked in unit tests.
 type NVMLDeviceLister interface {
 	DeviceGetCount() (int, nvml.Return)
 	DeviceGetHandleByIndex(int) (nvml.Device, nvml.Return)
@@ -168,7 +168,7 @@ func walkPCIModuleMapping(lib NVMLDeviceLister) (map[string]int, map[int]string,
 		if ret != nvml.SUCCESS {
 			return nil, nil, fmt.Errorf("fabricmanager: NVML GetPciInfo for device %d: %v", i, ret)
 		}
-		pciBusID := normalizePCIBusID(unix.ByteSliceToString(pciInfo.BusId[:]))
+		pciBusID := normalizePCIBusID(int8ToString(pciInfo.BusId[:]))
 		if pciBusID == "" {
 			return nil, nil, fmt.Errorf("fabricmanager: empty PCI bus ID for device %d (moduleId=%d)", i, moduleID)
 		}
@@ -364,7 +364,7 @@ func (m *Manager) GetPartitionsByModuleID(moduleID int) []int {
 //	partition8:  1
 //
 // On a well-formed node FM produces exactly one partition per
-// (size, GPU) pair; if more than one is found this method returns an error
+// (size, GPU) pair; if more than one is found this method returns an error.
 func (m *Manager) GetPartitionsBySizeByModuleID(moduleID int) (map[int]int, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -398,7 +398,7 @@ func (m *Manager) GetPartitionsBySizeByPCI(pciBusID string) (map[int]int, bool, 
 
 // FindPartitionByModuleIDs returns the partitionId of the FM partition whose
 // GPU member set is exactly equal to the given set of gpuModuleIds, or
-// (0, false) if no partition matches
+// (0, false) if no partition matches.
 func (m *Manager) FindPartitionByModuleIDs(moduleIDs []int) (int, bool) {
 	if len(moduleIDs) == 0 {
 		return 0, false
@@ -407,7 +407,6 @@ func (m *Manager) FindPartitionByModuleIDs(moduleIDs []int) (int, bool) {
 	for _, id := range moduleIDs {
 		want[id] = struct{}{}
 	}
-
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -443,7 +442,7 @@ func (m *Manager) ActivatePartition(partitionID int) error {
 }
 
 // DeactivatePartition releases an activated partition. It should be called
-// when the corresponding DRA claim is released
+// when the corresponding DRA claim is released.
 func (m *Manager) DeactivatePartition(partitionID int) error {
 	if err := m.checkOpenPartition(partitionID); err != nil {
 		return err
@@ -467,19 +466,6 @@ func (m *Manager) ActivatedPartitions() []int {
 	}
 	sort.Ints(ids)
 	return ids
-}
-
-// UnsupportedPartitions returns partitions FM has marked unsupported (e.g.
-// because of NVLink failures). On HGX-H100 and later this is always empty.
-func (m *Manager) UnsupportedPartitions() ([]UnsupportedPartition, error) {
-	if err := m.checkOpen(); err != nil {
-		return nil, err
-	}
-	parts, err := m.client.GetUnsupportedFabricPartitions()
-	if err != nil {
-		return nil, fmt.Errorf("fabricmanager: fmGetUnsupportedFabricPartitions: %w", err)
-	}
-	return parts, nil
 }
 
 func (m *Manager) checkOpen() error {

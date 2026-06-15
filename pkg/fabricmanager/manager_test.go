@@ -46,7 +46,9 @@ func (f *fakeDevice) GetModuleId() (int, nvml.Return) {
 
 func (f *fakeDevice) GetPciInfo() (nvml.PciInfo, nvml.Return) {
 	var info nvml.PciInfo
-	copy(info.BusId[:], f.pciBusID)
+	for i := 0; i < len(f.pciBusID) && i < len(info.BusId); i++ {
+		info.BusId[i] = int8(f.pciBusID[i])
+	}
 	ret := f.getPciRet
 	if ret == 0 {
 		ret = nvml.SUCCESS
@@ -87,13 +89,11 @@ func newFakeLib(gpus ...fakeDevice) *fakeLib {
 // records lifecycle calls so we can assert correct ordering, and lets
 // individual methods be made to fail.
 type fakeClient struct {
-	partitions  []Partition
-	unsupported []UnsupportedPartition
+	partitions []Partition
 
 	initErr       error
 	connectErr    error
 	listErr       error
-	listUnsupErr  error
 	disconnErr    error
 	shutdownErr   error
 	activateErr   error
@@ -127,13 +127,6 @@ func (c *fakeClient) GetSupportedFabricPartitions() ([]Partition, error) {
 		return nil, c.listErr
 	}
 	return c.partitions, nil
-}
-func (c *fakeClient) GetUnsupportedFabricPartitions() ([]UnsupportedPartition, error) {
-	c.calls = append(c.calls, "list-unsupported")
-	if c.listUnsupErr != nil {
-		return nil, c.listUnsupErr
-	}
-	return c.unsupported, nil
 }
 func (c *fakeClient) ActivateFabricPartition(id int) error {
 	c.calls = append(c.calls, "activate")
@@ -669,28 +662,6 @@ func TestActivateInheritedFromFM(t *testing.T) {
 	}
 }
 
-func TestUnsupportedPartitions(t *testing.T) {
-	client := &fakeClient{
-		partitions: designDocPartitions(),
-		unsupported: []UnsupportedPartition{
-			{ID: 99, GPUPhysicalIDs: []int{1, 2}},
-		},
-	}
-	m, err := Open(eightGPUNode(), client, ConnectParams{})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer m.Close()
-
-	unsup, err := m.UnsupportedPartitions()
-	if err != nil {
-		t.Fatalf("UnsupportedPartitions: %v", err)
-	}
-	if len(unsup) != 1 || unsup[0].ID != 99 {
-		t.Errorf("UnsupportedPartitions = %+v", unsup)
-	}
-}
-
 func TestOperationsOnClosedManager(t *testing.T) {
 	client := &fakeClient{partitions: designDocPartitions()}
 	m, err := Open(eightGPUNode(), client, ConnectParams{})
@@ -706,9 +677,6 @@ func TestOperationsOnClosedManager(t *testing.T) {
 	}
 	if err := m.DeactivatePartition(2); err == nil {
 		t.Errorf("expected error deactivating on closed manager")
-	}
-	if _, err := m.UnsupportedPartitions(); err == nil {
-		t.Errorf("expected error fetching unsupported on closed manager")
 	}
 	if err := m.SetModuleMappingForPCI("00000000:3B:00.0", 1); err == nil {
 		t.Errorf("expected error updating module mapping on closed manager")
@@ -744,9 +712,6 @@ func TestStubClient(t *testing.T) {
 	}
 	if _, err := c.GetSupportedFabricPartitions(); !errors.Is(err, ErrUnimplemented) {
 		t.Errorf("stub GetSupportedFabricPartitions err = %v, want ErrUnimplemented", err)
-	}
-	if _, err := c.GetUnsupportedFabricPartitions(); !errors.Is(err, ErrUnimplemented) {
-		t.Errorf("stub GetUnsupportedFabricPartitions err = %v, want ErrUnimplemented", err)
 	}
 	if err := c.ActivateFabricPartition(1); !errors.Is(err, ErrUnimplemented) {
 		t.Errorf("stub ActivateFabricPartition err = %v, want ErrUnimplemented", err)

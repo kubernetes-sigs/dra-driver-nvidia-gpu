@@ -18,21 +18,23 @@ package fabricmanager
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/NVIDIA/go-nvfm/pkg/nvfm"
+	"k8s.io/klog/v2"
 )
 
-// nvfmClient is a Client backed by NVIDIA's go-nvfm bindings, which wrap the
-// Fabric Manager C SDK (libnvfm.so / libnvidia-fabricmanager.so) loaded at
-// runtime via dlopen.
+// nvfmClient is a Client backed by NVIDIA's go-nvfm bindings.
 type nvfmClient struct {
-	lib    nvfm.Interface
-	handle nvfm.Handle
+	lib nvfm.Interface
+
+	mu            sync.Mutex
+	handle        nvfm.Handle
+	params        ConnectParams
+	connectedOnce bool
 }
 
-// NewClient returns a Client backed by go-nvfm. libraryPath optionally points
-// at a specific libnvfm.so; an empty string uses the default library name and
-// relies on the dynamic loader's search path.
+// NewClient returns a client backed by go-nvfm.
 func NewClient(libraryPath string) Client {
 	var opts []nvfm.LibraryOption
 	if libraryPath != "" {
@@ -46,6 +48,18 @@ func (c *nvfmClient) Init() error {
 }
 
 func (c *nvfmClient) Connect(params ConnectParams) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Remember the connect parameters so a later reconnect can reproduce the
+	// original transport/address/timeout.
+	c.params = params
+	c.connectedOnce = true
+	return c.connectLocked()
+}
+
+// connectOptions translates the package-level ConnectParams into go-nvfm
+// connect options.
+func connectOptions(params ConnectParams) []nvfm.ConnectOption {
 	opts := []nvfm.ConnectOption{}
 	if params.AddressInfo != "" {
 		if params.AddressIsUnixSocket {
@@ -57,8 +71,13 @@ func (c *nvfmClient) Connect(params ConnectParams) error {
 	if params.TimeoutMs != 0 {
 		opts = append(opts, nvfm.WithTimeoutMs(params.TimeoutMs))
 	}
+	return opts
+}
 
-	handle, ret := c.lib.Connect(opts...)
+// connectLocked establishes a fresh connection using the stored params. The
+// caller must hold c.mu.
+func (c *nvfmClient) connectLocked() error {
+	handle, ret := c.lib.Connect(connectOptions(c.params)...)
 	if err := toError(ret, "fmConnect"); err != nil {
 		return err
 	}
@@ -66,7 +85,21 @@ func (c *nvfmClient) Connect(params ConnectParams) error {
 	return nil
 }
 
+// reconnectLocked tears down any stale handle and re-establishes the
+// connection. The caller must hold c.mu.
+func (c *nvfmClient) reconnectLocked() error {
+	if c.handle != nil {
+		// Best-effort teardown; the connection is presumed already broken so
+		// the error is not actionable.
+		_ = c.handle.Disconnect()
+		c.handle = nil
+	}
+	return c.connectLocked()
+}
+
 func (c *nvfmClient) Disconnect() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.handle == nil {
 		return nil
 	}
@@ -76,52 +109,65 @@ func (c *nvfmClient) Disconnect() error {
 }
 
 func (c *nvfmClient) Shutdown() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return toError(c.lib.Shutdown(), "fmLibShutdown")
 }
 
 func (c *nvfmClient) GetSupportedFabricPartitions() ([]Partition, error) {
-	if c.handle == nil {
-		return nil, errNotConnected
-	}
-	list, ret := c.handle.GetSupportedFabricPartitions()
-	if err := toError(ret, "fmGetSupportedFabricPartitions"); err != nil {
+	var list nvfm.FabricPartitionList
+	err := c.doWithReconnect("fmGetSupportedFabricPartitions", func(h nvfm.Handle) nvfm.Return {
+		var ret nvfm.Return
+		list, ret = h.GetSupportedFabricPartitions()
+		return ret
+	})
+	if err != nil {
 		return nil, err
 	}
 	return toPartitions(list), nil
 }
 
-func (c *nvfmClient) GetUnsupportedFabricPartitions() ([]UnsupportedPartition, error) {
-	if c.handle == nil {
-		return nil, errNotConnected
-	}
-	list, ret := c.handle.GetUnsupportedFabricPartitions()
-	if err := toError(ret, "fmGetUnsupportedFabricPartitions"); err != nil {
-		return nil, err
-	}
-	return toUnsupportedPartitions(list), nil
-}
-
 func (c *nvfmClient) ActivateFabricPartition(partitionID int) error {
-	if c.handle == nil {
-		return errNotConnected
-	}
-	return toError(
-		c.handle.ActivateFabricPartition(nvfm.FabricPartitionId(partitionID)),
-		"fmActivateFabricPartition",
-	)
+	return c.doWithReconnect("fmActivateFabricPartition", func(h nvfm.Handle) nvfm.Return {
+		return h.ActivateFabricPartition(nvfm.FabricPartitionId(partitionID))
+	})
 }
 
 func (c *nvfmClient) DeactivateFabricPartition(partitionID int) error {
-	if c.handle == nil {
-		return errNotConnected
-	}
-	return toError(
-		c.handle.DeactivateFabricPartition(nvfm.FabricPartitionId(partitionID)),
-		"fmDeactivateFabricPartition",
-	)
+	return c.doWithReconnect("fmDeactivateFabricPartition", func(h nvfm.Handle) nvfm.Return {
+		return h.DeactivateFabricPartition(nvfm.FabricPartitionId(partitionID))
+	})
 }
 
-var errNotConnected = fmt.Errorf("fabricmanager: not connected (call Connect first)")
+// doWithReconnect runs fn against the live FM handle while holding the
+// connection lock. If fn reports that the connection is no longer valid (e.g.
+// nv-fabricmanager restarted under a long-lived connection), it reconnects
+// once and retries fn a single time. Logical errors (e.g. IN_USE) are returned
+// as-is without a reconnect.
+func (c *nvfmClient) doWithReconnect(op string, fn func(nvfm.Handle) nvfm.Return) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.connectedOnce {
+		return fmt.Errorf("fabricmanager: not connected (call Connect first)")
+	}
+	if c.handle == nil {
+		if err := c.reconnectLocked(); err != nil {
+			return fmt.Errorf("%s: reconnect failed: %w", op, err)
+		}
+	}
+
+	ret := fn(c.handle)
+	if ret != nvfm.CONNECTION_NOT_VALID && ret != nvfm.UNINITIALIZED {
+		return toError(ret, op)
+	}
+
+	klog.Warningf("fabricmanager: %s returned %s; reconnecting to nv-fabricmanager and retrying once", op, ret)
+	if err := c.reconnectLocked(); err != nil {
+		return fmt.Errorf("%s: reconnect after %s failed: %w", op, ret, err)
+	}
+	return toError(fn(c.handle), op)
+}
 
 // toError converts an nvfm.Return into an error, returning nil on SUCCESS.
 func toError(ret nvfm.Return, op string) error {
@@ -162,24 +208,6 @@ func toPartitions(list nvfm.FabricPartitionList) []Partition {
 			ID:       int(p.PartitionId),
 			IsActive: p.IsActive != 0,
 			GPUs:     gpus,
-		})
-	}
-	return out
-}
-
-func toUnsupportedPartitions(list nvfm.UnsupportedFabricPartitionList) []UnsupportedPartition {
-	count := clamp(list.NumPartitions, len(list.PartitionInfo))
-	out := make([]UnsupportedPartition, 0, count)
-	for i := 0; i < count; i++ {
-		p := list.PartitionInfo[i]
-		numGPUs := clamp(p.NumGpus, len(p.GpuPhysicalIds))
-		ids := make([]int, 0, numGPUs)
-		for j := 0; j < numGPUs; j++ {
-			ids = append(ids, int(p.GpuPhysicalIds[j]))
-		}
-		out = append(out, UnsupportedPartition{
-			ID:             int(p.PartitionId),
-			GPUPhysicalIDs: ids,
 		})
 	}
 	return out

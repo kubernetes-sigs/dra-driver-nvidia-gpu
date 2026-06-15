@@ -62,15 +62,8 @@ func (p Partition) GPUModuleIDs() []int {
 	return ids
 }
 
-// UnsupportedPartition describes an FM-rejected partition
-// Mirrors fmUnsupportedFabricPartitionInfo_t.
-type UnsupportedPartition struct {
-	ID             int
-	GPUPhysicalIDs []int
-}
-
 // Client is a Go projection of the NVIDIA Fabric Manager C SDK
-// (libnvidia-fabricmanager.so)
+// (libnvidia-fabricmanager.so).
 type Client interface {
 	Init() error
 
@@ -78,9 +71,6 @@ type Client interface {
 
 	// GetSupportedFabricPartitions returns every partition FM supports on this node, including each partition's GPU members.
 	GetSupportedFabricPartitions() ([]Partition, error)
-
-	// GetUnsupportedFabricPartitions returns partitions FM knows about but has marked unsupported (e.g. due to NVLink failures).
-	GetUnsupportedFabricPartitions() ([]UnsupportedPartition, error)
 
 	// ActivateFabricPartition asks FM to program the NVSwitch fabric for the given partition. Used as part of DRA allocation for GPU passthrough.
 	ActivateFabricPartition(partitionID int) error
@@ -95,3 +85,25 @@ type Client interface {
 	// Shutdown unloads/shuts down the FM library (fmLibShutdown).
 	Shutdown() error
 }
+
+// stubClient is a placeholder Client. It exists so that this package compiles
+// and is usable for unit tests.
+type stubClient struct{}
+
+// NewStubClient returns a no-op FM client whose partition queries always fail
+// with ErrUnimplemented.
+func NewStubClient() Client {
+	return &stubClient{}
+}
+
+func (*stubClient) Init() error                 { return nil }
+func (*stubClient) Connect(ConnectParams) error { return nil }
+func (*stubClient) Disconnect() error           { return nil }
+func (*stubClient) Shutdown() error             { return nil }
+
+func (*stubClient) GetSupportedFabricPartitions() ([]Partition, error) {
+	return nil, ErrUnimplemented
+}
+
+func (*stubClient) ActivateFabricPartition(int) error   { return ErrUnimplemented }
+func (*stubClient) DeactivateFabricPartition(int) error { return ErrUnimplemented }
