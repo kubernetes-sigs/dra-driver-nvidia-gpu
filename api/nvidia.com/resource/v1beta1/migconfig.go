@@ -32,31 +32,18 @@ type MigDeviceConfig struct {
 
 // DefaultMigDeviceConfig provides the default Mig Device configuration.
 func DefaultMigDeviceConfig() *MigDeviceConfig {
-	config := &MigDeviceConfig{
+	return &MigDeviceConfig{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: GroupName + "/" + Version,
 			Kind:       MigDeviceConfigKind,
 		},
 	}
-
-	if featuregates.Enabled(featuregates.TimeSlicingSettings) {
-		config.Sharing = &MigDeviceSharing{
-			Strategy: TimeSlicingStrategy,
-		}
-	}
-
-	return config
 }
 
 // Normalize updates a MigDeviceConfig config with implied default values based on other settings.
 func (c *MigDeviceConfig) Normalize() error {
 	if c.Sharing == nil {
-		if !featuregates.Enabled(featuregates.TimeSlicingSettings) {
-			return nil
-		}
-		c.Sharing = &MigDeviceSharing{
-			Strategy: TimeSlicingStrategy,
-		}
+		return nil
 	}
 
 	if featuregates.Enabled(featuregates.MPSSupport) {

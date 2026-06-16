@@ -33,34 +33,18 @@ type GpuConfig struct {
 
 // DefaultGpuConfig provides the default GPU configuration.
 func DefaultGpuConfig() *GpuConfig {
-	config := &GpuConfig{
+	return &GpuConfig{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: GroupName + "/" + Version,
 			Kind:       GpuConfigKind,
 		},
 	}
-
-	if featuregates.Enabled(featuregates.TimeSlicingSettings) {
-		config.Sharing = &GpuSharing{
-			Strategy: TimeSlicingStrategy,
-			TimeSlicingConfig: &TimeSlicingConfig{
-				Interval: ptr.To(DefaultTimeSlice),
-			},
-		}
-	}
-
-	return config
 }
 
 // Normalize updates a GpuConfig config with implied default values based on other settings.
 func (c *GpuConfig) Normalize() error {
 	if c.Sharing == nil {
-		if !featuregates.Enabled(featuregates.TimeSlicingSettings) {
-			return nil
-		}
-		c.Sharing = &GpuSharing{
-			Strategy: TimeSlicingStrategy,
-		}
+		return nil
 	}
 
 	if featuregates.Enabled(featuregates.TimeSlicingSettings) {
