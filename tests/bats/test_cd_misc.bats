@@ -200,18 +200,18 @@ bats::on_failure() {
     -l dra-driver-nvidia-gpu-component=kubelet-plugin \
     -n dra-driver-nvidia-gpu \
     --prefix --tail=-1
-  assert_output --partial "Deleted claim from checkpoint: default/batssuite-rc-bad-opaque-config"
+  assert_output --partial "Marked claim PrepareAborted in checkpoint: default/batssuite-rc-bad-opaque-config"
   assert_output --partial "Checkpointed RC cleanup: unprepared stale claim: default/batssuite-rc-bad-opaque-config"
 
   # Stage 4: appendix -- happens shortly thereafter: we do get a
-  # UnprepareResourceClaims() call for this claim. Why? It's a noop because the
-  # cleanup above was faster.
+  # UnprepareResourceClaims() call for this claim. Why? It's a noop because
+  # cleanup above already moved the checkpoint entry to PrepareAborted.
   sleep 4
   run kubectl logs \
     -l dra-driver-nvidia-gpu-component=kubelet-plugin \
     -n dra-driver-nvidia-gpu \
     --prefix --tail=-1
-  assert_output --partial "Unprepare noop: claim not found in checkpoint data"
+  assert_output --partial "Unprepare noop: claim in PrepareAborted state"
 }
 
 

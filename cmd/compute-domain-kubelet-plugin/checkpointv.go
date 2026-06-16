@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 
 	resourceapi "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 
@@ -62,6 +63,7 @@ const (
 	ClaimCheckpointStateUnset            ClaimCheckpointState = ""
 	ClaimCheckpointStatePrepareStarted   ClaimCheckpointState = "PrepareStarted"
 	ClaimCheckpointStatePrepareCompleted ClaimCheckpointState = "PrepareCompleted"
+	ClaimCheckpointStatePrepareAborted   ClaimCheckpointState = "PrepareAborted"
 )
 
 // Latest version type aliases
@@ -88,6 +90,7 @@ type PreparedClaimV2 struct {
 	PreparedDevices PreparedDevices                 `json:"preparedDevices,omitempty"`
 	Name            string                          `json:"name,omitempty"`
 	Namespace       string                          `json:"namespace,omitempty"`
+	AbortedAt       *metav1.Time                    `json:"abortedAt,omitempty"`
 }
 
 // V1 types
