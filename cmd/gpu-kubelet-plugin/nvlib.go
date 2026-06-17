@@ -644,8 +644,8 @@ func (l deviceLib) enumerateGpuVfioDevices(perGPUAllocatable *PerGPUAllocatableD
 			klog.Warningf("Skipping VFIO device %s: unable to read driver: %v", pci.Address, err)
 			continue
 		}
-		if driver != vfioPciDriver {
-			klog.Infof("Skipping VFIO device %s: bound to %q, not %q", pci.Address, driver, vfioPciDriver)
+		if !strings.Contains(driver, "vfio") {
+			klog.Infof("Skipping VFIO device %s: bound to %q, not a vfio driver", pci.Address, driver)
 			continue
 		}
 

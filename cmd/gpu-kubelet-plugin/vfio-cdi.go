@@ -92,8 +92,7 @@ func (h *vfioCDIHandler) GetDeviceSpecsByPCIBusID(pciBusID string, preferIommuFD
 	devNodes := make([]*cdispec.DeviceNode, 0)
 
 	if preferIommuFD && h.iommuFDEnabled {
-		nvpci := nvpci.New()
-		pciDeviceInfo, err := nvpci.GetGPUByPciBusID(pciBusID)
+		pciDeviceInfo, err := h.deviceLib.nvpci.GetGPUByPciBusID(pciBusID)
 		if err != nil {
 			return nil, fmt.Errorf("error getting PCI device info for GPU %q: %w", pciBusID, err)
 		}
