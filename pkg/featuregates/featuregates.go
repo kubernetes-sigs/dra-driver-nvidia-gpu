@@ -74,6 +74,11 @@ const (
 	// DeviceMetadata allows the kubelet plugin to generate device metadata files
 	// in the workloads for prepared devices.
 	DeviceMetadata featuregate.Feature = "DeviceMetadata"
+
+	// DRAListTypeAttributes allows the GPU kubelet plugin to publish list-valued
+	// DRA device attributes. The cluster must have the Kubernetes feature gate
+	// of the same name enabled before enabling this in the driver.
+	DRAListTypeAttributes featuregate.Feature = "DRAListTypeAttributes"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -142,6 +147,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		},
 	},
 	DeviceMetadata: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 4),
+		},
+	},
+	DRAListTypeAttributes: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,

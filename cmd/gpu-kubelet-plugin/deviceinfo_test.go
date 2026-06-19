@@ -23,6 +23,8 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/stretchr/testify/require"
+
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
 func newTestGpuInfo(numaNode *int) *GpuInfo {
@@ -42,25 +44,49 @@ func newTestGpuInfo(numaNode *int) *GpuInfo {
 func requireNumaNodeAttribute(t *testing.T, attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, expected int64) {
 	t.Helper()
 
-	attr, ok := attrs[compatibilityNumaNodeAttribute]
+	attr, ok := attrs[standardNumaNodeAttribute]
 	require.True(t, ok)
 	require.NotNil(t, attr.IntValue)
 	require.Equal(t, expected, *attr.IntValue)
 }
 
-func TestGpuInfoAttributesIncludeCompatibilityNumaNode(t *testing.T) {
+func requireNumaNodeListAttribute(t *testing.T, attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, expected []int64) {
+	t.Helper()
+
+	attr, ok := attrs[standardNumaNodeAttribute]
+	require.True(t, ok)
+	require.Nil(t, attr.IntValue)
+	require.Equal(t, expected, attr.IntValues)
+}
+
+func TestGpuInfoAttributesIncludeStandardNumaNode(t *testing.T) {
 	gpu := newTestGpuInfo(ptr.To(1))
 
 	requireNumaNodeAttribute(t, gpu.Attributes(), 1)
 }
 
-func TestCommonMigAttributesIncludeCompatibilityNumaNode(t *testing.T) {
+func TestGpuInfoAttributesIncludeStandardNumaNodeListWhenEnabled(t *testing.T) {
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+		string(featuregates.DRAListTypeAttributes): true,
+	}))
+	defer func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+			string(featuregates.DRAListTypeAttributes): false,
+		}))
+	}()
+
+	gpu := newTestGpuInfo(ptr.To(1))
+
+	requireNumaNodeListAttribute(t, gpu.Attributes(), []int64{1})
+}
+
+func TestCommonMigAttributesIncludeStandardNumaNode(t *testing.T) {
 	parent := newTestGpuInfo(ptr.To(2))
 
 	requireNumaNodeAttribute(t, CommonAttributesMig(parent, "1g.10gb"), 2)
 }
 
-func TestVfioDeviceIncludesCompatibilityNumaNode(t *testing.T) {
+func TestVfioDeviceIncludesStandardNumaNode(t *testing.T) {
 	vfio := &VfioDeviceInfo{
 		UUID:                   "vfio-test",
 		deviceID:               "0x1234",

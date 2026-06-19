@@ -181,7 +181,7 @@ func CommonAttributesMig(parent *GpuInfo, profileName string) map[resourceapi.Qu
 		attrs[parent.pcieRootAttr.Name] = parent.pcieRootAttr.Value
 	}
 
-	addCompatibilityNumaNodeAttribute(attrs, parent.numaNode)
+	addNumaNodeAttribute(attrs, parent.numaNode)
 
 	return attrs
 }
