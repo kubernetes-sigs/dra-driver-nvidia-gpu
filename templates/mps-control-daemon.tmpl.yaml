@@ -16,6 +16,9 @@ spec:
       labels:
         app: {{ .MpsControlDaemonName }}
     spec:
+      {{- if .ServiceAccountName }}
+      serviceAccountName: {{ .ServiceAccountName }}
+      {{- end }}
       nodeName: {{ .NodeName }}
       hostPID: true
       containers:
