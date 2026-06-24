@@ -974,7 +974,36 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 		}
 	}
 
-	// Release the NVSwitch fabric partition before rebinding the GPUs to the
+	// The GPUs were just rebound from vfio-pci back to the nvidia driver
+	// (above), so NVML can see them again. For any GPU whose (PCI bus ID,
+	// gpuModuleId) pair is missing from the Fabric Manager in-memory map,
+	// re-resolve it from NVML and write it back before we deactivate the
+	// partition.
+	//
+	// This recovers the mapping after a kubelet-plugin restart: the FM module
+	// map is rebuilt at startup by walking only NVML-visible GPUs, and a GPU
+	// bound to vfio-pci for an active passthrough claim is invisible to NVML at
+	// that point, so its entry is absent. Without this refresh the
+	// PCI->gpuModuleId lookup in deactivateFabricPartition would miss and the
+	// still-active fabric partition would be leaked.
+	if fm := s.nvdevlib.fmManager; fm != nil {
+		for _, device := range devices {
+			info := device.Vfio.Info
+			if info == nil || info.PciBusID == "" {
+				continue
+			}
+			if _, ok := fm.GetModuleIDByPCI(info.PciBusID); ok {
+				// Mapping already present; no NVML re-resolution needed.
+				continue
+			}
+			if err := s.refreshFabricManagerInfoWithRetry(ctx, info); err != nil {
+				return fmt.Errorf("error refreshing fabric manager mapping for vfio device %q: %w",
+					device.Vfio.Device.DeviceName, err)
+			}
+		}
+	}
+
+	// Release the NVSwitch fabric partition after rebinding the GPUs to the
 	// nvidia driver
 	pciBusIDs := []string{}
 	for _, device := range devices {
@@ -986,6 +1015,38 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 		return err
 	}
 	return nil
+}
+
+// refreshFabricManagerInfoWithRetry re-resolves a freshly-rebound GPU's
+// (PCI bus ID, gpuModuleId) mapping from NVML and records it in the FM Manager.
+//
+// NVML enumeration can briefly lag a vfio-pci -> nvidia driver rebind, so the
+// underlying lookup is retried a few times before giving up. On failure the
+// error is returned so the caller fails NodeUnprepareResources and kubelet
+// retries, rather than silently leaving the fabric partition active.
+func (s *DeviceState) refreshFabricManagerInfoWithRetry(ctx context.Context, info *VfioDeviceInfo) error {
+	const attempts = 5
+	const delay = 500 * time.Millisecond
+
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err = s.nvdevlib.refreshFabricManagerInfo(info); err == nil {
+			return nil
+		}
+		klog.V(4).Infof("Fabric Manager: refresh attempt %d/%d for VFIO GPU at PCI %s failed: %v",
+			attempt, attempts, info.PciBusID, err)
+		if attempt == attempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context canceled while refreshing fabric manager mapping for PCI %s: %w",
+				info.PciBusID, ctx.Err())
+		case <-time.After(delay):
+		}
+	}
+	return fmt.Errorf("exhausted %d attempts refreshing fabric manager mapping for PCI %s: %w",
+		attempts, info.PciBusID, err)
 }
 
 // Discover all sibling devices on the parent GPU of the given device.
@@ -1157,7 +1218,7 @@ func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configa
 	}
 
 	// Program the NVSwitch fabric for this set of passthrough GPUs via Fabric
-	// Manager. No-op on non-HGX nodes / when FM is not wired up.
+	// Manager. No-op when FM is not wired up.
 	if err := s.activateFabricPartition(pciBusIDs); err != nil {
 		return nil, err
 	}

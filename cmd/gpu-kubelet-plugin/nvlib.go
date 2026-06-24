@@ -128,8 +128,8 @@ const (
 	fmLibraryPathEnvvar = "NVIDIA_FABRICMANAGER_LIBRARY_PATH"
 
 	defaultFMAddress     = "127.0.0.1"
-	defaultFMUnixSocket  = "/run/nvidia-fabricmanager/socket"
-	defaultFMLibraryPath = "/usr/lib/libnvfm.so"
+	defaultFMUnixSocket  = "/driver-root/run/nvidia-fabricmanager/socket"
+	defaultFMLibraryPath = "/driver-root/usr/lib/x86_64-linux-gnu/libnvfm.so"
 )
 
 // tryOpenFabricManager attempts to build an FM Manager backed by go-nvfm.

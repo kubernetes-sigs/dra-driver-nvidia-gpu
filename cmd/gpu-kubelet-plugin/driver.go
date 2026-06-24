@@ -320,7 +320,7 @@ func (d *driver) Shutdown() error {
 		d.state.nvdevlib.alwaysShutdown()
 	}
 
-	// Tear down the long-lived Fabric Manager connection, if one was opened.
+	// Tear down the Fabric Manager connection, if one was opened.
 	if d.state.nvdevlib.fmManager != nil {
 		if err := d.state.nvdevlib.fmManager.Close(); err != nil {
 			klog.Warningf("error closing Fabric Manager connection: %v", err)

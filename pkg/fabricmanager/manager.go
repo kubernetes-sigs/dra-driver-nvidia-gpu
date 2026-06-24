@@ -31,7 +31,6 @@ import (
 //
 //   - a PCI bus ID <-> gpuModuleId map populated by walking every visible GPU
 //   - the list of FM-supported fabric partitions discovered through a Client
-//   - a long-lived connection to nv-fabricmanager
 type Manager struct {
 	mu sync.RWMutex
 
@@ -56,16 +55,10 @@ type NVMLDeviceLister interface {
 	DeviceGetHandleByIndex(int) (nvml.Device, nvml.Return)
 }
 
-// Open builds a Manager and leaves a long-lived FM connection in place so the
-// caller can subsequently activate and deactivate partitions. It:
-//
+// Open builds a Manager for the callerr to subsequently activate and deactivate partitions. It:
 //  1. Walks every GPU visible to NVML and records (PCI bus ID, gpuModuleId).
 //  2. Calls Init+Connect on the FM client.
-//  3. Calls GetSupportedFabricPartitions, augments the (PCI bus ID,
-//     gpuModuleId) map with any GPUs only FM can see (e.g. GPUs already bound
-//     to vfio-pci for passthrough, invisible to NVML), and records the FM-supported partitions.
-//
-
+//  3. Calls GetSupportedFabricPartitions, augments the (PCI bus ID, gpuModuleId) map with any GPUs only FM can see (e.g. GPUs already bound to vfio-pci for passthrough, invisible to NVML), and records the FM-supported partitions.
 func Open(lib NVMLDeviceLister, client Client, params ConnectParams) (*Manager, error) {
 	if lib == nil {
 		return nil, fmt.Errorf("fabricmanager: nil NVML interface")

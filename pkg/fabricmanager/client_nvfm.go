@@ -141,9 +141,7 @@ func (c *nvfmClient) DeactivateFabricPartition(partitionID int) error {
 
 // doWithReconnect runs fn against the live FM handle while holding the
 // connection lock. If fn reports that the connection is no longer valid (e.g.
-// nv-fabricmanager restarted under a long-lived connection), it reconnects
-// once and retries fn a single time. Logical errors (e.g. IN_USE) are returned
-// as-is without a reconnect.
+// nv-fabricmanager restarted), it reconnects once and retries fn a single time.
 func (c *nvfmClient) doWithReconnect(op string, fn func(nvfm.Handle) nvfm.Return) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

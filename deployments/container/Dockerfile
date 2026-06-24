@@ -98,21 +98,6 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && /bin/bash-static --version
 
-# Fabric Manager shared library (libnvfm.so), required at runtime by the
-# gpu-kubelet-plugin to talk to nv-fabricmanager on NVSwitch-based HGX nodes.
-# The distroless runtime image has no package manager, so install the FM SDK
-# package here and copy the resulting library into the final image below.
-FROM nvcr.io/nvidia/base/ubuntu:jammy-20260217 AS fabricmanager
-# Install the FM SDK and stage libnvfm.so (+ versioned soname) into an
-# arch-neutral directory. The package installs into the target arch's multiarch
-# dir (e.g. x86_64-linux-gnu or aarch64-linux-gnu), so we normalize the location
-# here and copy with -a to preserve the symlink chain.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends nvidia-fabricmanager-dev-580 \
- && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives \
- && mkdir -p /fm-lib \
- && cp -a /usr/lib/*-linux-gnu/libnvfm.so* /fm-lib/
-
 # Pull the nvidia-cdi-hook binary out of the relevant toolkit container
 # (arch: TARGETPLATFORM, set via --platform).
 FROM ${TOOLKIT_CONTAINER_IMAGE} AS toolkit
@@ -145,11 +130,6 @@ LABEL org.opencontainers.image.source="https://github.com/kubernetes-sigs/dra-dr
 COPY LICENSE /
 
 COPY --from=bash    /bin/bash-static                          /bin/bash
-
-# Fabric Manager SDK shared library (and its versioned soname) so the
-# gpu-kubelet-plugin can dlopen libnvfm.so at runtime. Placed in /usr/lib so the
-# path is arch-neutral and resolvable via an absolute dlopen.
-COPY --from=fabricmanager /fm-lib/ /usr/lib/
 
 COPY --from=toolkit /artifacts/rpm/usr/bin/nvidia-cdi-hook    /usr/bin/nvidia-cdi-hook
 COPY --from=build   /artifacts/compute-domain-controller      /usr/bin/compute-domain-controller
