@@ -110,6 +110,7 @@ type MpsControlDaemonTemplateData struct {
 	MpsPipeDirectory                string
 	MpsLogDirectory                 string
 	MpsImageName                    string
+	ServiceAccountName              string
 	FeatureGates                    map[string]bool
 	MpsShmMountPath                 string
 }
@@ -237,6 +238,7 @@ func (m *MpsControlDaemon) Start(ctx context.Context, config *configapi.MpsConfi
 		MpsPipeDirectory:                m.pipeDir,
 		MpsLogDirectory:                 m.logDir,
 		MpsImageName:                    m.manager.config.flags.imageName,
+		ServiceAccountName:              m.manager.config.flags.serviceAccountName,
 		FeatureGates:                    featuregates.ToMap(),
 		MpsShmMountPath:                 setMpsShmMountPath(osFileChecker{}),
 	}

@@ -272,6 +272,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        - name: SERVICE_ACCOUNT_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.serviceAccountName
         - name: IMAGE_NAME
           value: {{ include "dra-driver-nvidia-gpu.fullimage" . }}
         {{- if .Values.nvidiaCDIHookPath }}

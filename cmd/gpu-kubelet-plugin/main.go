@@ -55,6 +55,7 @@ type Flags struct {
 	hostDriverRoot                string
 	nvidiaCDIHookPath             string
 	imageName                     string
+	serviceAccountName            string
 	kubeletRegistrarDirectoryPath string
 	kubeletPluginsDirectoryPath   string
 	healthcheckPort               int
@@ -132,6 +133,12 @@ func newApp() *cli.App {
 			Required:    true,
 			Destination: &flags.imageName,
 			EnvVars:     []string{"IMAGE_NAME"},
+		},
+		&cli.StringFlag{
+			Name:        "service-account-name",
+			Usage:       "Service account to use for rendering pod templates (e.g. for MPS control daemon Deployments). Empty string uses the Kubernetes default.",
+			Destination: &flags.serviceAccountName,
+			EnvVars:     []string{"SERVICE_ACCOUNT_NAME"},
 		},
 		&cli.StringFlag{
 			Name:        "kubelet-registrar-directory-path",
