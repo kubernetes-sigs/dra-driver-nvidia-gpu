@@ -36,7 +36,10 @@ func (d *ComputeDomainChannelInfo) CanonicalName() string {
 }
 
 func (d *ComputeDomainDaemonInfo) CanonicalName() string {
-	return fmt.Sprintf("%s-%d", ComputeDomainDaemonType, d.ID)
+	// There is only ever one daemon device per node (and, with
+	// SharedDaemonResourceClaim, only one cluster-wide via the static
+	// ResourceSlice). The static slice's device name must match this string.
+	return ComputeDomainDaemonType
 }
 
 func (d *ComputeDomainChannelInfo) CanonicalIndex() string {
