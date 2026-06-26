@@ -16,6 +16,8 @@ BUILD_MULTI_ARCH_IMAGES ?= no
 DOCKER ?= docker
 REGCTL ?= regctl
 PUSH_ON_BUILD ?= false
+PROVENANCE ?= false
+SBOM ?= false
 
 ##### Global variables #####
 include $(CURDIR)/versions.mk
@@ -48,13 +50,13 @@ DOCKER_BUILD_PLATFORM_OPTIONS = --platform=linux/amd64,linux/arm64
 ifeq ($(BUILD_MULTI_ARCH_GH),true)
 DOCKER_BUILD_OPTIONS = \
 	--output=type=oci,dest=$(OCI_OUTPUT) \
-	--provenance=false \
-	--sbom=false
+	--provenance=$(PROVENANCE) \
+	--sbom=$(SBOM)
 else
 DOCKER_BUILD_OPTIONS = \
-	--output=type=image,push=$(PUSH_ON_BUILD) \
-	--provenance=false \
-	--sbom=false
+	--output=type=image,push=$(PUSH_ON_BUILD),oci-mediatypes=true \
+	--provenance=$(PROVENANCE) \
+	--sbom=$(SBOM)
 endif
 else
 # We also support building single-platform images.
