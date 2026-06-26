@@ -18,19 +18,73 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	nvinformers "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/informers/externalversions"
 )
+
+// cdDaemonRowFieldManager identifies this node's SSA ownership of its entry in
+// CDClique.spec.daemons (list map key nodeName). Must stay ≤128 printable chars.
+func (m *ComputeDomainCliqueManager) cdDaemonRowFieldManager() string {
+	const p = "compute-domain-daemon:"
+	node := m.config.nodeName
+	if len(p)+len(node) <= 128 {
+		return p + node
+	}
+	sum := sha256.Sum256([]byte(node))
+	return p + hex.EncodeToString(sum[:32])
+}
+
+func (m *ComputeDomainCliqueManager) cdDaemonOwnerFieldManager() string {
+	const p = "compute-domain-daemon-owner:"
+	uid := m.config.podUID
+	if len(p)+len(uid) <= 128 {
+		return p + uid
+	}
+	sum := sha256.Sum256([]byte(uid))
+	return p + hex.EncodeToString(sum[:32])
+}
+
+func (m *ComputeDomainCliqueManager) patchCDCliqueSSA(ctx context.Context, patch map[string]any, fieldManager string) (*nvapi.ComputeDomainClique, error) {
+	patch["apiVersion"] = nvapi.SchemeGroupVersion.String()
+	patch["kind"] = nvapi.ComputeDomainCliqueKind
+	data, err := json.Marshal(patch)
+	if err != nil {
+		return nil, fmt.Errorf("marshal CDClique SSA patch: %w", err)
+	}
+	opts := metav1.PatchOptions{
+		FieldManager: fieldManager,
+		Force:        ptr.To(true),
+	}
+	return m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.podNamespace).
+		Patch(ctx, m.cliqueName(), types.ApplyPatchType, data, opts)
+}
+
+func (m *ComputeDomainCliqueManager) hasOwnerReferenceForPod(cd *nvapi.ComputeDomainClique) bool {
+	if cd == nil {
+		return false
+	}
+	for _, ref := range cd.OwnerReferences {
+		if string(ref.UID) == m.config.podUID {
+			return true
+		}
+	}
+	return false
+}
 
 // ComputeDomainCliqueManager watches ComputeDomainClique objects and updates them with
 // info about the ComputeDomain daemon running on this node. This is an alternative
@@ -218,6 +272,10 @@ func (m *ComputeDomainCliqueManager) ensureCliqueExists(ctx context.Context) err
 
 	createdClique, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.podNamespace).Create(ctx, newClique, metav1.CreateOptions{})
 	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			klog.Infof("CDClique '%s' already exists (concurrent create)", m.cliqueName())
+			return nil
+		}
 		return fmt.Errorf("failed to create CDClique '%s': %w", m.cliqueName(), err)
 	}
 	m.mutationCache.Mutation(createdClique)
@@ -319,14 +377,41 @@ func (m *ComputeDomainCliqueManager) syncDaemonInfoToClique(ctx context.Context,
 	// across pod restarts.
 	myDaemon.IPAddress = m.config.podIP
 
-	// Ensure this pod is an owner of the clique
-	m.ensureOwnerReference(newClique)
-
-	// Update the clique and (upon success) store the latest version of the object
-	// (as returned by the API server) in the mutation cache.
-	newClique, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.podNamespace).Update(ctx, newClique, metav1.UpdateOptions{})
+	row := map[string]any{
+		"nodeName":  myDaemon.NodeName,
+		"ipAddress": myDaemon.IPAddress,
+		"cliqueID":  myDaemon.CliqueID,
+		"index":     myDaemon.Index,
+		"status":    myDaemon.Status,
+	}
+	daemonPatch := map[string]any{
+		"metadata": map[string]any{
+			"name":      m.cliqueName(),
+			"namespace": m.config.podNamespace,
+		},
+		"daemons": []any{row},
+	}
+	newClique, err := m.patchCDCliqueSSA(ctx, daemonPatch, m.cdDaemonRowFieldManager())
 	if err != nil {
-		return nil, fmt.Errorf("error updating CDClique: %w", err)
+		return nil, fmt.Errorf("error applying CDClique daemon row (SSA): %w", err)
+	}
+	if !m.hasOwnerReferenceForPod(newClique) {
+		ownerPatch := map[string]any{
+			"metadata": map[string]any{
+				"name":      m.cliqueName(),
+				"namespace": m.config.podNamespace,
+				"ownerReferences": []any{map[string]any{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"name":       m.config.podName,
+					"uid":        m.config.podUID,
+				}},
+			},
+		}
+		newClique, err = m.patchCDCliqueSSA(ctx, ownerPatch, m.cdDaemonOwnerFieldManager())
+		if err != nil {
+			return nil, fmt.Errorf("error applying CDClique owner reference (SSA): %w", err)
+		}
 	}
 	m.mutationCache.Mutation(newClique)
 
@@ -381,26 +466,62 @@ func (m *ComputeDomainCliqueManager) removeDaemonInfoFromClique(ctx context.Cont
 		return nil
 	}
 
-	// Create a deep copy and filter out the daemon with the current pod's IP address
-	newClique := clique.DeepCopy()
-	var newDaemons []*nvapi.ComputeDomainDaemonInfo
-	for _, d := range newClique.Daemons {
-		if d.IPAddress != m.config.podIP {
-			newDaemons = append(newDaemons, d)
-		}
+	removePatch := map[string]any{
+		"metadata": map[string]any{
+			"name":      m.cliqueName(),
+			"namespace": m.config.podNamespace,
+		},
+		"daemons": []any{},
 	}
-	newClique.Daemons = newDaemons
-
-	// Update the clique and (upon success) store the latest version of the object
-	// (as returned by the API server) in the mutation cache.
-	newClique, err = m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.podNamespace).Update(ctx, newClique, metav1.UpdateOptions{})
+	newClique, err := m.patchCDCliqueSSA(ctx, removePatch, m.cdDaemonRowFieldManager())
 	if err != nil {
-		return fmt.Errorf("error updating CDClique: %w", err)
+		return fmt.Errorf("error applying CDClique daemon removal (SSA): %w", err)
+	}
+	// Rows created before SSA (client Update) are not owned by our field manager; fall back once.
+	if m.cliqueStillListsThisNode(newClique) {
+		newClique, err = m.removeDaemonRowByUpdate(ctx)
+		if err != nil {
+			return err
+		}
 	}
 	m.mutationCache.Mutation(newClique)
 
-	klog.Infof("Successfully removed daemon with IP %s from CDClique %s (from ComputeDomain %s/%s)", m.config.podIP, m.cliqueName(), m.config.computeDomainNamespace, m.config.computeDomainName)
+	klog.Infof("Successfully removed daemon for node %s from CDClique %s (from ComputeDomain %s/%s)", m.config.nodeName, m.cliqueName(), m.config.computeDomainNamespace, m.config.computeDomainName)
 	return nil
+}
+
+func (m *ComputeDomainCliqueManager) cliqueStillListsThisNode(cd *nvapi.ComputeDomainClique) bool {
+	if cd == nil {
+		return false
+	}
+	for _, d := range cd.Daemons {
+		if d.NodeName == m.config.nodeName {
+			return true
+		}
+	}
+	return false
+}
+
+// removeDaemonRowByUpdate drops this node's daemon row using a live read and
+// optimistic Update (legacy rows not owned by our SSA field manager).
+func (m *ComputeDomainCliqueManager) removeDaemonRowByUpdate(ctx context.Context) (*nvapi.ComputeDomainClique, error) {
+	live, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.podNamespace).Get(ctx, m.cliqueName(), metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get CDClique for legacy daemon removal: %w", err)
+	}
+	updated := live.DeepCopy()
+	var kept []*nvapi.ComputeDomainDaemonInfo
+	for _, d := range updated.Daemons {
+		if d.NodeName != m.config.nodeName {
+			kept = append(kept, d)
+		}
+	}
+	updated.Daemons = kept
+	out, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.podNamespace).Update(ctx, updated, metav1.UpdateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("error updating CDClique (legacy daemon removal): %w", err)
+	}
+	return out, nil
 }
 
 // If there was actually a change compared to the previously known set of
@@ -464,11 +585,23 @@ func (m *ComputeDomainCliqueManager) updateDaemonStatus(ctx context.Context, rea
 	// Update the status
 	myDaemon.Status = status
 
-	// Update the clique and (upon success) store the latest version of the object
-	// (as returned by the API server) in the mutation cache.
-	newClique, err = m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.podNamespace).Update(ctx, newClique, metav1.UpdateOptions{})
+	row := map[string]any{
+		"nodeName":  myDaemon.NodeName,
+		"ipAddress": myDaemon.IPAddress,
+		"cliqueID":  myDaemon.CliqueID,
+		"index":     myDaemon.Index,
+		"status":    myDaemon.Status,
+	}
+	daemonPatch := map[string]any{
+		"metadata": map[string]any{
+			"name":      m.cliqueName(),
+			"namespace": m.config.podNamespace,
+		},
+		"daemons": []any{row},
+	}
+	newClique, err = m.patchCDCliqueSSA(ctx, daemonPatch, m.cdDaemonRowFieldManager())
 	if err != nil {
-		return fmt.Errorf("error updating CDClique: %w", err)
+		return fmt.Errorf("error applying CDClique daemon status (SSA): %w", err)
 	}
 	m.mutationCache.Mutation(newClique)
 
