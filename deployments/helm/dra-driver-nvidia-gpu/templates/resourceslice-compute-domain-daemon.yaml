@@ -45,7 +45,6 @@ spec:
   # its local allocatable map on this name when resolving Prepare()'s
   # result.Device.
   - name: daemon
-    allowMultipleAllocations: true
     attributes:
       type:
         string: daemon

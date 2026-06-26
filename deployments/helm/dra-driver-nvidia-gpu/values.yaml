@@ -92,19 +92,6 @@ resources:
 #   NVMLDeviceHealthCheck: false       # GPU Health Checking using NVML
 featureGates: {}
 
-# kubernetesAlphaFeatureGates lets the operator attest which upstream
-# Kubernetes alpha feature gates are enabled on the apiserver / scheduler /
-# kubelet. The chart uses this to relax install-time version checks when
-# driver behavior depends on a Kubernetes gate that is alpha (off by default)
-# on the cluster's k8s version. Set an entry to true only after confirming the
-# corresponding gate is enabled on the relevant control-plane and node
-# components.
-#
-# Example: on Kubernetes 1.34 or 1.35, set DRAConsumableCapacity=true after
-# enabling that alpha gate on the apiserver and scheduler so that the chart
-# stops refusing to install SharedDaemonResourceClaim.
-kubernetesAlphaFeatureGates:
-  DRAConsumableCapacity: false
 
 # Log verbosity for all components. Zero or greater, higher number means higher
 # verbosity. Regardless of this setting, messages of type Error, Warning, and

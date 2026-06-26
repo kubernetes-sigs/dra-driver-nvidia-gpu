@@ -15,6 +15,11 @@ spec:
     - name: daemon
       exactly:
         deviceClassName: {{ .DeviceClassName }}
+        # Lets multiple per-CD ResourceClaims share the single static
+        # cluster-wide compute-domain-daemon device. The apiserver only
+        # permits adminAccess from namespaces labeled with
+        # resource.kubernetes.io/admin-access=true (the driver namespace).
+        adminAccess: true
     config:
     - requests: ["daemon"]
       opaque:

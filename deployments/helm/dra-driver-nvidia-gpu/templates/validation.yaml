@@ -129,26 +129,3 @@
 {{- fail $error }}
 {{- end }}
 
-{{- /*
-SharedDaemonResourceClaim relies on the upstream DRAConsumableCapacity feature
-gate (which exposes Device.AllowMultipleAllocations). That gate is beta and on
-by default in Kubernetes 1.36; on 1.34 and 1.35 it is alpha and off by default.
-Refuse to install with the driver gate enabled on older clusters unless the
-operator explicitly attests that the upstream gate is enabled.
-*/ -}}
-{{- $sharedDaemonRC := true }}
-{{- if and .Values.featureGates (hasKey (.Values.featureGates | default dict) "SharedDaemonResourceClaim") }}
-{{- $sharedDaemonRC = .Values.featureGates.SharedDaemonResourceClaim }}
-{{- end }}
-{{- $dracc := false }}
-{{- if and .Values.kubernetesAlphaFeatureGates (hasKey (.Values.kubernetesAlphaFeatureGates | default dict) "DRAConsumableCapacity") }}
-{{- $dracc = .Values.kubernetesAlphaFeatureGates.DRAConsumableCapacity }}
-{{- end }}
-{{- if and $sharedDaemonRC (semverCompare "<1.36.0-0" .Capabilities.KubeVersion.Version) (not $dracc) }}
-{{- $error := "" }}
-{{- $error = printf "%s\nThe SharedDaemonResourceClaim feature requires Kubernetes >= 1.36 (where the upstream DRAConsumableCapacity gate is beta and on by default)." $error }}
-{{- $error = printf "%s\nDetected Kubernetes version: %s." $error .Capabilities.KubeVersion.Version }}
-{{- $error = printf "%s\nIf you have manually enabled the upstream DRAConsumableCapacity alpha gate on the apiserver and scheduler, attest to this via --set 'kubernetesAlphaFeatureGates.DRAConsumableCapacity=true'." $error }}
-{{- $error = printf "%s\nOtherwise, opt out via --set 'featureGates.SharedDaemonResourceClaim=false'." $error }}
-{{- fail $error }}
-{{- end }}
