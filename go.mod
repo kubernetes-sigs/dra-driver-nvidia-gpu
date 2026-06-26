@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
+	github.com/NVIDIA/go-nvfm v0.0.0-20260528194329-0a8cb60d7cb1
 	github.com/NVIDIA/go-nvlib v0.11.0
 	github.com/NVIDIA/go-nvml v0.13.1-0
 	github.com/NVIDIA/nvidia-container-toolkit v1.19.1
@@ -96,3 +97,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace github.com/NVIDIA/go-nvfm => github.com/varunrsekar/go-nvfm v0.0.0-20260528194329-0a8cb60d7cb1

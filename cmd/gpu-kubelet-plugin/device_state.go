@@ -973,7 +973,80 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 			return fmt.Errorf("error unconfiguring vfio device %q: %w", device.Vfio.Device.DeviceName, err)
 		}
 	}
+
+	// The GPUs were just rebound from vfio-pci back to the nvidia driver
+	// (above), so NVML can see them again. For any GPU whose (PCI bus ID,
+	// gpuModuleId) pair is missing from the Fabric Manager in-memory map,
+	// re-resolve it from NVML and write it back before we deactivate the
+	// partition.
+	//
+	// This recovers the mapping after a kubelet-plugin restart: the FM module
+	// map is rebuilt at startup by walking only NVML-visible GPUs, and a GPU
+	// bound to vfio-pci for an active passthrough claim is invisible to NVML at
+	// that point, so its entry is absent. Without this refresh the
+	// PCI->gpuModuleId lookup in deactivateFabricPartition would miss and the
+	// still-active fabric partition would be leaked.
+	if fm := s.nvdevlib.fmManager; fm != nil {
+		for _, device := range devices {
+			info := device.Vfio.Info
+			if info == nil || info.PciBusID == "" {
+				continue
+			}
+			if _, ok := fm.GetModuleIDByPCI(info.PciBusID); ok {
+				// Mapping already present; no NVML re-resolution needed.
+				continue
+			}
+			if err := s.refreshFabricManagerInfoWithRetry(ctx, info); err != nil {
+				return fmt.Errorf("error refreshing fabric manager mapping for vfio device %q: %w",
+					device.Vfio.Device.DeviceName, err)
+			}
+		}
+	}
+
+	// Release the NVSwitch fabric partition after rebinding the GPUs to the
+	// nvidia driver
+	pciBusIDs := []string{}
+	for _, device := range devices {
+		if device.Vfio.Info != nil && device.Vfio.Info.PciBusID != "" {
+			pciBusIDs = append(pciBusIDs, device.Vfio.Info.PciBusID)
+		}
+	}
+	if err := s.deactivateFabricPartition(pciBusIDs); err != nil {
+		return err
+	}
 	return nil
+}
+
+// refreshFabricManagerInfoWithRetry re-resolves a freshly-rebound GPU's
+// (PCI bus ID, gpuModuleId) mapping from NVML and records it in the FM Manager.
+//
+// NVML enumeration can briefly lag a vfio-pci -> nvidia driver rebind, so the
+// underlying lookup is retried a few times before giving up. On failure the
+// error is returned so the caller fails NodeUnprepareResources and kubelet
+// retries, rather than silently leaving the fabric partition active.
+func (s *DeviceState) refreshFabricManagerInfoWithRetry(ctx context.Context, info *VfioDeviceInfo) error {
+	const attempts = 5
+	const delay = 500 * time.Millisecond
+
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err = s.nvdevlib.refreshFabricManagerInfo(info); err == nil {
+			return nil
+		}
+		klog.V(4).Infof("Fabric Manager: refresh attempt %d/%d for VFIO GPU at PCI %s failed: %v",
+			attempt, attempts, info.PciBusID, err)
+		if attempt == attempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context canceled while refreshing fabric manager mapping for PCI %s: %w",
+				info.PciBusID, ctx.Err())
+		case <-time.After(delay):
+		}
+	}
+	return fmt.Errorf("exhausted %d attempts refreshing fabric manager mapping for PCI %s: %w",
+		attempts, info.PciBusID, err)
 }
 
 // Discover all sibling devices on the parent GPU of the given device.
@@ -1007,6 +1080,16 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 			return fmt.Errorf("error adding allocatable device: %w", err)
 		}
 		device.Vfio.parent = gpu.Gpu
+
+		// The GPU has just switched from the vfio-pci driver back to the nvidia
+		// driver and is visible to NVML again. If its Fabric Manager attributes
+		// could not be discovered at startup (because it was already bound to
+		// vfio-pci then), refresh the FM module mapping from NVML and re-attach
+		// the gpuModuleId/partitionN attributes to the in-memory VFIO device so
+		// the republished ResourceSlice carries them.
+		if err := s.nvdevlib.refreshFabricManagerInfo(device.Vfio); err != nil {
+			return fmt.Errorf("error refreshing fabric manager info for vfio device %q: %w", device.Vfio.CanonicalName(), err)
+		}
 	case MigStaticDeviceType:
 		// TODO: Implement once partitionable device is supported with PassthroughSupport feature gate.
 		return nil
@@ -1121,6 +1204,7 @@ func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configa
 
 	configState.containerEdits = commonEdits
 	// Configure the vfio-pci devices.
+	pciBusIDs := make([]string, 0, len(results))
 	for _, r := range results {
 		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
 		if device == nil {
@@ -1130,9 +1214,81 @@ func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configa
 		if err != nil {
 			return nil, fmt.Errorf("error configuring vfio device %q: %w", r.Device, err)
 		}
+		pciBusIDs = append(pciBusIDs, device.Vfio.PciBusID)
+	}
+
+	// Program the NVSwitch fabric for this set of passthrough GPUs via Fabric
+	// Manager. No-op when FM is not wired up.
+	if err := s.activateFabricPartition(pciBusIDs); err != nil {
+		return nil, err
 	}
 
 	return &configState, nil
+}
+
+// fabricPartitionForPCIBusIDs resolves the FM partition formed by the given set
+// of VFIO GPU PCI bus IDs. Returns ok=false (no error) when Fabric Manager is
+// not wired up, when a GPU is unknown to FM, or when the set does not map to a
+// single FM partition; in all of those cases partition (de)activation is
+// skipped.
+func (s *DeviceState) fabricPartitionForPCIBusIDs(pciBusIDs []string) (int, bool) {
+	fm := s.nvdevlib.fmManager
+	if fm == nil {
+		return 0, false
+	}
+	moduleIDs := make([]int, 0, len(pciBusIDs))
+	for _, pci := range pciBusIDs {
+		moduleID, ok := fm.GetModuleIDByPCI(pci)
+		if !ok {
+			klog.Warningf("Fabric Manager: no gpuModuleId for VFIO GPU at PCI %s; skipping partition (de)activation", pci)
+			return 0, false
+		}
+		moduleIDs = append(moduleIDs, moduleID)
+	}
+	partitionID, ok := fm.FindPartitionByModuleIDs(moduleIDs)
+	if !ok {
+		klog.Warningf("Fabric Manager: GPU module set %v does not match any FM partition; skipping partition (de)activation", moduleIDs)
+		return 0, false
+	}
+	return partitionID, true
+}
+
+// activateFabricPartition activates the FM partition formed by the given VFIO GPUs.
+func (s *DeviceState) activateFabricPartition(pciBusIDs []string) error {
+	partitionID, ok := s.fabricPartitionForPCIBusIDs(pciBusIDs)
+	if !ok {
+		return nil
+	}
+	// Idempotency: a retried Prepare (e.g. after a later step failed) must not
+	// re-activate a partition this Manager already activated, which FM would
+	// reject as in-use.
+	if slices.Contains(s.nvdevlib.fmManager.ActivatedPartitions(), partitionID) {
+		klog.V(4).Infof("Fabric Manager: partition %d already active; skipping activation", partitionID)
+		return nil
+	}
+	klog.V(2).Infof("Fabric Manager: activating partition %d for %d-GPU passthrough claim", partitionID, len(pciBusIDs))
+	if err := s.nvdevlib.fmManager.ActivatePartition(partitionID); err != nil {
+		return fmt.Errorf("activating fabric partition %d: %w", partitionID, err)
+	}
+	return nil
+}
+
+// deactivateFabricPartition releases the FM partition formed by the given VFIO
+// GPUs.
+func (s *DeviceState) deactivateFabricPartition(pciBusIDs []string) error {
+	partitionID, ok := s.fabricPartitionForPCIBusIDs(pciBusIDs)
+	if !ok {
+		return nil
+	}
+	if !slices.Contains(s.nvdevlib.fmManager.ActivatedPartitions(), partitionID) {
+		klog.V(4).Infof("Fabric Manager: partition %d already inactive; skipping deactivation", partitionID)
+		return nil
+	}
+	klog.V(2).Infof("Fabric Manager: deactivating partition %d for %d-GPU passthrough claim", partitionID, len(pciBusIDs))
+	if err := s.nvdevlib.fmManager.DeactivatePartition(partitionID); err != nil {
+		return fmt.Errorf("deactivating fabric partition %d: %w", partitionID, err)
+	}
+	return nil
 }
 
 // GetOpaqueDeviceConfigs returns an ordered list of the configs contained in possibleConfigs for this driver.
