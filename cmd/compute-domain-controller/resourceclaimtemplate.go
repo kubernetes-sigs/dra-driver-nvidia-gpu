@@ -38,7 +38,7 @@ import (
 )
 
 const (
-	DaemonSetResourceClaimTemplateTemplatePath = "/templates/compute-domain-daemon-claim-template.tmpl.yaml"
+	DaemonSetResourceClaimTemplateTemplatePath = "/templates/compute-domain-daemon-resource-claim-template.tmpl.yaml"
 	WorkloadResourceClaimTemplateTemplatePath  = "/templates/compute-domain-workload-claim-template.tmpl.yaml"
 )
 

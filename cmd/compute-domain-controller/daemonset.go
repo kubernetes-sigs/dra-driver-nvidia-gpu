@@ -39,7 +39,7 @@ import (
 )
 
 const (
-	DaemonSetTemplatePath = "/templates/compute-domain-daemon.tmpl.yaml"
+	DaemonSetTemplatePath = "/templates/compute-domain-daemon-with-resource-claim-template.tmpl.yaml"
 )
 
 type DaemonSetTemplateData struct {
