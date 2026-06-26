@@ -1,0 +1,30 @@
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  namespace: {{ .Namespace }}
+  name: {{ .Name }}
+  finalizers:
+    - {{ .Finalizer }}
+  labels:
+    {{ .ComputeDomainLabelKey }}: {{ .ComputeDomainLabelValue }}
+    {{ .TargetLabelKey }}: {{ .TargetLabelValue }}
+spec:
+  devices:
+    requests:
+    - name: daemon
+      exactly:
+        deviceClassName: {{ .DeviceClassName }}
+        # Lets multiple per-CD ResourceClaims share the single static
+        # cluster-wide compute-domain-daemon device. The apiserver only
+        # permits adminAccess from namespaces labeled with
+        # resource.kubernetes.io/admin-access=true (the driver namespace).
+        adminAccess: true
+    config:
+    - requests: ["daemon"]
+      opaque:
+        driver: {{ .DriverName }}
+        parameters:
+          apiVersion: {{ .DaemonConfig.APIVersion }}
+          kind: {{ .DaemonConfig.Kind }}
+          domainID: {{ .DaemonConfig.DomainID }}

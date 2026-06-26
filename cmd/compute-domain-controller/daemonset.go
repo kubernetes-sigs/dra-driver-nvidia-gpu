@@ -39,10 +39,35 @@ import (
 )
 
 const (
-	DaemonSetTemplatePath = "/templates/compute-domain-daemon.tmpl.yaml"
+	// DaemonSetWithResourceClaimTemplatePath is the pod-template path
+	// used when the daemon's claim entry references a per-pod
+	// ResourceClaimTemplate (legacy path, SharedDaemonResourceClaim feature
+	// gate disabled).
+	DaemonSetWithResourceClaimTemplatePath = "/templates/compute-domain-daemon-with-resource-claim-template.tmpl.yaml"
+	// DaemonSetWithSharedResourceClaimPath is the pod-template path
+	// used when the daemon's claim entry references a shared per-CD
+	// ResourceClaim (SharedDaemonResourceClaim feature gate enabled).
+	DaemonSetWithSharedResourceClaimPath = "/templates/compute-domain-daemon-with-shared-resource-claim.tmpl.yaml"
 )
 
-type DaemonSetTemplateData struct {
+// resourceClaimOrResourceClaimTemplateManager abstracts whichever per-CD object backs the daemon
+// DaemonSet's ResourceClaim reference: a ResourceClaimTemplate (legacy path,
+// SharedDaemonResourceClaim disabled) or a ResourceClaim (shared-claim path,
+// SharedDaemonResourceClaim enabled).
+type resourceClaimOrResourceClaimTemplateManager interface {
+	Start(ctx context.Context) error
+	Stop() error
+	Create(ctx context.Context, cd *nvapi.ComputeDomain) (string, error)
+	Delete(ctx context.Context, cdUID string) error
+	RemoveFinalizer(ctx context.Context, cdUID string) error
+	AssertRemoved(ctx context.Context, cdUID string) error
+}
+
+// DaemonSetWithResourceClaimTemplateData drives the pod template at
+// DaemonSetWithResourceClaimTemplatePath. Its ResourceClaimTemplateName
+// field becomes the `resourceClaimTemplateName:` of the daemon pod's
+// "compute-domain-daemon" claim entry.
+type DaemonSetWithResourceClaimTemplateData struct {
 	Namespace                 string
 	Name                      string
 	Finalizer                 string
@@ -54,6 +79,24 @@ type DaemonSetTemplateData struct {
 	FeatureGates              map[string]bool
 	LogVerbosity              int
 	ImagePullSecretNames      []string
+}
+
+// DaemonSetWithSharedResourceClaimData drives the pod template at
+// DaemonSetWithSharedResourceClaimPath. Its ResourceClaimName field
+// becomes the `resourceClaimName:` of the daemon pod's "compute-domain-daemon"
+// claim entry.
+type DaemonSetWithSharedResourceClaimData struct {
+	Namespace               string
+	Name                    string
+	Finalizer               string
+	ComputeDomainLabelKey   string
+	ComputeDomainLabelValue types.UID
+	ResourceClaimName       string
+	ImageName               string
+	MaxNodesPerIMEXDomain   int
+	FeatureGates            map[string]bool
+	LogVerbosity            int
+	ImagePullSecretNames    []string
 }
 
 type DaemonSetManager struct {
@@ -68,9 +111,9 @@ type DaemonSetManager struct {
 	informer      cache.SharedIndexInformer
 	mutationCache cache.MutationCache
 
-	resourceClaimTemplateManager *DaemonSetResourceClaimTemplateManager
-	cdStatusManager              *ComputeDomainStatusManager
-	cleanupManager               *CleanupManager[*appsv1.DaemonSet]
+	claimOrClaimTemplateManager resourceClaimOrResourceClaimTemplateManager
+	cdStatusManager             *ComputeDomainStatusManager
+	cleanupManager              *CleanupManager[*appsv1.DaemonSet]
 }
 
 func NewDaemonSetManager(config *ManagerConfig, getComputeDomain GetComputeDomainFunc, listComputeDomains ListComputeDomainsFunc, updateComputeDomainStatus UpdateComputeDomainStatusFunc) *DaemonSetManager {
@@ -100,7 +143,11 @@ func NewDaemonSetManager(config *ManagerConfig, getComputeDomain GetComputeDomai
 		factory:          factory,
 		informer:         informer,
 	}
-	m.resourceClaimTemplateManager = NewDaemonSetResourceClaimTemplateManager(config, getComputeDomain)
+	if featuregates.Enabled(featuregates.SharedDaemonResourceClaim) {
+		m.claimOrClaimTemplateManager = NewDaemonSetResourceClaimManager(config, getComputeDomain)
+	} else {
+		m.claimOrClaimTemplateManager = NewDaemonSetResourceClaimTemplateManager(config, getComputeDomain)
+	}
 
 	// Create ComputeDomainStatusManager to sync node info to CD status
 	// - When feature gate ON: syncs from CDCliques + non-fabric-attached pods
@@ -158,8 +205,8 @@ func (m *DaemonSetManager) Start(ctx context.Context) (rerr error) {
 		return fmt.Errorf("informer cache sync for DaemonSet failed")
 	}
 
-	if err := m.resourceClaimTemplateManager.Start(ctx); err != nil {
-		return fmt.Errorf("error starting ResourceClaimTemplate manager: %w", err)
+	if err := m.claimOrClaimTemplateManager.Start(ctx); err != nil {
+		return fmt.Errorf("error starting daemon ResourceClaim/ResourceClaimTemplate manager: %w", err)
 	}
 
 	if err := m.cdStatusManager.Start(ctx); err != nil {
@@ -177,8 +224,8 @@ func (m *DaemonSetManager) Stop() error {
 	if err := m.cdStatusManager.Stop(); err != nil {
 		klog.Errorf("error stopping ComputeDomain status manager: %v", err)
 	}
-	if err := m.resourceClaimTemplateManager.Stop(); err != nil {
-		return fmt.Errorf("error stopping ResourceClaimTemplate manager: %w", err)
+	if err := m.claimOrClaimTemplateManager.Stop(); err != nil {
+		return fmt.Errorf("error stopping daemon ResourceClaim/ResourceClaimTemplate manager: %w", err)
 	}
 	if m.cancelContext != nil {
 		m.cancelContext()
@@ -199,28 +246,49 @@ func (m *DaemonSetManager) Create(ctx context.Context, cd *nvapi.ComputeDomain) 
 		return ds[0], nil
 	}
 
-	rct, err := m.resourceClaimTemplateManager.Create(ctx, cd)
+	rctName, err := m.claimOrClaimTemplateManager.Create(ctx, cd)
 	if err != nil {
-		return nil, fmt.Errorf("error creating ResourceClaimTemplate: %w", err)
+		return nil, fmt.Errorf("error from daemon ResourceClaim/ResourceClaimTemplate manager Create: %w", err)
 	}
 
-	templateData := DaemonSetTemplateData{
-		Namespace:                 m.config.driverNamespace,
-		Name:                      fmt.Sprintf("computedomain-daemon-%s", cd.UID),
-		Finalizer:                 computeDomainFinalizer,
-		ComputeDomainLabelKey:     computeDomainLabelKey,
-		ComputeDomainLabelValue:   cd.UID,
-		ResourceClaimTemplateName: rct.Name,
-		ImageName:                 m.config.imageName,
-		MaxNodesPerIMEXDomain:     m.config.maxNodesPerIMEXDomain,
-		FeatureGates:              featuregates.ToMap(),
-		LogVerbosity:              m.config.logVerbosityCDDaemon,
-		ImagePullSecretNames:      m.config.imagePullSecretNames,
-	}
-
-	tmpl, err := template.ParseFiles(DaemonSetTemplatePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse template file: %w", err)
+	var tmpl *template.Template
+	var templateData any
+	if featuregates.Enabled(featuregates.SharedDaemonResourceClaim) {
+		templateData = DaemonSetWithSharedResourceClaimData{
+			Namespace:               m.config.driverNamespace,
+			Name:                    fmt.Sprintf("computedomain-daemon-%s", cd.UID),
+			Finalizer:               computeDomainFinalizer,
+			ComputeDomainLabelKey:   computeDomainLabelKey,
+			ComputeDomainLabelValue: cd.UID,
+			ResourceClaimName:       rctName,
+			ImageName:               m.config.imageName,
+			MaxNodesPerIMEXDomain:   m.config.maxNodesPerIMEXDomain,
+			FeatureGates:            featuregates.ToMap(),
+			LogVerbosity:            m.config.logVerbosityCDDaemon,
+			ImagePullSecretNames:    m.config.imagePullSecretNames,
+		}
+		tmpl, err = template.ParseFiles(DaemonSetWithSharedResourceClaimPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse template file: %w", err)
+		}
+	} else {
+		templateData = DaemonSetWithResourceClaimTemplateData{
+			Namespace:                 m.config.driverNamespace,
+			Name:                      fmt.Sprintf("computedomain-daemon-%s", cd.UID),
+			Finalizer:                 computeDomainFinalizer,
+			ComputeDomainLabelKey:     computeDomainLabelKey,
+			ComputeDomainLabelValue:   cd.UID,
+			ResourceClaimTemplateName: rctName,
+			ImageName:                 m.config.imageName,
+			MaxNodesPerIMEXDomain:     m.config.maxNodesPerIMEXDomain,
+			FeatureGates:              featuregates.ToMap(),
+			LogVerbosity:              m.config.logVerbosityCDDaemon,
+			ImagePullSecretNames:      m.config.imagePullSecretNames,
+		}
+		tmpl, err = template.ParseFiles(DaemonSetWithResourceClaimTemplatePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse template file: %w", err)
+		}
 	}
 
 	var daemonSetYaml bytes.Buffer
@@ -280,8 +348,8 @@ func (m *DaemonSetManager) Delete(ctx context.Context, cdUID string) error {
 
 	d := ds[0]
 
-	if err := m.resourceClaimTemplateManager.Delete(ctx, cdUID); err != nil {
-		return fmt.Errorf("error deleting ResourceClaimTemplate: %w", err)
+	if err := m.claimOrClaimTemplateManager.Delete(ctx, cdUID); err != nil {
+		return fmt.Errorf("error deleting daemon ResourceClaim/ResourceClaimTemplate: %w", err)
 	}
 
 	if d.GetDeletionTimestamp() != nil {
@@ -297,8 +365,8 @@ func (m *DaemonSetManager) Delete(ctx context.Context, cdUID string) error {
 }
 
 func (m *DaemonSetManager) RemoveFinalizer(ctx context.Context, cdUID string) error {
-	if err := m.resourceClaimTemplateManager.RemoveFinalizer(ctx, cdUID); err != nil {
-		return fmt.Errorf("error removing finalizer on ResourceClaimTemplate: %w", err)
+	if err := m.claimOrClaimTemplateManager.RemoveFinalizer(ctx, cdUID); err != nil {
+		return fmt.Errorf("error removing finalizer on ResourceClaim/ResourceClaimTemplate: %w", err)
 	}
 	if err := m.removeFinalizer(ctx, cdUID); err != nil {
 		return fmt.Errorf("error removing finalizer on DaemonSet: %w", err)
@@ -307,8 +375,8 @@ func (m *DaemonSetManager) RemoveFinalizer(ctx context.Context, cdUID string) er
 }
 
 func (m *DaemonSetManager) AssertRemoved(ctx context.Context, cdUID string) error {
-	if err := m.resourceClaimTemplateManager.AssertRemoved(ctx, cdUID); err != nil {
-		return fmt.Errorf("error asserting ResourceClaimTemplate removed: %w", err)
+	if err := m.claimOrClaimTemplateManager.AssertRemoved(ctx, cdUID); err != nil {
+		return fmt.Errorf("error asserting ResourceClaim/ResourceClaimTemplate removed: %w", err)
 	}
 	if err := m.assertRemoved(ctx, cdUID); err != nil {
 		return fmt.Errorf("error asserting DaemonSet removal: %w", err)

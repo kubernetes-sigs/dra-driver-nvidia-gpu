@@ -21,8 +21,12 @@ import (
 	"context"
 	"fmt"
 
+	resourceapi "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/workqueue"
 )
@@ -102,6 +106,12 @@ func (c *Controller) Run(ctx context.Context) error {
 	// TODO: log full, nested cliFlags structure.
 	klog.Infof("controller manager config: %+v", managerConfig)
 
+	if featuregates.Enabled(featuregates.SharedDaemonResourceClaim) {
+		if err := ensureDriverNamespaceAdminAccessLabel(ctx, c.config.clientsets, managerConfig.driverNamespace); err != nil {
+			return fmt.Errorf("error ensuring driver namespace admin-access label: %w", err)
+		}
+	}
+
 	cdManager := NewComputeDomainManager(managerConfig)
 
 	if err := cdManager.Start(ctx); err != nil {
@@ -114,5 +124,18 @@ func (c *Controller) Run(ctx context.Context) error {
 		return fmt.Errorf("error stopping ComputeDomain manager: %w", err)
 	}
 
+	return nil
+}
+
+// ensureDriverNamespaceAdminAccessLabel patches the driver namespace with
+// resource.kubernetes.io/admin-access=true so that the apiserver's
+// DRAAdminAccess gate permits per-CD daemon ResourceClaims (in this
+// namespace) to set adminAccess: true on their request. Idempotent: a
+// strategic-merge patch is a no-op when the label is already present.
+func ensureDriverNamespaceAdminAccessLabel(ctx context.Context, c flags.ClientSets, namespace string) error {
+	patch := []byte(fmt.Sprintf(`{"metadata":{"labels":{%q:"true"}}}`, resourceapi.DRAAdminNamespaceLabelKey))
+	if _, err := c.Core.CoreV1().Namespaces().Patch(ctx, namespace, types.StrategicMergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("patching namespace %q with %s=true: %w", namespace, resourceapi.DRAAdminNamespaceLabelKey, err)
+	}
 	return nil
 }

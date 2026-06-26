@@ -74,6 +74,13 @@ const (
 	// DeviceMetadata allows the kubelet plugin to generate device metadata files
 	// in the workloads for prepared devices.
 	DeviceMetadata featuregate.Feature = "DeviceMetadata"
+
+	// SharedDaemonResourceClaim replaces the per-pod ResourceClaimTemplate used
+	// by the compute-domain daemon DaemonSet with a single per-ComputeDomain
+	// ResourceClaim consumed by every daemon pod in the DaemonSet. Requires
+	// Kubernetes >= 1.36 (where DRAConsumableCapacity is beta and on by default)
+	// or an older cluster with that upstream gate explicitly enabled.
+	SharedDaemonResourceClaim featuregate.Feature = "SharedDaemonResourceClaim"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -146,6 +153,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
 			Version:    version.MajorMinor(0, 4),
+		},
+	},
+	SharedDaemonResourceClaim: {
+		{
+			Default:    true,
+			PreRelease: featuregate.Beta,
+			Version:    version.MajorMinor(0, 5),
 		},
 	},
 }

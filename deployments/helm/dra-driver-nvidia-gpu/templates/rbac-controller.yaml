@@ -14,6 +14,18 @@ rules:
 - apiGroups: ["resource.k8s.io"]
   resources: ["resourceclaimtemplates"]
   verbs: ["get", "list", "watch", "create", "update", "delete"]
+- apiGroups: ["resource.k8s.io"]
+  resources: ["resourceclaims"]
+  verbs: ["get", "list", "watch", "create", "update", "delete"]
+# Permission to label the driver's own namespace with
+# resource.kubernetes.io/admin-access=true at controller startup, so that
+# the apiserver's DRAAdminAccess gate permits per-CD daemon ResourceClaims
+# created in this namespace to set adminAccess: true. resourceNames pins
+# this to only the driver namespace.
+- apiGroups: [""]
+  resources: ["namespaces"]
+  resourceNames: ["{{ include "dra-driver-nvidia-gpu.namespace" . }}"]
+  verbs: ["get", "patch"]
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
   verbs: ["get", "create", "update"]
