@@ -147,12 +147,12 @@ helm upgrade dra-driver-nvidia-gpu oci://registry.k8s.io/dra-driver-nvidia/chart
 ### Incompatible feature gates
 
 `NVMLDeviceHealthCheck` cannot be combined with the following feature gates.
-Enabling any combination causes the driver to fail at startup.
 
-| Feature gate | Reason |
-|---|---|
-| `DynamicMIG` | Dynamic [MIG](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/) changes the GPU device hierarchy at runtime, which is incompatible with the static device placement map the health monitor relies on. |
-| `PassthroughSupport` | Passthrough devices are not accessible via NVML and cannot be monitored. |
+* `DynamicMIG` 
+* `PassthroughSupport`
+* `MPSSupport`
+
+Refer to the [feature gate constraints](../reference/feature-gates.md#constraints) documentation for more details.
 
 ## Recovering from an unhealthy device
 
