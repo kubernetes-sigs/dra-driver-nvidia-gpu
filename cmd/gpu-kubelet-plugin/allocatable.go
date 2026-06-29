@@ -20,9 +20,13 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
+	"strings"
 
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
@@ -96,18 +100,106 @@ func (d *AllocatableDevice) CanonicalName() string {
 	panic("unexpected type for AllocatableDevice")
 }
 
-func (d *AllocatableDevice) GetDevice() resourceapi.Device {
+func (d *AllocatableDevice) GetDevice(config *Config) resourceapi.Device {
+	var dev resourceapi.Device
 	switch d.Type() {
 	case GpuDeviceType:
-		return d.Gpu.GetDevice()
+		dev = d.Gpu.GetDevice()
 	case MigStaticDeviceType:
-		return d.MigStatic.GetDevice()
+		dev = d.MigStatic.GetDevice()
 	case MigDynamicDeviceType:
 		panic("GetDevice() must currently not be called for MigDynamicDeviceType")
 	case VfioDeviceType:
 		return d.Vfio.GetDevice()
+	default:
+		panic("unexpected type for AllocatableDevice")
 	}
-	panic("unexpected type for AllocatableDevice")
+	applyConsumableShares(&dev, config)
+	return dev
+}
+
+func isConsumableSharesEnabled(config *Config) bool {
+	if !featuregates.Enabled(featuregates.ConsumableShares) {
+		return false
+	}
+	if config == nil || config.flags == nil {
+		return false
+	}
+	sharesOption := strings.TrimSpace(config.flags.consumableShares)
+	return sharesOption != "" && sharesOption != "disabled"
+}
+
+func applyConsumableShares(dev *resourceapi.Device, config *Config) {
+	if !isConsumableSharesEnabled(config) {
+		return
+	}
+	sharesOption := strings.TrimSpace(config.flags.consumableShares)
+
+	dev.AllowMultipleAllocations = ptr.To(true)
+
+	if dev.Capacity == nil {
+		dev.Capacity = make(map[resourceapi.QualifiedName]resourceapi.DeviceCapacity)
+	}
+
+	memCap, hasMemory := dev.Capacity["memory"]
+	if !hasMemory {
+		return
+	}
+
+	switch sharesOption {
+	case "memory":
+		oneGi := resource.MustParse("1Gi")
+		memCap.RequestPolicy = &resourceapi.CapacityRequestPolicy{
+			Default: ptr.To(memCap.Value.DeepCopy()),
+			ValidRange: &resourceapi.CapacityRequestPolicyRange{
+				Min:  ptr.To(oneGi.DeepCopy()),
+				Max:  ptr.To(memCap.Value.DeepCopy()),
+				Step: ptr.To(oneGi.DeepCopy()),
+			},
+		}
+		dev.Capacity["memory"] = memCap
+	case "unlimited":
+		zeroGi := resource.MustParse("0")
+		oneGi := resource.MustParse("1Gi")
+		memCap.RequestPolicy = &resourceapi.CapacityRequestPolicy{
+			Default: ptr.To(zeroGi.DeepCopy()),
+			ValidRange: &resourceapi.CapacityRequestPolicyRange{
+				Min:  ptr.To(zeroGi.DeepCopy()),
+				Max:  ptr.To(memCap.Value.DeepCopy()),
+				Step: ptr.To(oneGi.DeepCopy()),
+			},
+		}
+		dev.Capacity["memory"] = memCap
+	default:
+		val, err := strconv.Atoi(sharesOption)
+		if err == nil && val > 0 {
+			zeroGi := resource.MustParse("0")
+			oneGi := resource.MustParse("1Gi")
+			memCap.RequestPolicy = &resourceapi.CapacityRequestPolicy{
+				Default: ptr.To(zeroGi.DeepCopy()),
+				ValidRange: &resourceapi.CapacityRequestPolicyRange{
+					Min:  ptr.To(zeroGi.DeepCopy()),
+					Max:  ptr.To(memCap.Value.DeepCopy()),
+					Step: ptr.To(oneGi.DeepCopy()),
+				},
+			}
+			dev.Capacity["memory"] = memCap
+
+			sharesVal := *resource.NewQuantity(int64(val), resource.BinarySI)
+			oneVal := *resource.NewQuantity(1, resource.BinarySI)
+			dev.Capacity["shares"] = resourceapi.DeviceCapacity{
+				Value: sharesVal,
+				RequestPolicy: &resourceapi.CapacityRequestPolicy{
+					Default: ptr.To(oneVal.DeepCopy()),
+					ValidRange: &resourceapi.CapacityRequestPolicyRange{
+						Min:  ptr.To(oneVal.DeepCopy()),
+						Max:  ptr.To(sharesVal.DeepCopy()),
+						Step: ptr.To(oneVal.DeepCopy()),
+					},
+				},
+			}
+		}
+	}
 }
 
 // UUID() is here for `AllocatableDevices` to implement the `UUIDProvider`
