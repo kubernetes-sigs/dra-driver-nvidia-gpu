@@ -138,3 +138,101 @@ func TestApplyConsumableShares(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateNoOverlappingPreparedDevices(t *testing.T) {
+	perGPU := &PerGPUAllocatableDevices{
+		allocatablesMap: map[PCIBusID]AllocatableDevices{
+			"0000:00:00.0": {
+				"gpu-0":  &AllocatableDevice{Gpu: &GpuInfo{minor: 0}},
+				"vfio-0": &AllocatableDevice{Vfio: &VfioDeviceInfo{index: 0}},
+			},
+		},
+	}
+
+	checkpoint := &Checkpoint{
+		V2: &CheckpointV2{
+			PreparedClaims: PreparedClaimsByUID{
+				"claim-1": {
+					CheckpointState: ClaimCheckpointStatePrepareCompleted,
+					Status: resourceapi.ResourceClaimStatus{
+						Allocation: &resourceapi.AllocationResult{
+							Devices: resourceapi.DeviceAllocationResult{
+								Results: []resourceapi.DeviceRequestAllocationResult{
+									{Driver: DriverName, Device: "gpu-0"},
+									{Driver: DriverName, Device: "vfio-0"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name                 string
+		featureGate          bool
+		consumableSharesFlag string
+		requestDevice        string
+		expectErr            bool
+	}{
+		{
+			name:                 "gpu overlap rejected when consumable shares disabled",
+			featureGate:          false,
+			consumableSharesFlag: "disabled",
+			requestDevice:        "gpu-0",
+			expectErr:            true,
+		},
+		{
+			name:                 "gpu overlap allowed when consumable shares enabled",
+			featureGate:          true,
+			consumableSharesFlag: "memory",
+			requestDevice:        "gpu-0",
+			expectErr:            false,
+		},
+		{
+			name:                 "vfio overlap rejected even when consumable shares enabled",
+			featureGate:          true,
+			consumableSharesFlag: "memory",
+			requestDevice:        "vfio-0",
+			expectErr:            true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+				string(featuregates.ConsumableShares): tc.featureGate,
+			}))
+
+			state := &DeviceState{
+				config: &Config{
+					flags: &Flags{
+						consumableShares: tc.consumableSharesFlag,
+					},
+				},
+				perGPUAllocatable: perGPU,
+			}
+
+			incomingClaim := &resourceapi.ResourceClaim{
+				Status: resourceapi.ResourceClaimStatus{
+					Allocation: &resourceapi.AllocationResult{
+						Devices: resourceapi.DeviceAllocationResult{
+							Results: []resourceapi.DeviceRequestAllocationResult{
+								{Driver: DriverName, Device: tc.requestDevice},
+							},
+						},
+					},
+				},
+			}
+
+			err := state.validateNoOverlappingPreparedDevices(checkpoint, incomingClaim)
+			if tc.expectErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
