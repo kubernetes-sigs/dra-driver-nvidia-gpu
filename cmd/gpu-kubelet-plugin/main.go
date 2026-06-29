@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -66,6 +67,7 @@ type Flags struct {
 	healthcheckPort               int
 	klogVerbosity                 int
 	additionalXidsToIgnore        string
+	consumableShares              string
 }
 
 type Config struct {
@@ -208,6 +210,13 @@ func newApp() *cli.App {
 			Destination: &flags.metricsPath,
 			EnvVars:     []string{"METRICS_PATH"},
 		},
+		&cli.StringFlag{
+			Name:        "consumable-shares",
+			Usage:       "Configure consumable shares support ('disabled', 'memory', 'unlimited', or a positive integer).",
+			Value:       "disabled",
+			Destination: &flags.consumableShares,
+			EnvVars:     []string{"CONSUMABLE_SHARES"},
+		},
 	}
 	cliFlags = append(cliFlags, flags.kubeClientConfig.Flags()...)
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)
@@ -291,6 +300,13 @@ func validateCLIFlags(flags *Flags) error {
 				return fmt.Errorf("host root is not mounted at %q", flags.hostRoot)
 			}
 			return fmt.Errorf("error checking if host root is mounted at %q: %w", flags.hostRoot, err)
+		}
+	}
+
+	if flags.consumableShares != "disabled" && flags.consumableShares != "memory" && flags.consumableShares != "unlimited" {
+		val, err := strconv.Atoi(flags.consumableShares)
+		if err != nil || val <= 0 {
+			return fmt.Errorf("invalid value for --consumable-shares: %q (must be 'disabled', 'memory', 'unlimited', or a positive integer)", flags.consumableShares)
 		}
 	}
 
