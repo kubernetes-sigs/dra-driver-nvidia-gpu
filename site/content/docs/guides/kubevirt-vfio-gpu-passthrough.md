@@ -149,7 +149,7 @@ Keep `backendPolicy: LegacyOnly` for KubeVirt, which does not support the IOMMUF
 
 ## Troubleshooting
 
-If a VM fails to start, check the kubelet-plugin logs for prepare errors:
+If a VM fails to start because its virt-launcher pod is stuck in `ContainerCreating` state, check the kubelet-plugin logs for prepare errors:
 
 ```bash
 kubectl logs -n dra-driver-nvidia-gpu -l dra-driver-nvidia-gpu-component=kubelet-plugin -c gpus
@@ -161,7 +161,7 @@ A `NodePrepareResources` failure looks something like this:
 Warning  FailedPrepareDynamicResources  22s   kubelet  Failed to prepare dynamic resources: prepare dynamic resources: NodePrepareResources: rpc error: code = DeadlineExceeded desc = context deadline exceeded
 ```
 
-A `DeadlineExceeded` error for `NodePrepareResources` for the workload usually means a service still holds the GPU. On the GPU node, find which process holds a handle on an NVIDIA device:
+A `DeadlineExceeded` error for `NodePrepareResources` for the workload usually means a service still holds an open handle to the GPU blocking its driver switch. On the GPU node, the culprit process can be identified using:
 
 ```bash
 for f in /proc/[0-9]*/fd/*; do t=$(readlink "$f" 2>/dev/null) || continue; case "$t" in /dev/nvidia[0-9]*) echo "PID $(echo "$f" | cut -d/ -f3) holds $t";; esac; done
@@ -174,7 +174,7 @@ PID 1210233 holds /run/nvidia/driver/dev/nvidia0
 PID 1237013 holds /run/nvidia/driver/dev/nvidia1
 ```
 
-If the command returns output, note the PID holding the device node of the GPU being prepared, identify the owning service, and stop those services.
+If the command returns an output, note the PID holding the device node of the GPU being prepared, identify the owning service, and stop those services.
 
 The subsequent invocation of `NodePrepareResources` call for the workload should then succeed, and the pod should reach the Running state.
 
