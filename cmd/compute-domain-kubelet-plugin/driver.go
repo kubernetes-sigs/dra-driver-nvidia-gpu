@@ -32,6 +32,7 @@ import (
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
 
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
 	drametrics "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/workqueue"
@@ -108,6 +109,14 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		// Explicitly exclude ComputeDomain channels from being advertised here. They
 		// are instead advertised in as a network resource from the control plane.
 		if device.Type() == ComputeDomainChannelType && device.Channel.ID != 0 {
+			continue
+		}
+		// With SharedDaemonResourceClaim enabled, the daemon device is published
+		// cluster-wide via a static Helm-installed ResourceSlice (one device, all
+		// nodes, allowMultipleAllocations). Skip per-node publishing here. The
+		// local allocatable entry is preserved so Prepare() can still resolve
+		// result.Device for the daemon claim.
+		if device.Type() == ComputeDomainDaemonType && featuregates.Enabled(featuregates.SharedDaemonResourceClaim) {
 			continue
 		}
 		resourceSlice.Devices = append(resourceSlice.Devices, device.GetDevice())

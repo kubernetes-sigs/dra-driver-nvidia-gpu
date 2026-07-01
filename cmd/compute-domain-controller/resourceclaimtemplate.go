@@ -38,7 +38,7 @@ import (
 )
 
 const (
-	DaemonSetResourceClaimTemplateTemplatePath = "/templates/compute-domain-daemon-claim-template.tmpl.yaml"
+	DaemonSetResourceClaimTemplateTemplatePath = "/templates/compute-domain-daemon-resource-claim-template.tmpl.yaml"
 	WorkloadResourceClaimTemplateTemplatePath  = "/templates/compute-domain-workload-claim-template.tmpl.yaml"
 )
 
@@ -301,16 +301,16 @@ func NewDaemonSetResourceClaimTemplateManager(config *ManagerConfig, getComputeD
 	return m
 }
 
-func (m *DaemonSetResourceClaimTemplateManager) Create(ctx context.Context, cd *nvapi.ComputeDomain) (*resourceapi.ResourceClaimTemplate, error) {
+func (m *DaemonSetResourceClaimTemplateManager) Create(ctx context.Context, cd *nvapi.ComputeDomain) (string, error) {
 	rcts, err := getByComputeDomainUID[*resourceapi.ResourceClaimTemplate](ctx, m.mutationCache, string(cd.UID))
 	if err != nil {
-		return nil, fmt.Errorf("error retrieving ResourceClaimTemplate: %w", err)
+		return "", fmt.Errorf("error retrieving ResourceClaimTemplate: %w", err)
 	}
 	if len(rcts) > 1 {
-		return nil, fmt.Errorf("more than one ResourceClaimTemplate found with same ComputeDomain UID")
+		return "", fmt.Errorf("more than one ResourceClaimTemplate found with same ComputeDomain UID")
 	}
 	if len(rcts) == 1 {
-		return rcts[0], nil
+		return rcts[0].Name, nil
 	}
 
 	daemonConfig := nvapi.DefaultComputeDomainDaemonConfig()
@@ -331,10 +331,10 @@ func (m *DaemonSetResourceClaimTemplateManager) Create(ctx context.Context, cd *
 
 	rct, err := m.BaseResourceClaimTemplateManager.Create(ctx, DaemonSetResourceClaimTemplateTemplatePath, &templateData)
 	if err != nil {
-		return nil, fmt.Errorf("error creating ResourceClaimTemplate from base: %w", err)
+		return "", fmt.Errorf("error creating ResourceClaimTemplate from base: %w", err)
 	}
 
-	return rct, nil
+	return rct.Name, nil
 }
 
 func NewWorkloadResourceClaimTemplateManager(config *ManagerConfig, getComputeDomain GetComputeDomainFunc) *WorkloadResourceClaimTemplateManager {

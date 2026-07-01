@@ -128,3 +128,4 @@
 {{- $error = printf "%s\nPlease ensure your cluster supports Dynamic Resource Allocation (DRA) with one of these API versions." $error }}
 {{- fail $error }}
 {{- end }}
+

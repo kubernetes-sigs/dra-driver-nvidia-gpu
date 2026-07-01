@@ -1,0 +1,111 @@
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  namespace: {{ .Namespace }}
+  name: {{ .Name }}
+  finalizers:
+    - {{ .Finalizer }}
+  labels:
+    {{ .ComputeDomainLabelKey }}: {{ .ComputeDomainLabelValue }}
+spec:
+  selector:
+    matchLabels:
+      {{ .ComputeDomainLabelKey }}: {{ .ComputeDomainLabelValue }}
+  template:
+    metadata:
+      labels:
+        {{ .ComputeDomainLabelKey }}: {{ .ComputeDomainLabelValue }}
+    spec:
+      serviceAccountName: compute-domain-daemon-service-account
+      {{- if .ImagePullSecretNames }}
+      imagePullSecrets:
+      {{- range .ImagePullSecretNames }}
+      - name: {{ . }}
+      {{- end }}
+      {{- end }} 
+      nodeSelector:
+        {{ .ComputeDomainLabelKey }}: {{ .ComputeDomainLabelValue }}
+      containers:
+      # Run the compute domain daemon
+      - name: compute-domain-daemon
+        image: {{ .ImageName }}
+        command: ["compute-domain-daemon", "-v", "$(LOG_VERBOSITY)", "run"]
+        env:
+        # LOG_VERBOSITY is the source of truth, it's injected via CLI argument
+        # above because of klogs limited configuration interface.
+        - name: LOG_VERBOSITY
+          value: "{{ .LogVerbosity }}"
+        - name: MAX_NODES_PER_IMEX_DOMAIN
+          value: "{{ .MaxNodesPerIMEXDomain }}"
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        # Use runc: explicit "void"; otherwise we inherit "all".
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: void
+        {{- if .FeatureGates }}
+        # Feature gates (includes both project-specific and logging features)
+        - name: FEATURE_GATES
+          value: "{{ range $key, $value := .FeatureGates }}{{ $key }}={{ $value }},{{ end }}"
+        {{- end }}
+        resources:
+          claims:
+          - name: compute-domain-daemon
+        # The startup probe aggressively checks every second to see if the pod
+        # is healthy. We set a large failureThreshold to avoid having the
+        # startup probe kill the pod if it fails (we just don't want it to go
+        # ready). After the startup probe completes, we run readiness probes
+        # and liveness probes to less aggressively mark this pod as not-ready
+        # if/when necessary.
+        startupProbe:
+          exec:
+            command: ["compute-domain-daemon", "-v", "$(LOG_VERBOSITY)", "check"]
+          initialDelaySeconds: 0
+          periodSeconds: 1
+          timeoutSeconds: 10
+          failureThreshold: 1200 # (1s*1200s)=20min
+          successThreshold: 1
+        livenessProbe:
+          exec:
+            command: ["compute-domain-daemon", "-v", "$(LOG_VERBOSITY)", "check"]
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 20 # (60s*20)=20min
+          successThreshold: 1
+        readinessProbe:
+          exec:
+            command: ["compute-domain-daemon", "-v", "$(LOG_VERBOSITY)", "check"]
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 1
+          successThreshold: 1
+      # Repel all node taints.
+      # See https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/issues/305
+      tolerations:
+        - operator: "Exists"
+          effect: "NoSchedule"
+        - operator: "Exists"
+          effect: "NoExecute"
+        - operator: "Exists"
+          effect: "PreferNoSchedule"
+      resourceClaims:
+      - name: compute-domain-daemon
+        resourceClaimName: {{ .ResourceClaimName }}
