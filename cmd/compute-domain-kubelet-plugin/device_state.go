@@ -118,12 +118,12 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	computeDomainManager := NewComputeDomainManager(config, cliqueID)
 
 	if err := cdi.CreateStandardDeviceSpecFile(allocatable); err != nil {
-		return nil, fmt.Errorf("unable to create base CDI spec file: %v", err)
+		return nil, fmt.Errorf("unable to create base CDI spec file: %w", err)
 	}
 
 	checkpointManager, err := checkpointmanager.NewCheckpointManager(config.DriverPluginPath())
 	if err != nil {
-		return nil, fmt.Errorf("unable to create checkpoint manager: %v", err)
+		return nil, fmt.Errorf("unable to create checkpoint manager: %w", err)
 	}
 
 	state := &DeviceState{
@@ -138,7 +138,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 
 	checkpoints, err := state.checkpointManager.ListCheckpoints()
 	if err != nil {
-		return nil, fmt.Errorf("unable to list checkpoints: %v", err)
+		return nil, fmt.Errorf("unable to list checkpoints: %w", err)
 	}
 
 	currentBootID, err := bootid.GetCurrentBootID()

@@ -117,7 +117,7 @@ func NewController(config *ControllerConfig) (*Controller, error) {
 func (c *Controller) Run(ctx context.Context) error {
 	// Start the daemon info manager
 	if err := c.daemonInfoManager.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start daemon info manager: %v", err)
+		return fmt.Errorf("failed to start daemon info manager: %w", err)
 	}
 
 	// Start processing the workqueue
@@ -125,7 +125,7 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	// Stop the daemon info manager
 	if err := c.daemonInfoManager.Stop(); err != nil {
-		return fmt.Errorf("failed to stop daemon info manager: %v", err)
+		return fmt.Errorf("failed to stop daemon info manager: %w", err)
 	}
 
 	return nil
