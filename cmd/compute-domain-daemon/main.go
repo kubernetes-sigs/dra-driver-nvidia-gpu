@@ -375,6 +375,24 @@ func IMEXDaemonUpdateLoopWithIPs(ctx context.Context, controller *Controller, cl
 	}
 }
 
+// shouldSendSIGUSR1 determines whether the IMEX daemon should be
+// signaled to re-resolve and reconnect to peers.
+//
+// fresh indicates whether the IMEX daemon process was just started.
+//
+// The signal is sent only when:
+// - the mapping was updated,
+// - the process is not fresh, and
+// - at least one new IP (peer) was added.
+func shouldSendSIGUSR1(oldIPs, newIPs IPSet, fresh bool) bool {
+	if fresh {
+		return false
+	}
+
+	added, _ := oldIPs.Diff(newIPs)
+	return len(added) > 0
+}
+
 // IMEXDaemonUpdateLoopWithDNSNames reacts to ComputeDomain status changes by
 // updating the /etc/hosts file with IP to DNS name mappings. This relies on
 // the IMEX daemon to pick up these changes automatically (and quickly) --
@@ -390,6 +408,10 @@ func IMEXDaemonUpdateLoopWithDNSNames(ctx context.Context, controller *Controlle
 			klog.Infof("shutdown: stop IMEXDaemonUpdateLoopWithDNSNames")
 			return nil
 		case daemons := <-controller.GetDaemonInfoUpdateChan():
+			oldIPs := make(map[string]struct{}, len(dnsNameManager.ipToDNSName))
+			for ip := range dnsNameManager.ipToDNSName {
+				oldIPs[ip] = struct{}{}
+			}
 			updated, err := dnsNameManager.UpdateDNSNameMappings(daemons)
 			if err != nil {
 				return fmt.Errorf("failed to update DNS name => IP mappings: %w", err)
@@ -406,13 +428,16 @@ func IMEXDaemonUpdateLoopWithDNSNames(ctx context.Context, controller *Controlle
 			}
 
 			dnsNameManager.LogDNSNameMappings()
+			// Skip sending SIGUSR1 when:
+			// - the process is fresh (has newly been started), or
+			// - this was a noop update, or
+			// - no new peers were added (i.e. the update only removes nodes or keeps the set unchanged).
+			newIPs := make(IPSet, len(dnsNameManager.ipToDNSName))
+			for ip := range dnsNameManager.ipToDNSName {
+				newIPs[ip] = struct{}{}
+			}
 
-			// Skip sending SIGUSR1 when the process is fresh (has newly been
-			// created) or when this was a noop update. TODO: review skipping
-			// this also if the new set of IP addresses only strictly removes
-			// addresses compared to the old set (then we don't need to force
-			// the daemon to re-resolve & re-connect).
-			if !updated || fresh {
+			if !updated || !shouldSendSIGUSR1(IPSet(oldIPs), newIPs, fresh) {
 				break
 			}
 
