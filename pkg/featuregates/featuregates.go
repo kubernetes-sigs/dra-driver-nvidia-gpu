@@ -74,6 +74,9 @@ const (
 	// DeviceMetadata allows the kubelet plugin to generate device metadata files
 	// in the workloads for prepared devices.
 	DeviceMetadata featuregate.Feature = "DeviceMetadata"
+
+	// ConsumableShares allows consumable shares to be configured for devices.
+	ConsumableShares featuregate.Feature = "ConsumableShares"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -146,6 +149,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
 			Version:    version.MajorMinor(0, 4),
+		},
+	},
+	ConsumableShares: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 5),
 		},
 	},
 }

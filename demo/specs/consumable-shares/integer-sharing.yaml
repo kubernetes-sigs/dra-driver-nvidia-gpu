@@ -1,0 +1,53 @@
+# Example demonstrating GPU sharing with an integer share count (e.g. --consumable-shares=4)
+# With shares=4, each replica consumes 1 share by default, allowing up to 4 replicas to share each GPU.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-share-integer
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  namespace: gpu-share-integer
+  name: gpu-1share
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: gpu-share-integer
+  name: integer-sharing
+  labels:
+    app: integer-sharing
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: integer-sharing
+  template:
+    metadata:
+      labels:
+        app: integer-sharing
+    spec:
+      resourceClaims:
+      - name: gpu
+        resourceClaimTemplateName: gpu-1share
+      containers:
+      - name: ctr
+        image: ubuntu:22.04
+        command: ["bash", "-c"]
+        args: ["nvidia-smi -L; echo 'running with 1 share claim'; sleep 3600"]
+        resources:
+          claims:
+          - name: gpu
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
