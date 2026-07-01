@@ -34,7 +34,7 @@ helm install dra-driver-nvidia-gpu oci://registry.k8s.io/dra-driver-nvidia/chart
 | `MPSSupport` | Alpha | `false` | Enables Multi-Process Service (MPS) sharing strategy in `GpuConfig` and `MigDeviceConfig`. |
 | `IMEXDaemonsWithDNSNames` | Beta | `true` | IMEX daemons use DNS names instead of raw IP addresses for peer communication. Required by `ComputeDomainCliques`. |
 | `PassthroughSupport` | Alpha | `false` | Enables VFIO passthrough device allocation using `VfioDeviceConfig`. |
-| `DynamicMIG` | Alpha | `false` | Enables dynamic MIG device allocation and reconfiguration. Kubernetes 1.33–1.35 requires `DRAPartitionableDevices` enabled on the kube-apiserver and kube-scheduler (see [Kubernetes feature gates](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/#DRAPartitionableDevices)). |
+| `DynamicMIG` | Alpha | `false` | Enables dynamic MIG device allocation and reconfiguration. Kubernetes 1.34–1.35 requires `DRAPartitionableDevices` enabled on the kube-apiserver and kube-scheduler (enabled by default on Kubernetes 1.36 and later) (see [Kubernetes feature gates](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/#DRAPartitionableDevices)). |
 | `NVMLDeviceHealthCheck` | Alpha | `false` | Enables GPU health checking using NVML. |
 | `ComputeDomainCliques` | Beta | `true` | Uses `ComputeDomainClique` CRD objects to track IMEX daemon membership. Requires `IMEXDaemonsWithDNSNames`. |
 | `CrashOnNVLinkFabricErrors` | Beta | `true` | Causes the kubelet plugin to crash rather than fall back to non-fabric mode when NVLink fabric errors are detected. |
