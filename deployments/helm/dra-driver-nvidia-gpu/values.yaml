@@ -90,6 +90,7 @@ resources:
 #   LoggingAlphaOptions: false         # Kubernetes logging alpha features
 #   LoggingBetaOptions: true           # Kubernetes logging beta features
 #   NVMLDeviceHealthCheck: false       # GPU Health Checking using NVML
+#   DRAListTypeAttributes: false       # Publish list-valued DRA device attributes
 featureGates: {}
 
 # Log verbosity for all components. Zero or greater, higher number means higher
