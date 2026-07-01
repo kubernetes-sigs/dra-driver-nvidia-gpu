@@ -101,13 +101,7 @@ func newDeviceLib(driverRoot root, hostRoot root) (*deviceLib, error) {
 		}
 	}
 
-	// Fabric Manager partitioning is only relevant for GPU passthrough on
-	// NVSwitch-based HGX nodes. When PassthroughSupport is enabled, try to
-	// open a long-lived connection to nv-fabricmanager so VFIO devices can be
-	// published with their gpuModuleId / partition attributes. Failure is
-	// non-fatal: on non-HGX nodes (or when FM is simply not running) we log
-	// and leave d.fmManager nil, and all FM-derived attributes are omitted.
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
 		d.fmManager = d.tryOpenFabricManager()
 	}
 

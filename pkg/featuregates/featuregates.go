@@ -74,6 +74,10 @@ const (
 	// DeviceMetadata allows the kubelet plugin to generate device metadata files
 	// in the workloads for prepared devices.
 	DeviceMetadata featuregate.Feature = "DeviceMetadata"
+
+	// FabricManagerPartitioning enables Fabric Manager (NVSwitch) partition
+	// management for Passthrough VFIO devices.
+	FabricManagerPartitioning featuregate.Feature = "FabricManagerPartitioning"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -148,6 +152,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(0, 4),
 		},
 	},
+	FabricManagerPartitioning: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 4),
+		},
+	},
 }
 
 var (
@@ -216,6 +227,10 @@ func ValidateFeatureGates() error {
 
 	if Enabled(DeviceMetadata) && !Enabled(PassthroughSupport) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", DeviceMetadata, PassthroughSupport)
+	}
+
+	if Enabled(FabricManagerPartitioning) && !Enabled(PassthroughSupport) {
+		return fmt.Errorf("feature gate %s requires %s to also be enabled", FabricManagerPartitioning, PassthroughSupport)
 	}
 
 	return nil
