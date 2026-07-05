@@ -35,6 +35,7 @@ var (
 	DeviceGetAccountingMode                          = libnvml.DeviceGetAccountingMode
 	DeviceGetAccountingPids                          = libnvml.DeviceGetAccountingPids
 	DeviceGetAccountingStats                         = libnvml.DeviceGetAccountingStats
+	DeviceGetAccountingStats_v2                      = libnvml.DeviceGetAccountingStats_v2
 	DeviceGetActiveVgpus                             = libnvml.DeviceGetActiveVgpus
 	DeviceGetAdaptiveClockInfoStatus                 = libnvml.DeviceGetAdaptiveClockInfoStatus
 	DeviceGetAddressingMode                          = libnvml.DeviceGetAddressingMode
@@ -43,6 +44,7 @@ var (
 	DeviceGetAttributes                              = libnvml.DeviceGetAttributes
 	DeviceGetAutoBoostedClocksEnabled                = libnvml.DeviceGetAutoBoostedClocksEnabled
 	DeviceGetBAR1MemoryInfo                          = libnvml.DeviceGetBAR1MemoryInfo
+	DeviceGetBBXTimeData_v1                          = libnvml.DeviceGetBBXTimeData_v1
 	DeviceGetBoardId                                 = libnvml.DeviceGetBoardId
 	DeviceGetBoardPartNumber                         = libnvml.DeviceGetBoardPartNumber
 	DeviceGetBrand                                   = libnvml.DeviceGetBrand
@@ -189,6 +191,7 @@ var (
 	DeviceGetProcessUtilization                      = libnvml.DeviceGetProcessUtilization
 	DeviceGetProcessesUtilizationInfo                = libnvml.DeviceGetProcessesUtilizationInfo
 	DeviceGetRemappedRows                            = libnvml.DeviceGetRemappedRows
+	DeviceGetRemappedRows_v2                         = libnvml.DeviceGetRemappedRows_v2
 	DeviceGetRepairStatus                            = libnvml.DeviceGetRepairStatus
 	DeviceGetRetiredPages                            = libnvml.DeviceGetRetiredPages
 	DeviceGetRetiredPagesPendingStatus               = libnvml.DeviceGetRetiredPagesPendingStatus
@@ -227,7 +230,9 @@ var (
 	DeviceGetVgpuProcessesUtilizationInfo            = libnvml.DeviceGetVgpuProcessesUtilizationInfo
 	DeviceGetVgpuSchedulerCapabilities               = libnvml.DeviceGetVgpuSchedulerCapabilities
 	DeviceGetVgpuSchedulerLog                        = libnvml.DeviceGetVgpuSchedulerLog
+	DeviceGetVgpuSchedulerLog_v2                     = libnvml.DeviceGetVgpuSchedulerLog_v2
 	DeviceGetVgpuSchedulerState                      = libnvml.DeviceGetVgpuSchedulerState
+	DeviceGetVgpuSchedulerState_v2                   = libnvml.DeviceGetVgpuSchedulerState_v2
 	DeviceGetVgpuTypeCreatablePlacements             = libnvml.DeviceGetVgpuTypeCreatablePlacements
 	DeviceGetVgpuTypeSupportedPlacements             = libnvml.DeviceGetVgpuTypeSupportedPlacements
 	DeviceGetVgpuUtilization                         = libnvml.DeviceGetVgpuUtilization
@@ -283,8 +288,10 @@ var (
 	DeviceSetVgpuCapabilities                        = libnvml.DeviceSetVgpuCapabilities
 	DeviceSetVgpuHeterogeneousMode                   = libnvml.DeviceSetVgpuHeterogeneousMode
 	DeviceSetVgpuSchedulerState                      = libnvml.DeviceSetVgpuSchedulerState
+	DeviceSetVgpuSchedulerState_v2                   = libnvml.DeviceSetVgpuSchedulerState_v2
 	DeviceSetVirtualizationMode                      = libnvml.DeviceSetVirtualizationMode
 	DeviceValidateInforom                            = libnvml.DeviceValidateInforom
+	DeviceVgpuForceGspUnload                         = libnvml.DeviceVgpuForceGspUnload
 	DeviceWorkloadPowerProfileClearRequestedProfiles = libnvml.DeviceWorkloadPowerProfileClearRequestedProfiles
 	DeviceWorkloadPowerProfileGetCurrentProfiles     = libnvml.DeviceWorkloadPowerProfileGetCurrentProfiles
 	DeviceWorkloadPowerProfileGetProfilesInfo        = libnvml.DeviceWorkloadPowerProfileGetProfilesInfo
@@ -324,10 +331,13 @@ var (
 	GpuInstanceGetInfo                               = libnvml.GpuInstanceGetInfo
 	GpuInstanceGetVgpuHeterogeneousMode              = libnvml.GpuInstanceGetVgpuHeterogeneousMode
 	GpuInstanceGetVgpuSchedulerLog                   = libnvml.GpuInstanceGetVgpuSchedulerLog
+	GpuInstanceGetVgpuSchedulerLog_v2                = libnvml.GpuInstanceGetVgpuSchedulerLog_v2
 	GpuInstanceGetVgpuSchedulerState                 = libnvml.GpuInstanceGetVgpuSchedulerState
+	GpuInstanceGetVgpuSchedulerState_v2              = libnvml.GpuInstanceGetVgpuSchedulerState_v2
 	GpuInstanceGetVgpuTypeCreatablePlacements        = libnvml.GpuInstanceGetVgpuTypeCreatablePlacements
 	GpuInstanceSetVgpuHeterogeneousMode              = libnvml.GpuInstanceSetVgpuHeterogeneousMode
 	GpuInstanceSetVgpuSchedulerState                 = libnvml.GpuInstanceSetVgpuSchedulerState
+	GpuInstanceSetVgpuSchedulerState_v2              = libnvml.GpuInstanceSetVgpuSchedulerState_v2
 	Init                                             = libnvml.Init
 	InitWithFlags                                    = libnvml.InitWithFlags
 	SetVgpuVersion                                   = libnvml.SetVgpuVersion
@@ -335,6 +345,7 @@ var (
 	SystemEventSetCreate                             = libnvml.SystemEventSetCreate
 	SystemEventSetFree                               = libnvml.SystemEventSetFree
 	SystemEventSetWait                               = libnvml.SystemEventSetWait
+	SystemGetCPER_v1                                 = libnvml.SystemGetCPER_v1
 	SystemGetConfComputeCapabilities                 = libnvml.SystemGetConfComputeCapabilities
 	SystemGetConfComputeGpusReadyState               = libnvml.SystemGetConfComputeGpusReadyState
 	SystemGetConfComputeKeyRotationThresholdInfo     = libnvml.SystemGetConfComputeKeyRotationThresholdInfo
@@ -421,6 +432,7 @@ type Interface interface {
 	DeviceGetAccountingMode(Device) (EnableState, Return)
 	DeviceGetAccountingPids(Device) ([]int, Return)
 	DeviceGetAccountingStats(Device, uint32) (AccountingStats, Return)
+	DeviceGetAccountingStats_v2(Device, uint32) (AccountingStats_v2, Return)
 	DeviceGetActiveVgpus(Device) ([]VgpuInstance, Return)
 	DeviceGetAdaptiveClockInfoStatus(Device) (uint32, Return)
 	DeviceGetAddressingMode(Device) (DeviceAddressingMode, Return)
@@ -429,6 +441,7 @@ type Interface interface {
 	DeviceGetAttributes(Device) (DeviceAttributes, Return)
 	DeviceGetAutoBoostedClocksEnabled(Device) (EnableState, EnableState, Return)
 	DeviceGetBAR1MemoryInfo(Device) (BAR1Memory, Return)
+	DeviceGetBBXTimeData_v1(Device) (BBXTimeData_v1, Return)
 	DeviceGetBoardId(Device) (uint32, Return)
 	DeviceGetBoardPartNumber(Device) (string, Return)
 	DeviceGetBrand(Device) (BrandType, Return)
@@ -575,6 +588,7 @@ type Interface interface {
 	DeviceGetProcessUtilization(Device, uint64) ([]ProcessUtilizationSample, Return)
 	DeviceGetProcessesUtilizationInfo(Device) (ProcessesUtilizationInfo, Return)
 	DeviceGetRemappedRows(Device) (int, int, bool, bool, Return)
+	DeviceGetRemappedRows_v2(Device) (RemappedRowsInfo_v2, Return)
 	DeviceGetRepairStatus(Device) (RepairStatus, Return)
 	DeviceGetRetiredPages(Device, PageRetirementCause) ([]uint64, Return)
 	DeviceGetRetiredPagesPendingStatus(Device) (EnableState, Return)
@@ -613,7 +627,9 @@ type Interface interface {
 	DeviceGetVgpuProcessesUtilizationInfo(Device) (VgpuProcessesUtilizationInfo, Return)
 	DeviceGetVgpuSchedulerCapabilities(Device) (VgpuSchedulerCapabilities, Return)
 	DeviceGetVgpuSchedulerLog(Device) (VgpuSchedulerLog, Return)
+	DeviceGetVgpuSchedulerLog_v2(Device, VgpuSchedulerLogInfo_v2) (VgpuSchedulerLogInfo_v2, Return)
 	DeviceGetVgpuSchedulerState(Device) (VgpuSchedulerGetState, Return)
+	DeviceGetVgpuSchedulerState_v2(Device, VgpuSchedulerStateInfo_v2) (VgpuSchedulerStateInfo_v2, Return)
 	DeviceGetVgpuTypeCreatablePlacements(Device, VgpuTypeId) (VgpuPlacementList, Return)
 	DeviceGetVgpuTypeSupportedPlacements(Device, VgpuTypeId) (VgpuPlacementList, Return)
 	DeviceGetVgpuUtilization(Device, uint64) (ValueType, []VgpuInstanceUtilizationSample, Return)
@@ -669,8 +685,10 @@ type Interface interface {
 	DeviceSetVgpuCapabilities(Device, DeviceVgpuCapability, EnableState) Return
 	DeviceSetVgpuHeterogeneousMode(Device, VgpuHeterogeneousMode) Return
 	DeviceSetVgpuSchedulerState(Device, *VgpuSchedulerSetState) Return
+	DeviceSetVgpuSchedulerState_v2(Device, *VgpuSchedulerState_v2) Return
 	DeviceSetVirtualizationMode(Device, GpuVirtualizationMode) Return
 	DeviceValidateInforom(Device) Return
+	DeviceVgpuForceGspUnload(Device) Return
 	DeviceWorkloadPowerProfileClearRequestedProfiles(Device, *WorkloadPowerProfileRequestedProfiles) Return
 	DeviceWorkloadPowerProfileGetCurrentProfiles(Device) (WorkloadPowerProfileCurrentProfiles, Return)
 	DeviceWorkloadPowerProfileGetProfilesInfo(Device) (WorkloadPowerProfileProfilesInfo, Return)
@@ -710,10 +728,13 @@ type Interface interface {
 	GpuInstanceGetInfo(GpuInstance) (GpuInstanceInfo, Return)
 	GpuInstanceGetVgpuHeterogeneousMode(GpuInstance) (VgpuHeterogeneousMode, Return)
 	GpuInstanceGetVgpuSchedulerLog(GpuInstance) (VgpuSchedulerLogInfo, Return)
+	GpuInstanceGetVgpuSchedulerLog_v2(GpuInstance, VgpuSchedulerLogInfo_v2) (VgpuSchedulerLogInfo_v2, Return)
 	GpuInstanceGetVgpuSchedulerState(GpuInstance) (VgpuSchedulerStateInfo, Return)
+	GpuInstanceGetVgpuSchedulerState_v2(GpuInstance, VgpuSchedulerStateInfo_v2) (VgpuSchedulerStateInfo_v2, Return)
 	GpuInstanceGetVgpuTypeCreatablePlacements(GpuInstance) (VgpuCreatablePlacementInfo, Return)
 	GpuInstanceSetVgpuHeterogeneousMode(GpuInstance, *VgpuHeterogeneousMode) Return
 	GpuInstanceSetVgpuSchedulerState(GpuInstance, *VgpuSchedulerState) Return
+	GpuInstanceSetVgpuSchedulerState_v2(GpuInstance, *VgpuSchedulerState_v2) Return
 	Init() Return
 	InitWithFlags(uint32) Return
 	SetVgpuVersion(*VgpuVersion) Return
@@ -721,6 +742,7 @@ type Interface interface {
 	SystemEventSetCreate(*SystemEventSetCreateRequest) Return
 	SystemEventSetFree(*SystemEventSetFreeRequest) Return
 	SystemEventSetWait(*SystemEventSetWaitRequest) Return
+	SystemGetCPER_v1(*GetCPER_v1) Return
 	SystemGetConfComputeCapabilities() (ConfComputeSystemCaps, Return)
 	SystemGetConfComputeGpusReadyState() (uint32, Return)
 	SystemGetConfComputeKeyRotationThresholdInfo() (ConfComputeGetKeyRotationThresholdInfo, Return)
@@ -804,6 +826,7 @@ type Device interface {
 	GetAccountingMode() (EnableState, Return)
 	GetAccountingPids() ([]int, Return)
 	GetAccountingStats(uint32) (AccountingStats, Return)
+	GetAccountingStats_v2(uint32) (AccountingStats_v2, Return)
 	GetActiveVgpus() ([]VgpuInstance, Return)
 	GetAdaptiveClockInfoStatus() (uint32, Return)
 	GetAddressingMode() (DeviceAddressingMode, Return)
@@ -812,6 +835,7 @@ type Device interface {
 	GetAttributes() (DeviceAttributes, Return)
 	GetAutoBoostedClocksEnabled() (EnableState, EnableState, Return)
 	GetBAR1MemoryInfo() (BAR1Memory, Return)
+	GetBBXTimeData_v1() (BBXTimeData_v1, Return)
 	GetBoardId() (uint32, Return)
 	GetBoardPartNumber() (string, Return)
 	GetBrand() (BrandType, Return)
@@ -952,6 +976,7 @@ type Device interface {
 	GetProcessUtilization(uint64) ([]ProcessUtilizationSample, Return)
 	GetProcessesUtilizationInfo() (ProcessesUtilizationInfo, Return)
 	GetRemappedRows() (int, int, bool, bool, Return)
+	GetRemappedRows_v2() (RemappedRowsInfo_v2, Return)
 	GetRepairStatus() (RepairStatus, Return)
 	GetRetiredPages(PageRetirementCause) ([]uint64, Return)
 	GetRetiredPagesPendingStatus() (EnableState, Return)
@@ -990,7 +1015,9 @@ type Device interface {
 	GetVgpuProcessesUtilizationInfo() (VgpuProcessesUtilizationInfo, Return)
 	GetVgpuSchedulerCapabilities() (VgpuSchedulerCapabilities, Return)
 	GetVgpuSchedulerLog() (VgpuSchedulerLog, Return)
+	GetVgpuSchedulerLog_v2(VgpuSchedulerLogInfo_v2) (VgpuSchedulerLogInfo_v2, Return)
 	GetVgpuSchedulerState() (VgpuSchedulerGetState, Return)
+	GetVgpuSchedulerState_v2(VgpuSchedulerStateInfo_v2) (VgpuSchedulerStateInfo_v2, Return)
 	GetVgpuTypeCreatablePlacements(VgpuTypeId) (VgpuPlacementList, Return)
 	GetVgpuTypeSupportedPlacements(VgpuTypeId) (VgpuPlacementList, Return)
 	GetVgpuUtilization(uint64) (ValueType, []VgpuInstanceUtilizationSample, Return)
@@ -1048,8 +1075,10 @@ type Device interface {
 	SetVgpuCapabilities(DeviceVgpuCapability, EnableState) Return
 	SetVgpuHeterogeneousMode(VgpuHeterogeneousMode) Return
 	SetVgpuSchedulerState(*VgpuSchedulerSetState) Return
+	SetVgpuSchedulerState_v2(*VgpuSchedulerState_v2) Return
 	SetVirtualizationMode(GpuVirtualizationMode) Return
 	ValidateInforom() Return
+	VgpuForceGspUnload() Return
 	VgpuTypeGetMaxInstances(VgpuTypeId) (int, Return)
 	WorkloadPowerProfileClearRequestedProfiles(*WorkloadPowerProfileRequestedProfiles) Return
 	WorkloadPowerProfileGetCurrentProfiles() (WorkloadPowerProfileCurrentProfiles, Return)
@@ -1076,10 +1105,13 @@ type GpuInstance interface {
 	GetInfo() (GpuInstanceInfo, Return)
 	GetVgpuHeterogeneousMode() (VgpuHeterogeneousMode, Return)
 	GetVgpuSchedulerLog() (VgpuSchedulerLogInfo, Return)
+	GetVgpuSchedulerLog_v2(VgpuSchedulerLogInfo_v2) (VgpuSchedulerLogInfo_v2, Return)
 	GetVgpuSchedulerState() (VgpuSchedulerStateInfo, Return)
+	GetVgpuSchedulerState_v2(VgpuSchedulerStateInfo_v2) (VgpuSchedulerStateInfo_v2, Return)
 	GetVgpuTypeCreatablePlacements() (VgpuCreatablePlacementInfo, Return)
 	SetVgpuHeterogeneousMode(*VgpuHeterogeneousMode) Return
 	SetVgpuSchedulerState(*VgpuSchedulerState) Return
+	SetVgpuSchedulerState_v2(*VgpuSchedulerState_v2) Return
 }
 
 // ComputeInstance represents the interface for the nvmlComputeInstance type.

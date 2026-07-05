@@ -254,6 +254,10 @@ type Pdi struct {
 	Value   uint64
 }
 
+type BBXTimeData_v1 struct {
+	TimeRun uint32
+}
+
 type DramEncryptionInfo_v1 struct {
 	Version         uint32
 	EncryptionState uint32
@@ -470,6 +474,15 @@ type EccSramUniqueUncorrectedErrorCounts struct {
 	Version    uint32
 	EntryCount uint32
 	Entries    *EccSramUniqueUncorrectedErrorEntry_v1
+}
+
+type RemappedRowsInfo_v2 struct {
+	CorrActiveRemaps   uint32
+	CorrInactiveRemaps uint32
+	UncActiveRemaps    uint32
+	UncInactiveRemaps  uint32
+	BPending           uint32
+	BFailureOccurred   uint32
 }
 
 type RusdSettings_v1 struct {
@@ -865,6 +878,40 @@ type VgpuCreatablePlacementInfo struct {
 	Pad_cgo_0     [4]byte
 }
 
+type VgpuSchedulerStateInfo_v2 struct {
+	EngineId        uint32
+	SchedulerPolicy uint32
+	AvgFactor       uint32
+	Timeslice       uint32
+}
+
+type VgpuSchedulerLogEntry_v2 struct {
+	Timestamp                uint64
+	TimeRunTotal             uint64
+	TimeRun                  uint64
+	SwRunlistId              uint32
+	TargetTimeSlice          uint64
+	CumulativePreemptionTime uint64
+	Weight                   uint32
+	Pad_cgo_0                [4]byte
+}
+
+type VgpuSchedulerLogInfo_v2 struct {
+	EngineId        uint32
+	SchedulerPolicy uint32
+	AvgFactor       uint32
+	Timeslice       uint32
+	EntriesCount    uint32
+	LogEntries      [200]VgpuSchedulerLogEntry_v2
+}
+
+type VgpuSchedulerState_v2 struct {
+	EngineId        uint32
+	SchedulerPolicy uint32
+	AvgFactor       uint32
+	Frequency       uint32
+}
+
 type NvLinkPowerThres struct {
 	LowPwrThreshold uint32
 }
@@ -997,6 +1044,19 @@ type AccountingStats struct {
 	StartTime         uint64
 	IsRunning         uint32
 	Reserved          [5]uint32
+}
+
+type AccountingStats_v2 struct {
+	Pid               uint32
+	IsRunning         uint32
+	GpuUtilization    uint32
+	MemoryUtilization uint32
+	MaxMemoryUsage    uint64
+	SampleCount       uint32
+	SumGpuUtil        uint64
+	SumFbUtil         uint64
+	Time              uint64
+	StartTime         uint64
 }
 
 type EncoderSessionInfo struct {
@@ -1138,6 +1198,21 @@ type GpuFabricInfoV struct {
 	HealthMask    uint32
 	HealthSummary uint8
 	Pad_cgo_0     [3]byte
+}
+
+type CPERCursorHandle uint64
+
+type CPERCursor_v1 struct {
+	CperTypeMask uint32
+	Uuid         [80]int8
+	Handle       uint64
+}
+
+type GetCPER_v1 struct {
+	Cursor     CPERCursor_v1
+	Buffer     *uint8
+	BufferSize uint32
+	Pad_cgo_0  [4]byte
 }
 
 type SystemDriverBranchInfo_v1 struct {
@@ -1438,7 +1513,7 @@ type nvmlGpmMetricsGetType struct {
 	NumMetrics uint32
 	Sample1    nvmlGpmSample
 	Sample2    nvmlGpmSample
-	Metrics    [210]GpmMetric
+	Metrics    [333]GpmMetric
 }
 
 type GpmSupport struct {
