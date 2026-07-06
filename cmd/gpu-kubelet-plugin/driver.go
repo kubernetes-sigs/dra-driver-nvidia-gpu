@@ -27,10 +27,12 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	coreclientset "k8s.io/client-go/kubernetes"
 	drametadatav1alpha1 "k8s.io/dynamic-resource-allocation/api/metadata/v1alpha1"
+	drametadatav1beta1 "k8s.io/dynamic-resource-allocation/api/metadata/v1beta1"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
@@ -49,6 +51,10 @@ type deviceHealthMonitor interface {
 	Start(context.Context) error
 	Stop()
 	Unhealthy() <-chan *DeviceHealthEvent
+	// Heartbeat signals that the monitor's event loop is alive; the driver
+	// re-sends its health report to the kubelet on each heartbeat so the
+	// kubelet's health data does not go stale.
+	Heartbeat() <-chan struct{}
 	// Allows the driver to query the HealthMonitor's health policy
 	IsEventNonFatal(event *DeviceHealthEvent) bool
 }
@@ -61,6 +67,13 @@ type driver struct {
 	healthcheck         *healthcheck
 	deviceHealthMonitor deviceHealthMonitor
 	wg                  sync.WaitGroup
+	nodeName            string
+	// deviceHealth tracks the per-device health reported to the kubelet
+	// through WatchHealthStatus (see device_health_status.go).
+	healthMu          sync.RWMutex
+	deviceHealth      map[string]kubeletplugin.DeviceHealth
+	healthSubMu       sync.RWMutex
+	healthSubscribers []chan kubeletplugin.DeviceHealthReport
 	// Idicates whether to use separate ResourceSlices for SharedCounters and
 	// Devices (required for k8s 1.35+) or combined SharedCounters and Devices
 	// in the same slice (required for k8s 1.34).
@@ -126,7 +139,11 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		state:                  state,
 		pulock:                 flock.NewFlock(puLockPath),
 		useSplitResourceSlices: useSplitSlices,
+		nodeName:               config.flags.nodeName,
 	}
+	// Seed the device health map before Start(): the kubelet may subscribe to
+	// health updates as soon as the plugin registers.
+	driver.initDeviceHealth()
 
 	opts := []kubeletplugin.Option{
 		kubeletplugin.KubeClient(driver.client),
@@ -135,12 +152,18 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		kubeletplugin.Serialize(false),
 		kubeletplugin.RegistrarDirectoryPath(config.flags.kubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
+		// KEP-4680: device health is reported to the kubelet only when the
+		// NVML health monitor is enabled; otherwise the DRAResourceHealth
+		// service is not advertised.
+		kubeletplugin.HealthService(featuregates.Enabled(featuregates.NVMLDeviceHealthCheck)),
 	}
 	// KEP-5304: Enable Device Metadata support for the kubelet plugin implementation.
 	// See: https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api
 	if featuregates.Enabled(featuregates.DeviceMetadata) {
-		opts = append(opts, kubeletplugin.EnableDeviceMetadata(true))
-		opts = append(opts, kubeletplugin.MetadataVersions(drametadatav1alpha1.SchemeGroupVersion))
+		opts = append(opts, kubeletplugin.EnableDeviceMetadata(true, []schema.GroupVersion{
+			drametadatav1beta1.SchemeGroupVersion,
+			drametadatav1alpha1.SchemeGroupVersion,
+		}))
 	}
 	helper, err := kubeletplugin.Start(ctx, driver, opts...)
 	if err != nil {
@@ -507,12 +530,23 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 		case <-ctx.Done():
 			klog.V(6).Info("Stop processing device health notifications")
 			return
+		case <-d.deviceHealthMonitor.Heartbeat():
+			// The monitor's event loop is alive: re-send the health report
+			// so the kubelet's health data does not go stale (the kubelet
+			// reports device health as unknown once it is older than the
+			// health check timeout).
+			d.notifyHealthSubscribers(d.buildHealthReport())
+			continue
 		case event, ok := <-d.deviceHealthMonitor.Unhealthy():
 			if !ok {
 				// NVML based deviceHealthMonitor is expected to close only during driver Shutdown.
 				klog.V(6).Info("Health monitor channel closed")
 				return
 			}
+
+			// Surface the event in the device health reported to the kubelet
+			// (KEP-4680) in addition to the taint handling below (KEP-5055).
+			d.updateDeviceHealth(event)
 
 			taint := healthEventToTaint(d.deviceHealthMonitor, event)
 			modified := false
