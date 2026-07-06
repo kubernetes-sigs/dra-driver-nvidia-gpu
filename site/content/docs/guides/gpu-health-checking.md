@@ -1,7 +1,7 @@
 ---
 title: GPU health checking
 linkTitle: GPU health checking
-weight: 40
+weight: 60
 description: >
   Monitor GPU health using NVML and apply device taints to prevent new workloads
   from scheduling on unhealthy GPUs.
@@ -29,17 +29,30 @@ can stall or corrupt an entire job; inference serving, where degraded devices
 can cause silent numerical errors; and cluster observability, where non-fatal
 warnings are surfaced to monitoring tools without affecting scheduling.
 
-## Feature status - Alpha
+## Feature status
 
 `NVMLDeviceHealthCheck` is an Alpha feature gate, disabled by default.
 
 | Feature gate | Default | Stage | Since |
 |---|---|---|---|
-| `NVMLDeviceHealthCheck` | `false` | Alpha | v25.12.0 |
+| `NVMLDeviceHealthCheck` | `false` | Alpha | v0.4.0 |
 
+`NVMLDeviceHealthCheck` is mutually exclusive with the `DynamicMIG`,
+`PassthroughSupport`, and `MPSSupport` feature gates. See
+
+Refer to the [feature gate constraints](../reference/feature-gates/#constraints) documentation for more details.
 > [!NOTE]
 >
 > This page describes the v0.4.0 and later implementation of health checking with the driver.
+
+## Prerequisites
+
+- The [`DRADeviceTaints`](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#device-taints-and-tolerations)
+  Kubernetes feature gate must be enabled on the `kube-apiserver`,
+  `kube-controller-manager`, and `kube-scheduler`.
+  In Kubernetes v1.34 and 1.35, `DRADeviceTaints` is disabled by default and must be explicitly enabled.
+  In Kubernetes v1.36, it is enabled by default.
+- NVIDIA DRA driver v0.4.0 or later installed via Helm.
 
 ## How it works
 
@@ -76,55 +89,8 @@ XID codes are NVIDIA-defined error identifiers for GPU hardware and firmware
 conditions. The driver classifies XIDs as fatal or non-fatal. Fatal XIDs produce
 a `NoSchedule` taint and non-fatal XIDs produce a `None` taint.
 
-By default, the driver sets the following XID errors as non-fatal because they indicate application-level failures rather than hardware degradation.  
-
-| XID | Description |
-|---|---|
-| 13 | Graphics Engine Exception |
-| 31 | GPU memory page fault |
-| 43 | GPU stopped processing |
-| 45 | Preemptive cleanup due to previous errors |
-| 68 | Video processor exception |
-| 109 | Context Switch Timeout Error |
-
 Refer to the [NVIDIA XID Errors documentation](https://docs.nvidia.com/deploy/xid-errors/index.html) for full descriptions for XID errors and codes.
 
-### Configure non-fatal XID list
-
-You can add XIDs to the non-fatal list using the `ADDITIONAL_XIDS_TO_IGNORE`
-environment variable on the GPU kubelet plugin's `gpus` container. Set it via
-Helm values:
-
-```yaml
-kubeletPlugin:
-  containers:
-    gpus:
-      env:
-        - name: ADDITIONAL_XIDS_TO_IGNORE
-          value: "48,62"
-```
-
-The value is a comma-separated list of XID codes. XIDs in this list receive a
-`None` taint effect instead of `NoSchedule`.
-
-Apply the change with `helm upgrade`, either by passing a values file:
-
-```bash
-helm upgrade dra-driver-nvidia-gpu oci://registry.k8s.io/dra-driver-nvidia/charts/dra-driver-nvidia-gpu \
-    --namespace dra-driver-nvidia-gpu \
-    -f values.yaml
-```
-
-The new value takes effect after the `kubelet-plugin` DaemonSet pods restart.
-
-## Prerequisites
-
-- The [`DRADeviceTaints`](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#device-taints-and-tolerations)
-  Kubernetes feature gate must be enabled on the `kube-apiserver`,
-  `kube-controller-manager`, and `kube-scheduler`.
-  In Kubernetes v1.34 and 1.35, `DRADeviceTaints` is disabled by default and must be explicitly enabled.
-  In Kubernetes v1.36, it is enabled by default.
-- NVIDIA DRA driver v0.4.0 or later installed via Helm.
 
 ## Enabling the feature
 
@@ -143,16 +109,6 @@ helm upgrade dra-driver-nvidia-gpu oci://registry.k8s.io/dra-driver-nvidia/chart
     --reuse-values \
     --set featureGates.NVMLDeviceHealthCheck=true
 ```
-
-### Incompatible feature gates
-
-`NVMLDeviceHealthCheck` cannot be combined with the following feature gates.
-
-* `DynamicMIG` 
-* `PassthroughSupport`
-* `MPSSupport`
-
-Refer to the [feature gate constraints](../reference/feature-gates.md#constraints) documentation for more details.
 
 ## Recovering from an unhealthy device
 
@@ -194,8 +150,8 @@ objects to manually remove or override device taints without restarting the driv
 - **One taint per key per device**: Each device holds at most one taint per taint
   key. If multiple XID events occur on the same device, only the most recent value
   is retained.
-- **Incompatible feature gates**: Cannot be used with `DynamicMIG` or
-  `PassthroughSupport`. See [Incompatible feature gates](#incompatible-feature-gates).
+- **Mutually exclusive feature gates**: Cannot be used with `DynamicMIG`,
+  `PassthroughSupport`, or `MPSSupport`.
 - **Publish failure handling**: If the driver fails to update the `ResourceSlice`
   after a health event (for example, due to a transient API server error), the
   failure is logged but not retried. The `ResourceSlice` may remain stale until
