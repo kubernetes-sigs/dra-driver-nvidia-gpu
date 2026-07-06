@@ -96,6 +96,9 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		kubeletplugin.Serialize(false),
 		kubeletplugin.RegistrarDirectoryPath(config.flags.kubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
+		// This plugin does not report device health (KEP-4680), so don't
+		// advertise the DRAResourceHealth service to the kubelet.
+		kubeletplugin.HealthService(false),
 	)
 	if err != nil {
 		return nil, err
@@ -160,6 +163,13 @@ func (d *driver) Shutdown() error {
 
 	d.pluginhelper.Stop()
 	return nil
+}
+
+// WatchHealthStatus implements [kubeletplugin.DRAPlugin]. The ComputeDomain
+// plugin does not report device health (see also the HealthService option in
+// NewDriver, which keeps the DRAResourceHealth service from being advertised).
+func (d *driver) WatchHealthStatus(ctx context.Context, reports chan<- kubeletplugin.DeviceHealthReport) error {
+	return kubeletplugin.ErrHealthNotSupported
 }
 
 func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceapi.ResourceClaim) (map[types.UID]kubeletplugin.PrepareResult, error) {

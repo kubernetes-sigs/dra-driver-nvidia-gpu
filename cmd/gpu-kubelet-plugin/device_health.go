@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	resourceapi "k8s.io/api/resource/v1"
@@ -100,10 +101,21 @@ func healthEventToTaint(monitor deviceHealthMonitor, event *DeviceHealthEvent) *
 // For a full device the returned 3-tuple is the device's uuid and (FullGPUInstanceID) 0xFFFFFFFF for the other two elements.
 type devicePlacementMap map[string]map[uint32]map[uint32]*AllocatableDevice
 
+// monitorHeartbeatInterval is how often the monitor's event loop signals that
+// it is alive. The kubelet reports device health as unknown when it is not
+// refreshed within each device's health check timeout (30 seconds by
+// default), so the driver re-sends its health report on every heartbeat. The
+// heartbeat deliberately originates from the event loop itself: if the loop
+// wedges, the resends stop and the kubelet correctly decays the devices'
+// health to unknown instead of trusting a stale report.
+const monitorHeartbeatInterval = 15 * time.Second
+
 type nvmlDeviceHealthMonitor struct {
 	nvmllib           nvml.Interface
 	eventSet          nvml.EventSet
 	unhealthy         chan *DeviceHealthEvent
+	heartbeat         chan struct{}
+	lastHeartbeat     time.Time
 	deviceByPlacement devicePlacementMap
 	skippedXids       map[uint64]bool
 	wg                sync.WaitGroup
@@ -127,6 +139,7 @@ func newNvmlDeviceHealthMonitor(config *Config, perGPUAllocatable *PerGPUAllocat
 	m := &nvmlDeviceHealthMonitor{
 		nvmllib:           nvdevlib.nvmllib,
 		unhealthy:         make(chan *DeviceHealthEvent, len(all)),
+		heartbeat:         make(chan struct{}, 1),
 		deviceByPlacement: getDevicePlacementMap(all),
 		skippedXids:       xidsToSkip(config.flags.additionalXidsToIgnore),
 	}
@@ -219,6 +232,10 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 			klog.V(6).Info("Stopping event-driven GPU health monitor...")
 			return
 		default:
+			// Every pass of this loop, whether an event arrived or the wait
+			// timed out, proves the monitor is alive.
+			m.beat()
+
 			event, ret := m.eventSet.Wait(5000) // timeout in 5000 ms.
 			if ret == nvml.ERROR_TIMEOUT {
 				continue
@@ -273,6 +290,67 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 
 func (m *nvmlDeviceHealthMonitor) Unhealthy() <-chan *DeviceHealthEvent {
 	return m.unhealthy
+}
+
+// beat signals liveness of the event loop at most once per
+// monitorHeartbeatInterval. Only called from the run goroutine.
+func (m *nvmlDeviceHealthMonitor) beat() {
+	if time.Since(m.lastHeartbeat) < monitorHeartbeatInterval {
+		return
+	}
+	m.lastHeartbeat = time.Now()
+	select {
+	case m.heartbeat <- struct{}{}:
+	default:
+	}
+}
+
+// Heartbeat signals that the monitor's event loop is alive. The driver
+// re-sends its current health report on each heartbeat to keep the kubelet's
+// health data fresh.
+func (m *nvmlDeviceHealthMonitor) Heartbeat() <-chan struct{} {
+	return m.heartbeat
+}
+
+// ProbeDevice checks whether the device currently responds via NVML. The
+// driver's health recovery loop uses it to detect that a previously unhealthy
+// device works again (see device_health_status.go).
+func (m *nvmlDeviceHealthMonitor) ProbeDevice(dev *AllocatableDevice) error {
+	var parentUUID string
+	switch dev.Type() {
+	case GpuDeviceType:
+		parentUUID = dev.UUID()
+	case MigStaticDeviceType:
+		parentUUID = dev.MigStatic.parent.UUID
+	case MigDynamicDeviceType:
+		// A dynamic MIG placeholder is an abstract partition of its parent
+		// GPU: probing the parent decides its health.
+		if dev.MigDynamic.Parent == nil {
+			return fmt.Errorf("dynamic MIG device has no parent GPU")
+		}
+		parentUUID = dev.MigDynamic.Parent.UUID
+	case VfioDeviceType:
+		// VFIO-bound devices are invisible to NVML and must not be touched
+		// through it (open NVML handles interfere with VFIO binding); probe
+		// at the PCI bus level instead.
+		return probePCIDevice(sysfsPCIDevicesRoot, dev.Vfio.PciBusID)
+	default:
+		return fmt.Errorf("device type %q does not support health probing", dev.Type())
+	}
+	if parentUUID == "" {
+		return fmt.Errorf("device has no UUID")
+	}
+
+	gpu, ret := m.nvmllib.DeviceGetHandleByUUID(parentUUID)
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("device %s does not respond to NVML: %v", parentUUID, ret)
+	}
+	// A cheap query which requires talking to the device, to distinguish a
+	// stale handle from a working device.
+	if _, ret := gpu.GetPciInfo(); ret != nvml.SUCCESS {
+		return fmt.Errorf("device %s failed PCI info query: %v", parentUUID, ret)
+	}
+	return nil
 }
 
 // sendHealthEventForAllDevices aggregates every device across all GPUs into a

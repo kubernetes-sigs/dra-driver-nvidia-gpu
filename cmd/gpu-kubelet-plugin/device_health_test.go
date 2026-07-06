@@ -29,11 +29,15 @@ import (
 // mockHealthMonitor implements deviceHealthMonitor for testing healthEventToTaint.
 type mockHealthMonitor struct {
 	nonFatalXids map[uint64]bool
+	probeErr     error
+	heartbeatCh  chan struct{}
 }
 
 func (m *mockHealthMonitor) Start(context.Context) error          { return nil }
 func (m *mockHealthMonitor) Stop()                                {}
 func (m *mockHealthMonitor) Unhealthy() <-chan *DeviceHealthEvent { return nil }
+func (m *mockHealthMonitor) Heartbeat() <-chan struct{}           { return m.heartbeatCh }
+func (m *mockHealthMonitor) ProbeDevice(*AllocatableDevice) error { return m.probeErr }
 func (m *mockHealthMonitor) IsEventNonFatal(e *DeviceHealthEvent) bool {
 	if e.EventType == HealthEventXID {
 		return m.nonFatalXids[e.EventData]

@@ -49,8 +49,15 @@ type deviceHealthMonitor interface {
 	Start(context.Context) error
 	Stop()
 	Unhealthy() <-chan *DeviceHealthEvent
+	// Heartbeat signals that the monitor's event loop is alive; the driver
+	// re-sends its health report to the kubelet on each heartbeat so the
+	// kubelet's health data does not go stale.
+	Heartbeat() <-chan struct{}
 	// Allows the driver to query the HealthMonitor's health policy
 	IsEventNonFatal(event *DeviceHealthEvent) bool
+	// ProbeDevice reports whether the device currently responds; used by the
+	// health recovery loop to clear the unhealthy status of recovered devices.
+	ProbeDevice(dev *AllocatableDevice) error
 }
 
 type driver struct {
@@ -61,6 +68,16 @@ type driver struct {
 	healthcheck         *healthcheck
 	deviceHealthMonitor deviceHealthMonitor
 	wg                  sync.WaitGroup
+	nodeName            string
+	// deviceHealth tracks the per-device health reported to the kubelet
+	// through WatchHealthStatus (see device_health_status.go).
+	healthMu          sync.RWMutex
+	deviceHealth      map[string]kubeletplugin.DeviceHealth
+	healthSubMu       sync.RWMutex
+	healthSubscribers []chan kubeletplugin.DeviceHealthReport
+	// healthChildren maps a parent GPU UUID to the names of devices whose
+	// health follows the parent (dynamic MIG placeholders).
+	healthChildren map[string][]string
 	// Idicates whether to use separate ResourceSlices for SharedCounters and
 	// Devices (required for k8s 1.35+) or combined SharedCounters and Devices
 	// in the same slice (required for k8s 1.34).
@@ -126,7 +143,11 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		state:                  state,
 		pulock:                 flock.NewFlock(puLockPath),
 		useSplitResourceSlices: useSplitSlices,
+		nodeName:               config.flags.nodeName,
 	}
+	// Seed the device health map before Start(): the kubelet may subscribe to
+	// health updates as soon as the plugin registers.
+	driver.initDeviceHealth()
 
 	opts := []kubeletplugin.Option{
 		kubeletplugin.KubeClient(driver.client),
@@ -135,6 +156,10 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		kubeletplugin.Serialize(false),
 		kubeletplugin.RegistrarDirectoryPath(config.flags.kubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
+		// KEP-4680: device health is reported to the kubelet only when the
+		// NVML health monitor is enabled; otherwise the DRAResourceHealth
+		// service is not advertised.
+		kubeletplugin.HealthService(featuregates.Enabled(featuregates.NVMLDeviceHealthCheck)),
 	}
 	// KEP-5304: Enable Device Metadata support for the kubelet plugin implementation.
 	// See: https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api
@@ -168,6 +193,12 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		go func() {
 			defer driver.wg.Done()
 			driver.deviceHealthEvents(ctx, config.flags.nodeName)
+		}()
+
+		driver.wg.Add(1)
+		go func() {
+			defer driver.wg.Done()
+			driver.deviceHealthRecovery(ctx)
 		}()
 	}
 
@@ -500,12 +531,25 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 		case <-ctx.Done():
 			klog.V(6).Info("Stop processing device health notifications")
 			return
+		case <-d.deviceHealthMonitor.Heartbeat():
+			// The monitor's event loop is alive: re-send the health report
+			// for the NVML-verified devices so the kubelet's health data
+			// does not go stale (the kubelet reports device health as
+			// unknown once it is older than the health check timeout). VFIO
+			// devices are deliberately not included; their heartbeat comes
+			// from the PCI prober (see refreshVfioHealth).
+			d.notifyHealthSubscribers(d.buildNvmlHealthReport())
+			continue
 		case event, ok := <-d.deviceHealthMonitor.Unhealthy():
 			if !ok {
 				// NVML based deviceHealthMonitor is expected to close only during driver Shutdown.
 				klog.V(6).Info("Health monitor channel closed")
 				return
 			}
+
+			// Surface the event in the device health reported to the kubelet
+			// (KEP-4680) in addition to the taint handling below (KEP-5055).
+			d.updateDeviceHealth(event)
 
 			taint := healthEventToTaint(d.deviceHealthMonitor, event)
 			modified := false
