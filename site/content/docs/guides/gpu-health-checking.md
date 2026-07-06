@@ -87,9 +87,9 @@ The driver only ever applies the `None` and `NoSchedule` effects. It never evict
 
 XID codes are NVIDIA-defined error identifiers for GPU hardware and firmware
 conditions. The driver classifies XIDs as fatal or non-fatal. Fatal XIDs produce
-a `NoSchedule` taint and non-fatal XIDs produce a `None` taint.
+a `NoSchedule` taint and non-fatal XIDs produce a `None` taint. Refer to the [NVIDIA XID Errors documentation](https://docs.nvidia.com/deploy/xid-errors/index.html) for full descriptions for XID errors and codes.
 
-Refer to the [NVIDIA XID Errors documentation](https://docs.nvidia.com/deploy/xid-errors/index.html) for full descriptions for XID errors and codes.
+By default, the driver sets the some XID errors as non-fatal because they indicate application-level failures rather than hardware degradation. For a full list of these XID errors, refer to in the [Driver repo](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/blob/{{< param driver_release_tag >}}/cmd/gpu-kubelet-plugin/device_health.go#L421).
 
 
 ## Enabling the feature
