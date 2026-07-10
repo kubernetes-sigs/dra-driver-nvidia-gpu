@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/NVIDIA/go-nvlib v0.11.0
-	github.com/NVIDIA/go-nvml v0.13.1-0
+	github.com/NVIDIA/go-nvml v0.13.3-1
 	github.com/NVIDIA/nvidia-container-toolkit v1.19.1
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.32.0
