@@ -667,6 +667,10 @@ func (s *DeviceState) applyComputeDomainChannelConfig(ctx context.Context, confi
 }
 
 func (s *DeviceState) applyComputeDomainDaemonConfig(ctx context.Context, config *configapi.ComputeDomainDaemonConfig, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult) (*DeviceConfigState, error) {
+	if err := s.computeDomainManager.AssertDaemonResourceClaimInDriverNamespace(claim.Namespace); err != nil {
+		return nil, permanentError{fmt.Errorf("error asserting daemon ResourceClaim namespace: %w", err)}
+	}
+
 	// Get the list of claim requests this config is being applied over.
 	var requests []string
 	for _, r := range results {

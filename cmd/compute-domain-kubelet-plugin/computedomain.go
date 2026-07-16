@@ -369,6 +369,19 @@ func (m *ComputeDomainManager) AssertComputeDomainNamespace(ctx context.Context,
 	return nil
 }
 
+// AssertDaemonResourceClaimInDriverNamespace ensures a claim asking for the
+// daemon device is in the driver namespace. The legitimate per-CD daemon
+// ResourceClaim is created by the controller in the driver namespace; a
+// claim arriving from any other namespace cannot be a legitimate daemon
+// claim and would otherwise grant the requester management-mode CDI (all
+// GPUs + driver libraries) via the standard daemon device.
+func (m *ComputeDomainManager) AssertDaemonResourceClaimInDriverNamespace(claimNamespace string) error {
+	if claimNamespace != m.config.flags.namespace {
+		return fmt.Errorf("the daemon ResourceClaim's namespace %q is different than the driver's namespace %q", claimNamespace, m.config.flags.namespace)
+	}
+	return nil
+}
+
 func (m *ComputeDomainManager) AddNodeLabel(ctx context.Context, cdUID string) error {
 	node, err := m.config.clientsets.Core.CoreV1().Nodes().Get(ctx, m.config.flags.nodeName, metav1.GetOptions{})
 	if err != nil {
