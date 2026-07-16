@@ -1248,6 +1248,12 @@ func (s *DeviceState) validateNoOverlappingPreparedDevices(checkpoint *Checkpoin
 		// Check for overlaps between requested devices from the current claim and others.
 		for device := range requestedDevices {
 			if _, found := preparedDevices[device]; found {
+				if isConsumableSharesEnabled(s.config) {
+					dev := s.perGPUAllocatable.GetAllocatableDevice(device)
+					if dev != nil && dev.Type() != VfioDeviceType {
+						continue
+					}
+				}
 				return fmt.Errorf(
 					"requested device %s is already allocated to different claim %s",
 					device, existingClaimUID,

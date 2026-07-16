@@ -38,6 +38,7 @@ fullnameOverride: ""
 namespaceOverride: ""
 selectorLabelsOverride: {}
 gpuResourcesEnabledOverride: false
+consumableShares: ""
 
 allowDefaultNamespace: false
 

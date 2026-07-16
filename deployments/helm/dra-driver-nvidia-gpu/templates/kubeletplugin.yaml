@@ -296,6 +296,10 @@ spec:
         - name: NVIDIA_CDI_HOOK_PATH
           value: "{{ .Values.nvidiaCDIHookPath }}"
         {{- end }}
+        {{- if .Values.consumableShares }}
+        - name: CONSUMABLE_SHARES
+          value: "{{ .Values.consumableShares }}"
+        {{- end }}
         {{- if .Values.featureGates }}
         - name: FEATURE_GATES
           value: "{{ range $key, $value := .Values.featureGates }}{{ $key }}={{ $value }},{{ end }}"
