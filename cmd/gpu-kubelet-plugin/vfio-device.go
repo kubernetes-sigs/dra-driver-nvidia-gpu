@@ -49,8 +49,17 @@ type VfioPciManager struct {
 	sync.Mutex
 	containerDriverRoot string
 	hostDriverRoot      string
+	pciDevicesPath      string
 	nvlib               *deviceLib
 	nvidiaEnabled       bool
+}
+
+type vfioConfigureOperations interface {
+	disableGPUPersistenceMode(string) (bool, error)
+	enableGPUPersistenceMode(string) error
+	WaitForGPUFree(context.Context, *VfioDeviceInfo) error
+	verifyDisabledVFs(string) error
+	changeDriver(string, string) error
 }
 
 func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib *deviceLib, nvidiaEnabled bool) (*VfioPciManager, error) {
@@ -65,6 +74,7 @@ func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib 
 	vm := &VfioPciManager{
 		containerDriverRoot: containerDriverRoot,
 		hostDriverRoot:      hostDriverRoot,
+		pciDevicesPath:      pciDevicesPath,
 		nvlib:               nvlib,
 		nvidiaEnabled:       nvidiaEnabled,
 	}
@@ -136,7 +146,7 @@ func (vm *VfioPciManager) verifyDisabledVFs(pciBusID string) error {
 
 // Configure binds the GPU to the vfio-pci driver.
 func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) error {
-	driver, err := getDriver(pciDevicesPath, info.PciBusID)
+	driver, err := getDriver(vm.pciDevicesPath, info.PciBusID)
 	if err != nil {
 		return fmt.Errorf("error getting driver details for GPU %q: %w", info.PciBusID, err)
 	}
@@ -164,27 +174,46 @@ func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) e
 		return fmt.Errorf("error checking if module %q is loaded: %w", info.vfioModule, err)
 	}
 
-	// Disable GPU Persistence Mode.
-	err = vm.disableGPUPersistenceMode(info.PciBusID)
+	return configureVfioDevice(ctx, info, driver, vfioDriver, vm)
+}
+
+// configureVfioDevice applies all host mutations required to prepare one VFIO
+// device. If any mutation fails, it restores the original driver and persistence
+// mode before returning the error.
+func configureVfioDevice(ctx context.Context, info *VfioDeviceInfo, originalDriver, vfioDriver string, ops vfioConfigureOperations) (rerr error) {
+	persistenceModeDisabled, err := ops.disableGPUPersistenceMode(info.PciBusID)
 	if err != nil {
 		return fmt.Errorf("error disabling persistence mode for GPU %q: %w", info.PciBusID, err)
 	}
 
-	// Wait for other GPU clients to evacuate.
-	err = vm.WaitForGPUFree(ctx, info)
-	if err != nil {
+	defer func() {
+		if rerr == nil {
+			return
+		}
+
+		var rollbackErr error
+		if err := ops.changeDriver(info.PciBusID, originalDriver); err != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("error restoring driver %q for GPU %q: %w", originalDriver, info.PciBusID, err))
+		}
+		if persistenceModeDisabled {
+			if err := ops.enableGPUPersistenceMode(info.PciBusID); err != nil {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("error restoring persistence mode for GPU %q: %w", info.PciBusID, err))
+			}
+		}
+		if rollbackErr != nil {
+			rerr = errors.Join(rerr, fmt.Errorf("VFIO prepare rollback failed: %w", rollbackErr))
+		}
+	}()
+
+	if err := ops.WaitForGPUFree(ctx, info); err != nil {
 		return fmt.Errorf("error waiting for GPU %q to be free: %w", info.PciBusID, err)
 	}
 
-	// Verify SRIOV VFs are disabled on the GPU.
-	err = vm.verifyDisabledVFs(info.PciBusID)
-	if err != nil {
+	if err := ops.verifyDisabledVFs(info.PciBusID); err != nil {
 		return fmt.Errorf("error verifying disabled VFs: %w", err)
 	}
 
-	// Change the GPU driver to vfio-pci (or variant).
-	err = vm.changeDriver(info.PciBusID, vfioDriver)
-	if err != nil {
+	if err := ops.changeDriver(info.PciBusID, vfioDriver); err != nil {
 		return fmt.Errorf("error changing driver for GPU %q: %w", info.PciBusID, err)
 	}
 
@@ -224,6 +253,9 @@ func (vm *VfioPciManager) Unconfigure(ctx context.Context, info *VfioDeviceInfo)
 // Get the current driver the GPU is bound to.
 func getDriver(pciDevicesPath, pciAddress string) (string, error) {
 	driverPath, err := os.Readlink(filepath.Join(pciDevicesPath, pciAddress, "driver"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
 	if err != nil {
 		return "", err
 	}
@@ -233,7 +265,7 @@ func getDriver(pciDevicesPath, pciAddress string) (string, error) {
 
 // Change the driver the GPU is bound to.
 func (vm *VfioPciManager) changeDriver(pciAddress, driver string) error {
-	currentDriver, err := getDriver(pciDevicesPath, pciAddress)
+	currentDriver, err := getDriver(vm.pciDevicesPath, pciAddress)
 	if err != nil {
 		return fmt.Errorf("error getting driver details for GPU %q: %w", pciAddress, err)
 	}
@@ -243,13 +275,44 @@ func (vm *VfioPciManager) changeDriver(pciAddress, driver string) error {
 		return nil
 	}
 
-	err = vm.nvlib.nvpasst.Unbind(pciAddress)
-	if err != nil {
-		return fmt.Errorf("error unbinding GPU %q from driver %q: %w", pciAddress, currentDriver, err)
+	if currentDriver != "" {
+		err = vm.nvlib.nvpasst.Unbind(pciAddress)
+		if err != nil {
+			unbindErr := fmt.Errorf("error unbinding GPU %q from driver %q: %w", pciAddress, currentDriver, err)
+			if restoreErr := vm.restoreDriver(pciAddress, currentDriver); restoreErr != nil {
+				return errors.Join(unbindErr, fmt.Errorf("error restoring original driver after unbind failure: %w", restoreErr))
+			}
+			return unbindErr
+		}
 	}
 
 	err = vm.nvlib.nvpasst.BindToDriver(pciAddress, driver)
 	if err != nil {
+		bindErr := fmt.Errorf("error binding GPU %q to driver %q: %w", pciAddress, driver, err)
+		if currentDriver != "" {
+			if restoreErr := vm.restoreDriver(pciAddress, currentDriver); restoreErr != nil {
+				return errors.Join(bindErr, fmt.Errorf("error restoring original driver after bind failure: %w", restoreErr))
+			}
+		}
+		return bindErr
+	}
+	return nil
+}
+
+func (vm *VfioPciManager) restoreDriver(pciAddress, driver string) error {
+	currentDriver, err := getDriver(vm.pciDevicesPath, pciAddress)
+	if err != nil {
+		return fmt.Errorf("error getting driver details for GPU %q: %w", pciAddress, err)
+	}
+	if currentDriver == driver {
+		return nil
+	}
+	if currentDriver != "" {
+		if err := vm.nvlib.nvpasst.Unbind(pciAddress); err != nil {
+			return fmt.Errorf("error unbinding GPU %q from driver %q: %w", pciAddress, currentDriver, err)
+		}
+	}
+	if err := vm.nvlib.nvpasst.BindToDriver(pciAddress, driver); err != nil {
 		return fmt.Errorf("error binding GPU %q to driver %q: %w", pciAddress, driver, err)
 	}
 	return nil
@@ -265,7 +328,7 @@ func (vm *VfioPciManager) enableGPUPersistenceMode(pciAddress string) error {
 }
 
 // Disable GPU Persistence Mode.
-func (vm *VfioPciManager) disableGPUPersistenceMode(pciAddress string) error {
+func (vm *VfioPciManager) disableGPUPersistenceMode(pciAddress string) (bool, error) {
 	// Obtain a lock to serialize persistence mode operations.
 	// This is a cautious approach to avoid any NVML race conditions.
 	vm.Lock()
@@ -275,17 +338,17 @@ func (vm *VfioPciManager) disableGPUPersistenceMode(pciAddress string) error {
 	_, err := os.Stat(filepath.Join(vm.containerDriverRoot, nvidiaPersistencedSocketPath))
 	if err != nil {
 		if !os.IsNotExist(err) {
-			return fmt.Errorf("error checking if nvidia-persistenced is running: %w", err)
+			return false, fmt.Errorf("error checking if nvidia-persistenced is running: %w", err)
 		}
 		klog.V(4).Infof("nvidia-persistenced is not running; nothing to do...")
-		return nil
+		return false, nil
 	}
 
 	err = vm.nvlib.disableGPUPersistenceMode(pciAddress)
 	if err != nil {
-		return fmt.Errorf("error disabling persistence mode for GPU %q: %w", pciAddress, err)
+		return false, fmt.Errorf("error disabling persistence mode for GPU %q: %w", pciAddress, err)
 	}
-	return nil
+	return true, nil
 }
 
 // Check if the expected kernel module is loaded.

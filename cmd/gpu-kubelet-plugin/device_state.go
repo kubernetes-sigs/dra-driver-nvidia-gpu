@@ -67,7 +67,7 @@ type DeviceState struct {
 	cdi                      *CDIHandler
 	tsManager                *TimeSlicingManager
 	mpsManager               *MpsManager
-	vfioPciManager           *VfioPciManager
+	vfioPciManager           vfioDeviceManager
 	checkpointCleanupManager *CheckpointCleanupManager
 	config                   *Config
 
@@ -82,6 +82,13 @@ type DeviceState struct {
 	// Checkpoint read/write lock, file-based for multi-process synchronization.
 	cplock *flock.Flock
 }
+
+type vfioDeviceManager interface {
+	Configure(context.Context, *VfioDeviceInfo) error
+	Unconfigure(context.Context, *VfioDeviceInfo) error
+}
+
+const vfioRollbackTimeout = 30 * time.Second
 
 func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	containerDriverRoot := root(config.flags.containerDriverRoot)
@@ -275,7 +282,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	// optimized into filling the gaps).
 	if exists && preparedClaim.CheckpointState == ClaimCheckpointStatePrepareStarted {
 		klog.V(4).Infof("Claim %s already in PrepareStarted state: attempt rollback before new prepare", ResourceClaimToString(claim))
-		if err := s.unpreparePartiallyPrepairedClaim(claimUID, preparedClaim, cp); err != nil {
+		if err := s.unpreparePartiallyPrepairedClaim(ctx, claimUID, preparedClaim, cp); err != nil {
 			return nil, fmt.Errorf("unprepare failed for partially prepared claim %s failed: %w", PreparedClaimToString(&preparedClaim, claimUID), err)
 		}
 	}
@@ -299,7 +306,8 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	preparedDevices, err := s.prepareDevices(ctx, claim)
 	klog.V(6).Infof("t_prep_core %.3f s (claim %s)", time.Since(tprep0).Seconds(), ResourceClaimToString(claim))
 	if err != nil {
-		return nil, fmt.Errorf("prepare devices failed: %w", err)
+		prepareErr := fmt.Errorf("prepare devices failed: %w", err)
+		return nil, s.rollbackFailedPrepare(ctx, claimUID, claim, cp, prepareErr)
 	}
 
 	// TODO: Remove this once partitionable device support is introduced for vfio devices.
@@ -318,7 +326,8 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 
 	tccsf0 := time.Now()
 	if err := s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
-		return nil, fmt.Errorf("unable to create CDI spec file for claim: %w", err)
+		prepareErr := fmt.Errorf("unable to create CDI spec file for claim: %w", err)
+		return nil, s.rollbackFailedPrepare(ctx, claimUID, claim, cp, prepareErr)
 	}
 	klog.V(7).Infof("t_prep_ccsf %.3f s", time.Since(tccsf0).Seconds())
 
@@ -331,12 +340,43 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		}
 	})
 	if err != nil {
-		return nil, fmt.Errorf("unable to update checkpoint: %w", err)
+		prepareErr := fmt.Errorf("unable to update checkpoint: %w", err)
+		return nil, s.rollbackFailedPrepare(ctx, claimUID, claim, cp, prepareErr)
 	}
 	klog.V(6).Infof("checkpoint updated for claim %v", claimUID)
 	klog.V(7).Infof("t_prep_ucp2 %.3f s", time.Since(tucp20).Seconds())
 
 	return preparedDevices.GetDevices(), nil
+}
+
+func (s *DeviceState) rollbackFailedPrepare(ctx context.Context, claimUID string, claim *resourceapi.ResourceClaim, checkpoint *Checkpoint, prepareErr error) error {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), vfioRollbackTimeout)
+	defer cancel()
+
+	if latestCheckpoint, err := s.getCheckpoint(rollbackCtx); err == nil {
+		checkpoint = latestCheckpoint
+		if persistedClaim, exists := checkpoint.V2.PreparedClaims[claimUID]; exists && persistedClaim.CheckpointState == ClaimCheckpointStatePrepareCompleted {
+			// CreateCheckpoint may report an error after the new checkpoint became
+			// visible. Do not roll back devices acknowledged as fully prepared.
+			return prepareErr
+		}
+	}
+
+	partialClaim := PreparedClaim{
+		CheckpointState: ClaimCheckpointStatePrepareStarted,
+		Status:          claim.Status,
+		Name:            claim.Name,
+		Namespace:       claim.Namespace,
+	}
+
+	rollbackErr := s.unpreparePartiallyPrepairedClaim(rollbackCtx, claimUID, partialClaim, checkpoint)
+	if err := s.cdi.DeleteClaimSpecFile(claimUID); err != nil {
+		rollbackErr = errors.Join(rollbackErr, fmt.Errorf("error deleting CDI spec during prepare rollback: %w", err))
+	}
+	if rollbackErr != nil {
+		return errors.Join(prepareErr, fmt.Errorf("prepare rollback failed: %w", rollbackErr))
+	}
+	return prepareErr
 }
 
 // DestroyUnknownMIGDevices() relies on the checkpoint as the source of truth.
@@ -450,7 +490,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 
 	switch pc.CheckpointState {
 	case ClaimCheckpointStatePrepareStarted:
-		if err := s.unpreparePartiallyPrepairedClaim(claimUID, pc, checkpoint); err != nil {
+		if err := s.unpreparePartiallyPrepairedClaim(ctx, claimUID, pc, checkpoint); err != nil {
 			return fmt.Errorf("unprepare failed for partially prepared claim %s failed: %w", claimRef.String(), err)
 		}
 	case ClaimCheckpointStatePrepareCompleted:
@@ -537,11 +577,14 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 // server) or for a claim that is not stale but that _we_ are currently
 // preparing. In both cases, the `checkpoint` data is fresh enough; there is no
 // other entity that currently legitimately owns the device represented in `pc`.
-func (s *DeviceState) unpreparePartiallyPrepairedClaim(cuid string, pc PreparedClaim, checkpoint *Checkpoint) error {
-	// For now, there's nothing to do when DynamicMIG is not enabled.
+func (s *DeviceState) unpreparePartiallyPrepairedClaim(ctx context.Context, cuid string, pc PreparedClaim, checkpoint *Checkpoint) error {
+	var cleanupErr error
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		cleanupErr = errors.Join(cleanupErr, s.rollbackCheckpointedVfioDevices(ctx, pc))
+	}
+
 	if !featuregates.Enabled(featuregates.DynamicMIG) {
-		klog.Infof("unprepare noop: preparation started but not completed for claim %s (devices: %v)", PreparedClaimToString(&pc, cuid), pc.Status.Allocation.Devices.Results)
-		return nil
+		return cleanupErr
 	}
 
 	// When DynamicMIG is enabled, try to identify an orphaned MIG device
@@ -567,11 +610,11 @@ func (s *DeviceState) unpreparePartiallyPrepairedClaim(cuid string, pc PreparedC
 
 		klog.V(1).Infof("Device %s is a MIG device, DynamicMIG mode: deleteMigDevIfExistsAndNotUsedByCompletedClaim()", devname)
 		if err := s.deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms, devname, completedClaims); err != nil {
-			return fmt.Errorf("deleteMigDevIfExistsAndNotUsedByCompletedClaim failed: %w", err)
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("deleteMigDevIfExistsAndNotUsedByCompletedClaim failed: %w", err))
 		}
 	}
 
-	return nil
+	return cleanupErr
 }
 
 func (s *DeviceState) createCheckpoint(ctx context.Context, cp *Checkpoint) error {
@@ -976,6 +1019,56 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 	return nil
 }
 
+func (s *DeviceState) rollbackCheckpointedVfioDevices(ctx context.Context, claim PreparedClaim) error {
+	if claim.Status.Allocation == nil {
+		return nil
+	}
+
+	var devices []*AllocatableDevice
+	var lookupErr error
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver != DriverName {
+			continue
+		}
+		device := s.perGPUAllocatable.GetAllocatableDevice(result.Device)
+		if device == nil {
+			// A partially prepared mixed claim may contain a dynamic MIG
+			// result which is no longer present in the allocatable map. That
+			// result is handled by the DynamicMIG cleanup below and must not
+			// prevent VFIO rollback. VFIO device names are stable and can be
+			// identified even when their allocatable is unexpectedly missing.
+			if strings.HasPrefix(result.Device, "gpu-vfio-") {
+				lookupErr = errors.Join(lookupErr, fmt.Errorf("allocatable not found for VFIO device %q", result.Device))
+			}
+			continue
+		}
+		if device.Type() == VfioDeviceType {
+			devices = append(devices, device)
+		}
+	}
+
+	return errors.Join(lookupErr, s.rollbackVfioDevices(ctx, devices, true))
+}
+
+func (s *DeviceState) rollbackVfioDevices(ctx context.Context, devices []*AllocatableDevice, rediscoverSiblings bool) error {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), vfioRollbackTimeout)
+	defer cancel()
+
+	var rollbackErr error
+	for _, device := range slices.Backward(devices) {
+		if err := s.vfioPciManager.Unconfigure(rollbackCtx, device.Vfio); err != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("error rolling back VFIO device %q: %w", device.CanonicalName(), err))
+			continue
+		}
+		if rediscoverSiblings {
+			if err := s.discoverSiblingAllocatables(device); err != nil {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("error rediscovering siblings for VFIO device %q: %w", device.CanonicalName(), err))
+			}
+		}
+	}
+	return rollbackErr
+}
+
 // Discover all sibling devices on the parent GPU of the given device.
 //
 // When a GPU is prepared in passthrough mode as a vfio device, the GPU may no longer be used on the nvidia driver,
@@ -1120,19 +1213,31 @@ func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configa
 	}
 
 	configState.containerEdits = commonEdits
-	// Configure the vfio-pci devices.
+	var vfioDevices []*AllocatableDevice
 	for _, r := range results {
 		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
 		if device == nil {
 			return nil, fmt.Errorf("allocatable not found for vfio device %q", r.Device)
 		}
-		err := s.vfioPciManager.Configure(ctx, device.Vfio)
-		if err != nil {
-			return nil, fmt.Errorf("error configuring vfio device %q: %w", r.Device, err)
-		}
+		vfioDevices = append(vfioDevices, device)
+	}
+	if err := s.configureVfioDevices(ctx, vfioDevices); err != nil {
+		return nil, err
 	}
 
 	return &configState, nil
+}
+
+func (s *DeviceState) configureVfioDevices(ctx context.Context, devices []*AllocatableDevice) error {
+	var configuredDevices []*AllocatableDevice
+	for _, device := range devices {
+		if err := s.vfioPciManager.Configure(ctx, device.Vfio); err != nil {
+			configureErr := fmt.Errorf("error configuring vfio device %q: %w", device.CanonicalName(), err)
+			return errors.Join(configureErr, s.rollbackVfioDevices(ctx, configuredDevices, false))
+		}
+		configuredDevices = append(configuredDevices, device)
+	}
+	return nil
 }
 
 // GetOpaqueDeviceConfigs returns an ordered list of the configs contained in possibleConfigs for this driver.
