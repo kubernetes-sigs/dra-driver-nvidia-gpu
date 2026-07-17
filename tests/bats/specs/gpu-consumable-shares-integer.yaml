@@ -1,0 +1,56 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: rct-share-integer-gpu
+  labels:
+    env: batssuite
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          capacity:
+            requests:
+              shares: 1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-share-integer-0
+  labels:
+    env: batssuite
+spec:
+  restartPolicy: Never
+  containers:
+  - name: ctr
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args: ["nvidia-smi -L; trap 'exit 0' TERM; sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: rct-share-integer-gpu
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-share-integer-1
+  labels:
+    env: batssuite
+spec:
+  restartPolicy: Never
+  containers:
+  - name: ctr
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args: ["nvidia-smi -L; trap 'exit 0' TERM; sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: rct-share-integer-gpu

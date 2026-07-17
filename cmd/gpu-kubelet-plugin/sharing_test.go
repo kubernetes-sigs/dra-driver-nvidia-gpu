@@ -23,6 +23,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+
+	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 )
 
 // mockFileChecker implements fileChecker for tests.
@@ -90,4 +93,30 @@ func TestRenderMpsControlDaemonDeploymentImagePullSettings(t *testing.T) {
 	}, deployment.Spec.Template.Spec.ImagePullSecrets)
 	require.Len(t, deployment.Spec.Template.Spec.Containers, 1)
 	require.Equal(t, corev1.PullAlways, deployment.Spec.Template.Spec.Containers[0].ImagePullPolicy)
+}
+
+func TestMpsManagerGetCDIContainerEdits(t *testing.T) {
+	config := &Config{
+		flags: &Flags{
+			nodeName:  "node-a",
+			namespace: "dra-driver-nvidia-gpu",
+		},
+	}
+	manager := NewMpsManager(config, nil, "/", "/templates/mps-control-daemon.tmpl.yaml")
+
+	deviceUUIDs := []string{"GPU-1111"}
+	pinnedLimit := resource.MustParse("4Gi")
+	mpsc := &configapi.MpsConfig{
+		DefaultActiveThreadPercentage:  new(50),
+		DefaultPinnedDeviceMemoryLimit: &pinnedLimit,
+	}
+
+	edits, err := manager.GetCDIContainerEdits(mpsc, deviceUUIDs)
+	require.NoError(t, err)
+	require.NotNil(t, edits)
+	require.NotNil(t, edits.ContainerEdits)
+	require.Contains(t, edits.Env, "CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps")
+	require.Contains(t, edits.Env, "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=50")
+	require.Contains(t, edits.Env, "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT=GPU-1111=4096M")
+	require.Len(t, edits.Mounts, 2)
 }

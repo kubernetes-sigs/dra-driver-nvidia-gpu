@@ -214,18 +214,23 @@ func (i MigSpec) PartConsumesCounters() []resourceapi.DeviceCounterConsumption {
 }
 
 // A variant of the legacy `GetDevice()`, for the Partitionable Devices paradigm.
-func (d *AllocatableDevice) PartGetDevice() resourceapi.Device {
+func (d *AllocatableDevice) PartGetDevice(config *Config) resourceapi.Device {
 	switch d.Type() {
 	case GpuDeviceType:
-		return d.Gpu.PartGetDevice()
+		dev := d.Gpu.PartGetDevice()
+		applyConsumableShares(&dev, config)
+		return dev
 	case MigStaticDeviceType:
 		panic("PartGetDevice() called for MigStaticDeviceType")
 	case MigDynamicDeviceType:
-		return d.MigDynamic.PartGetDevice()
+		dev := d.MigDynamic.PartGetDevice()
+		applyConsumableShares(&dev, config)
+		return dev
 	case VfioDeviceType:
 		panic("not yet implemented")
+	default:
+		panic("unexpected type for AllocatableDevice")
 	}
-	panic("unexpected type for AllocatableDevice")
 }
 
 // Insert one counter for each memory slice consumed, as given by the `start`

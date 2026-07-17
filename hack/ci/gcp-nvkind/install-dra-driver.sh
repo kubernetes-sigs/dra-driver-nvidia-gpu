@@ -52,6 +52,9 @@ helm --kube-context "${CTX}" upgrade -i dra-driver-nvidia-gpu \
   --create-namespace -n dra-driver-nvidia-gpu \
   --set nvidiaDriverRoot=/ \
   --set gpuResourcesEnabledOverride=true \
+  --set featureGates.ConsumableShares=true \
+  --set featureGates.MPSSupport=true \
+  --set consumableShares=unlimited \
   --wait --timeout=5m
 
 # Wait for the driver's ResourceSlice to appear.

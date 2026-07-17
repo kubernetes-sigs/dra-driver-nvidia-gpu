@@ -20,15 +20,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
+	"html/template"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
-	"text/template"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -38,11 +38,11 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"k8s.io/mount-utils"
-
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/yaml"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 
@@ -53,7 +53,6 @@ import (
 const (
 	MpsControlFilesDirName       = "mps"
 	MpsControlDaemonTemplatePath = "/templates/mps-control-daemon.tmpl.yaml"
-	MpsControlDaemonNameFmt      = "mps-control-daemon-%v" // Fill with ClaimUID
 	MpsDefaultShmMountPath       = "/dev/shm"
 
 	// driverRootMountDir is the directory where the driver root is mounted inside the kubelet plugin container.
@@ -77,25 +76,16 @@ type TimeSlicingManager struct {
 }
 
 type MpsManager struct {
+	sync.Mutex
 	config           *Config
 	controlFilesRoot string
 	hostDriverRoot   string
 	templatePath     string
-
-	nvdevlib *deviceLib
-}
-
-type MpsControlDaemon struct {
-	id        string
-	nodeName  string
-	namespace string
-	name      string
-	rootDir   string
-	pipeDir   string
-	shmDir    string
-	logDir    string
-	devices   UUIDProvider
-	manager   *MpsManager
+	daemonName       string
+	pipeDir          string
+	shmDir           string
+	logDir           string
+	nvdevlib         *deviceLib
 }
 
 type MpsControlDaemonTemplateData struct {
@@ -159,37 +149,32 @@ func NewMpsManager(config *Config, deviceLib *deviceLib, hostDriverRoot, templat
 		controlFilesRoot: controlFilesRoot,
 		hostDriverRoot:   hostDriverRoot,
 		templatePath:     templatePath,
+		daemonName:       fmt.Sprintf("mps-control-daemon-%s", config.flags.nodeName),
+		pipeDir:          filepath.Join(controlFilesRoot, "pipe"),
+		shmDir:           filepath.Join(controlFilesRoot, "shm"),
+		logDir:           filepath.Join(controlFilesRoot, "log"),
 		config:           config,
 		nvdevlib:         deviceLib,
 	}
 }
 
-func (m *MpsManager) NewMpsControlDaemon(claimUID string, devices UUIDProvider) *MpsControlDaemon {
-	id := m.GetMpsControlDaemonID(claimUID, devices)
-
-	return &MpsControlDaemon{
-		id:        id,
-		nodeName:  m.config.flags.nodeName,
-		namespace: m.config.flags.namespace,
-		name:      fmt.Sprintf(MpsControlDaemonNameFmt, id),
-		rootDir:   fmt.Sprintf("%s/%s", m.controlFilesRoot, id),
-		pipeDir:   fmt.Sprintf("%s/%s/%s", m.controlFilesRoot, id, "pipe"),
-		shmDir:    fmt.Sprintf("%s/%s/%s", m.controlFilesRoot, id, "shm"),
-		logDir:    fmt.Sprintf("%s/%s/%s", m.controlFilesRoot, id, "log"),
-		devices:   devices,
-		manager:   m,
+func (m *MpsManager) getSupportedGpuUUIDs() []string {
+	var supported []string
+	if m.nvdevlib != nil {
+		for _, info := range m.nvdevlib.gpuInfosByUUID {
+			if info != nil && info.UUID != "" {
+				if err := ensureCapability(m.nvdevlib.gpuInfosByUUID, []string{info.UUID}, voltaCudaComputeCapability); err == nil {
+					supported = append(supported, info.UUID)
+				}
+			}
+		}
 	}
+	slices.Sort(supported)
+	return supported
 }
 
-func (m *MpsManager) GetMpsControlDaemonID(claimUID string, devices UUIDProvider) string {
-	combined := strings.Join(devices.UUIDs(), ",")
-	hash := sha256.Sum256([]byte(combined))
-	return fmt.Sprintf("%s-%s", claimUID, hex.EncodeToString(hash[:])[:5])
-}
-
-func (m *MpsManager) IsControlDaemonStarted(ctx context.Context, id string) (bool, error) {
-	name := fmt.Sprintf(MpsControlDaemonNameFmt, id)
-	_, err := m.config.clientsets.Core.AppsV1().Deployments(m.config.flags.namespace).Get(ctx, name, metav1.GetOptions{})
+func (m *MpsManager) IsControlDaemonStarted(ctx context.Context) (bool, error) {
+	_, err := m.config.clientsets.Core.AppsV1().Deployments(m.config.flags.namespace).Get(ctx, m.daemonName, metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		return false, nil
 	}
@@ -199,95 +184,55 @@ func (m *MpsManager) IsControlDaemonStarted(ctx context.Context, id string) (boo
 	return true, nil
 }
 
-func (m *MpsManager) IsControlDaemonStopped(ctx context.Context, id string) (bool, error) {
-	name := fmt.Sprintf(MpsControlDaemonNameFmt, id)
-	_, err := m.config.clientsets.Core.AppsV1().Deployments(m.config.flags.namespace).Get(ctx, name, metav1.GetOptions{})
-	if errors.IsNotFound(err) {
-		return true, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("failed to get deployment: %w", err)
-	}
-	return false, nil
-}
+func (m *MpsManager) EnsureStarted(ctx context.Context) error {
+	m.Lock()
+	defer m.Unlock()
 
-func (m *MpsControlDaemon) GetID() string {
-	return m.id
-}
-
-func (m *MpsControlDaemon) Start(ctx context.Context, config *configapi.MpsConfig) error {
-	isStarted, err := m.manager.IsControlDaemonStarted(ctx, m.id)
+	isStarted, err := m.IsControlDaemonStarted(ctx)
 	if err != nil {
 		return fmt.Errorf("error checking if control daemon already started: %w", err)
 	}
-
 	if isStarted {
 		return nil
 	}
 
-	klog.Infof("Starting MPS control daemon for '%v', with settings: %+v", m.id, config)
+	deviceUUIDs := m.getSupportedGpuUUIDs()
+	if len(deviceUUIDs) == 0 {
+		return fmt.Errorf("no Volta (>= 7.0) or newer GPUs available on node for MPS multi-user server")
+	}
 
-	deviceUUIDs := m.devices.UUIDs()
+	klog.Infof("Starting node-level MPS control daemon '%v' for GPUs: %v", m.daemonName, deviceUUIDs)
 
 	templateData := MpsControlDaemonTemplateData{
-		NodeName:                        m.nodeName,
-		MpsControlDaemonNamespace:       m.namespace,
-		MpsControlDaemonName:            m.name,
-		CUDA_VISIBLE_DEVICES:            strings.Join(deviceUUIDs, ","),
-		DefaultActiveThreadPercentage:   "",
-		DefaultPinnedDeviceMemoryLimits: nil,
-		MultiUser:                       false,
-		NvidiaDriverRoot:                m.manager.hostDriverRoot,
-		MpsShmDirectory:                 m.shmDir,
-		MpsPipeDirectory:                m.pipeDir,
-		MpsLogDirectory:                 m.logDir,
-		MpsImageName:                    m.manager.config.flags.imageName,
-		MpsImagePullPolicy:              m.manager.config.imagePullPolicy,
-		MpsImagePullSecretNames:         m.manager.config.imagePullSecretNames,
-		ServiceAccountName:              m.manager.config.flags.serviceAccountName,
-		FeatureGates:                    featuregates.ToMap(),
-		MpsShmMountPath:                 setMpsShmMountPath(osFileChecker{}),
+		NodeName:                  m.config.flags.nodeName,
+		MpsControlDaemonNamespace: m.config.flags.namespace,
+		MpsControlDaemonName:      m.daemonName,
+		CUDA_VISIBLE_DEVICES:      strings.Join(deviceUUIDs, ","),
+		MultiUser:                 true,
+		NvidiaDriverRoot:          m.hostDriverRoot,
+		MpsShmDirectory:           m.shmDir,
+		MpsPipeDirectory:          m.pipeDir,
+		MpsLogDirectory:           m.logDir,
+		MpsImageName:              m.config.flags.imageName,
+		MpsImagePullPolicy:        m.config.imagePullPolicy,
+		MpsImagePullSecretNames:   m.config.imagePullSecretNames,
+		ServiceAccountName:        m.config.flags.serviceAccountName,
+		FeatureGates:              featuregates.ToMap(),
+		MpsShmMountPath:           setMpsShmMountPath(osFileChecker{}),
 	}
 
-	if config != nil && config.DefaultActiveThreadPercentage != nil {
-		templateData.DefaultActiveThreadPercentage = fmt.Sprintf("%d", *config.DefaultActiveThreadPercentage)
-	}
-
-	if config != nil {
-		limits, err := config.DefaultPerDevicePinnedMemoryLimit.Normalize(deviceUUIDs, config.DefaultPinnedDeviceMemoryLimit)
-		if err != nil {
-			return fmt.Errorf("error transforming DefaultPerDevicePinnedMemoryLimit into string: %w", err)
-		}
-		templateData.DefaultPinnedDeviceMemoryLimits = limits
-	}
-
-	if config != nil && config.MultiUser != nil {
-		templateData.MultiUser = *config.MultiUser
-		if templateData.MultiUser {
-			// multiuser mode requires architecture to be volta or newer
-			if err := ensureCapability(m.manager.nvdevlib.gpuInfosByUUID, m.devices.GpuUUIDs(), voltaCudaComputeCapability); err != nil {
-				return fmt.Errorf("multiuser mode was requested but is not supported: %w", err)
-			}
-		}
-	}
-
-	deployment, err := renderMpsControlDaemonDeployment(m.manager.templatePath, templateData)
+	deployment, err := renderMpsControlDaemonDeployment(m.templatePath, templateData)
 	if err != nil {
 		return err
 	}
 
-	err = os.MkdirAll(m.shmDir, 0755)
-	if err != nil {
+	if err := os.MkdirAll(m.shmDir, 0755); err != nil {
 		return fmt.Errorf("error creating directory %v: %w", m.shmDir, err)
 	}
-
-	err = os.MkdirAll(m.pipeDir, 0755)
-	if err != nil {
+	if err := os.MkdirAll(m.pipeDir, 0755); err != nil {
 		return fmt.Errorf("error creating directory %v: %w", m.pipeDir, err)
 	}
-
-	err = os.MkdirAll(m.logDir, 0755)
-	if err != nil {
+	if err := os.MkdirAll(m.logDir, 0755); err != nil {
 		return fmt.Errorf("error creating directory %v: %w", m.logDir, err)
 	}
 
@@ -299,25 +244,57 @@ func (m *MpsControlDaemon) Start(ctx context.Context, config *configapi.MpsConfi
 	mounter := mount.New(mountExecutable)
 	sizeArg := fmt.Sprintf("size=%v", getDefaultShmSize())
 	mountOptions := []string{"rw", "nosuid", "nodev", "noexec", "relatime", sizeArg}
-	err = mounter.Mount("shm", m.shmDir, "tmpfs", mountOptions)
-	if err != nil {
+	if err := mounter.Mount("shm", m.shmDir, "tmpfs", mountOptions); err != nil {
 		return fmt.Errorf("error mounting %v as tmpfs: %w", m.shmDir, err)
 	}
 
-	err = m.manager.nvdevlib.setComputeMode(m.devices.GpuUUIDs(), "EXCLUSIVE_PROCESS")
-	if err != nil {
-		return fmt.Errorf("error setting compute mode: %w", err)
+	if len(deviceUUIDs) > 0 && m.nvdevlib != nil {
+		if err := m.nvdevlib.setComputeMode(deviceUUIDs, "EXCLUSIVE_PROCESS"); err != nil {
+			return fmt.Errorf("error setting compute mode for MPS: %w", err)
+		}
 	}
 
-	_, err = m.manager.config.clientsets.Core.AppsV1().Deployments(m.namespace).Create(ctx, deployment, metav1.CreateOptions{})
-	if errors.IsAlreadyExists(err) {
-		return nil
-	}
-	if err != nil {
+	_, err = m.config.clientsets.Core.AppsV1().Deployments(m.config.flags.namespace).Create(ctx, deployment, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create deployment: %w", err)
 	}
 
-	return nil
+	return m.AssertReady(ctx)
+}
+
+func (m *MpsManager) EnsureStoppedIfIdle(ctx context.Context, checkpoint *Checkpoint, currentClaimUID string) error {
+	if isMpsInUseByOtherClaims(checkpoint, currentClaimUID) {
+		klog.V(4).Infof("Node MPS control daemon still in use by other claims, skipping stop")
+		return nil
+	}
+	return m.EnsureStopped(ctx)
+}
+
+func (m *MpsManager) ReconcileOnStartup(ctx context.Context, checkpoint *Checkpoint) error {
+	if isMpsInUseByOtherClaims(checkpoint, "") {
+		return m.EnsureStarted(ctx)
+	}
+	return m.EnsureStopped(ctx)
+}
+
+func isMpsInUseByOtherClaims(checkpoint *Checkpoint, excludeClaimUID string) bool {
+	if checkpoint == nil || checkpoint.V2 == nil || checkpoint.V2.PreparedClaims == nil {
+		return false
+	}
+	for cuid, claim := range checkpoint.V2.PreparedClaims {
+		if cuid == excludeClaimUID {
+			continue
+		}
+		if claim.CheckpointState != ClaimCheckpointStatePrepareCompleted {
+			continue
+		}
+		for _, group := range claim.PreparedDevices {
+			if ptr.Deref(group.ConfigState.MpsApplied, false) || group.ConfigState.MpsControlDaemonID != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func renderMpsControlDaemonDeployment(templatePath string, templateData MpsControlDaemonTemplateData) (*appsv1.Deployment, error) {
@@ -346,7 +323,7 @@ func renderMpsControlDaemonDeployment(templatePath string, templateData MpsContr
 	return &deployment, nil
 }
 
-func (m *MpsControlDaemon) AssertReady(ctx context.Context) error {
+func (m *MpsManager) AssertReady(ctx context.Context) error {
 	backoff := wait.Backoff{
 		Duration: time.Second,
 		Factor:   2,
@@ -361,9 +338,9 @@ func (m *MpsControlDaemon) AssertReady(ctx context.Context) error {
 			return true
 		},
 		func() error {
-			deployment, err := m.manager.config.clientsets.Core.AppsV1().Deployments(m.namespace).Get(
+			deployment, err := m.config.clientsets.Core.AppsV1().Deployments(m.config.flags.namespace).Get(
 				ctx,
-				m.name,
+				m.daemonName,
 				metav1.GetOptions{},
 			)
 			if err != nil {
@@ -376,14 +353,14 @@ func (m *MpsControlDaemon) AssertReady(ctx context.Context) error {
 
 			selector := deployment.Spec.Selector.MatchLabels
 
-			pods, err := m.manager.config.clientsets.Core.CoreV1().Pods(m.namespace).List(
+			pods, err := m.config.clientsets.Core.CoreV1().Pods(m.config.flags.namespace).List(
 				ctx,
 				metav1.ListOptions{
 					LabelSelector: labels.Set(selector).AsSelector().String(),
 				},
 			)
 			if err != nil {
-				return fmt.Errorf("error listing pods from deployment")
+				return fmt.Errorf("error listing pods from deployment: %w", err)
 			}
 
 			if len(pods.Items) != 1 {
@@ -403,12 +380,33 @@ func (m *MpsControlDaemon) AssertReady(ctx context.Context) error {
 	)
 }
 
-func (m *MpsControlDaemon) GetCDIContainerEdits() *cdiapi.ContainerEdits {
+func (m *MpsManager) GetCDIContainerEdits(config *configapi.MpsConfig, deviceUUIDs []string) (*cdiapi.ContainerEdits, error) {
+	env := []string{
+		fmt.Sprintf("CUDA_MPS_PIPE_DIRECTORY=%s", "/tmp/nvidia-mps"),
+	}
+	if config != nil && config.DefaultActiveThreadPercentage != nil {
+		env = append(env, fmt.Sprintf("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=%d", *config.DefaultActiveThreadPercentage))
+	}
+	if config != nil && (config.DefaultPinnedDeviceMemoryLimit != nil || len(config.DefaultPerDevicePinnedMemoryLimit) > 0) {
+		limits, err := config.DefaultPerDevicePinnedMemoryLimit.Normalize(deviceUUIDs, config.DefaultPinnedDeviceMemoryLimit)
+		if err != nil {
+			return nil, fmt.Errorf("error calculating pinned device memory limits: %w", err)
+		}
+		if len(limits) > 0 {
+			var limitEntries []string
+			for _, uuid := range deviceUUIDs {
+				if lim, ok := limits[uuid]; ok {
+					limitEntries = append(limitEntries, fmt.Sprintf("%s=%s", uuid, lim))
+				}
+			}
+			if len(limitEntries) > 0 {
+				env = append(env, fmt.Sprintf("CUDA_MPS_PINNED_DEVICE_MEM_LIMIT=%s", strings.Join(limitEntries, ",")))
+			}
+		}
+	}
 	return &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
-			Env: []string{
-				fmt.Sprintf("CUDA_MPS_PIPE_DIRECTORY=%s", "/tmp/nvidia-mps"),
-			},
+			Env: env,
 			Mounts: []*cdispec.Mount{
 				{
 					ContainerPath: "/dev/shm",
@@ -422,23 +420,26 @@ func (m *MpsControlDaemon) GetCDIContainerEdits() *cdiapi.ContainerEdits {
 				},
 			},
 		},
-	}
+	}, nil
 }
 
-func (m *MpsControlDaemon) Stop(ctx context.Context) error {
-	_, err := os.Stat(m.rootDir)
+func (m *MpsManager) EnsureStopped(ctx context.Context) error {
+	m.Lock()
+	defer m.Unlock()
+
+	_, err := os.Stat(m.controlFilesRoot)
 	if os.IsNotExist(err) {
 		return nil
 	}
 
-	klog.Infof("Stopping MPS control daemon for '%v'", m.id)
+	klog.Infof("Stopping node-level MPS control daemon '%v'", m.daemonName)
 
 	deletePolicy := metav1.DeletePropagationForeground
 	deleteOptions := metav1.DeleteOptions{
 		PropagationPolicy: &deletePolicy,
 	}
 
-	err = m.manager.config.clientsets.Core.AppsV1().Deployments(m.namespace).Delete(ctx, m.name, deleteOptions)
+	err = m.config.clientsets.Core.AppsV1().Deployments(m.config.flags.namespace).Delete(ctx, m.daemonName, deleteOptions)
 	if err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("failed to delete deployment: %w", err)
 	}
@@ -446,7 +447,7 @@ func (m *MpsControlDaemon) Stop(ctx context.Context) error {
 	// Start() sets the compute mode of these GPUs to EXCLUSIVE_PROCESS as
 	// required by MPS. Reset it back to DEFAULT here so the GPUs are not left
 	// stuck in EXCLUSIVE_PROCESS after teardown.
-	if err := m.manager.nvdevlib.setComputeMode(m.devices.GpuUUIDs(), "DEFAULT"); err != nil {
+	if err := m.nvdevlib.setComputeMode(m.getSupportedGpuUUIDs(), "DEFAULT"); err != nil {
 		return fmt.Errorf("error resetting compute mode to DEFAULT: %w", err)
 	}
 
@@ -456,14 +457,17 @@ func (m *MpsControlDaemon) Stop(ctx context.Context) error {
 	}
 
 	mounter := mount.New(mountExecutable)
-	err = mount.CleanupMountPoint(m.shmDir, mounter, true)
-	if err != nil {
+	if err := mount.CleanupMountPoint(m.shmDir, mounter, true); err != nil {
 		return fmt.Errorf("error unmounting %v: %w", m.shmDir, err)
 	}
 
-	err = os.RemoveAll(m.rootDir)
-	if err != nil {
-		return fmt.Errorf("error removing directory %v: %w", m.rootDir, err)
+	if err := os.RemoveAll(m.controlFilesRoot); err != nil {
+		return fmt.Errorf("error removing directory %v: %w", m.controlFilesRoot, err)
+	}
+
+	deviceUUIDs := m.getSupportedGpuUUIDs()
+	if len(deviceUUIDs) > 0 && m.nvdevlib != nil {
+		_ = m.nvdevlib.setComputeMode(deviceUUIDs, "DEFAULT")
 	}
 
 	return nil
