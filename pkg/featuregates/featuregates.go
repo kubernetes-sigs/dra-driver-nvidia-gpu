@@ -89,6 +89,12 @@ const (
 	// DRA device attributes. The cluster must have the Kubernetes feature gate
 	// of the same name enabled before enabling this in the driver.
 	DRAListTypeAttributes featuregate.Feature = "DRAListTypeAttributes"
+
+	// ConsumableShares enables publishing consumable capacity and multi-allocation
+	// (AllowMultipleAllocations) support for devices in ResourceSlices, allowing
+	// multiple ResourceClaims to share the same GPU or MIG device when configured
+	// via --consumable-shares.
+	ConsumableShares featuregate.Feature = "ConsumableShares"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -182,6 +188,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
 			Version:    version.MajorMinor(0, 4),
+		},
+	},
+	ConsumableShares: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 5),
 		},
 	},
 }
