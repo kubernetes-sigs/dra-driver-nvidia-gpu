@@ -38,6 +38,8 @@ fullnameOverride: ""
 namespaceOverride: ""
 selectorLabelsOverride: {}
 gpuResourcesEnabledOverride: false
+# Configure consumable shares support ("disabled", "memory", "unlimited", or a positive integer)
+consumableShares: ""
 
 allowDefaultNamespace: false
 
