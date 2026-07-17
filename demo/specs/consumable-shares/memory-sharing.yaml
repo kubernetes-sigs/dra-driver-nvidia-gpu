@@ -1,0 +1,56 @@
+# Example demonstrating GPU sharing with --consumable-shares=memory
+# Pod replicas request explicit memory capacity slices (4Gi each) so multiple replicas can run on the same GPU.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-share-memory
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  namespace: gpu-share-memory
+  name: gpu-4gi
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          capacity:
+            requests:
+              memory: 4Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: gpu-share-memory
+  name: memory-sharing
+  labels:
+    app: memory-sharing
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: memory-sharing
+  template:
+    metadata:
+      labels:
+        app: memory-sharing
+    spec:
+      resourceClaims:
+      - name: gpu
+        resourceClaimTemplateName: gpu-4gi
+      containers:
+      - name: ctr
+        image: ubuntu:22.04
+        command: ["bash", "-c"]
+        args: ["nvidia-smi -L; echo 'running with 4Gi memory claim'; sleep 3600"]
+        resources:
+          claims:
+          - name: gpu
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
