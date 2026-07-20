@@ -20,14 +20,13 @@ import (
 	"testing"
 
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/utils/ptr"
 
 	"github.com/stretchr/testify/require"
-
-	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
-func newTestGpuInfo(numaNode *int) *GpuInfo {
+func newTestGpuInfo(numaNodeAttr *deviceattribute.DeviceAttribute) *GpuInfo {
 	return &GpuInfo{
 		UUID:                  "GPU-test",
 		minor:                 0,
@@ -37,14 +36,32 @@ func newTestGpuInfo(numaNode *int) *GpuInfo {
 		cudaComputeCapability: "9.0",
 		driverVersion:         "580.0.0",
 		cudaDriverVersion:     "13.0",
-		numaNode:              numaNode,
+		numaNodeAttr:          numaNodeAttr,
+	}
+}
+
+func newScalarNumaNodeAttribute(numaNode int64) *deviceattribute.DeviceAttribute {
+	return &deviceattribute.DeviceAttribute{
+		Name: deviceattribute.StandardDeviceAttributeNUMANode,
+		Value: resourceapi.DeviceAttribute{
+			IntValue: ptr.To(numaNode),
+		},
+	}
+}
+
+func newListNumaNodeAttribute(numaNodes ...int64) *deviceattribute.DeviceAttribute {
+	return &deviceattribute.DeviceAttribute{
+		Name: deviceattribute.StandardDeviceAttributeNUMANode,
+		Value: resourceapi.DeviceAttribute{
+			IntValues: numaNodes,
+		},
 	}
 }
 
 func requireNumaNodeAttribute(t *testing.T, attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, expected int64) {
 	t.Helper()
 
-	attr, ok := attrs[standardNumaNodeAttribute]
+	attr, ok := attrs[deviceattribute.StandardDeviceAttributeNUMANode]
 	require.True(t, ok)
 	require.NotNil(t, attr.IntValue)
 	require.Equal(t, expected, *attr.IntValue)
@@ -53,35 +70,26 @@ func requireNumaNodeAttribute(t *testing.T, attrs map[resourceapi.QualifiedName]
 func requireNumaNodeListAttribute(t *testing.T, attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, expected []int64) {
 	t.Helper()
 
-	attr, ok := attrs[standardNumaNodeAttribute]
+	attr, ok := attrs[deviceattribute.StandardDeviceAttributeNUMANode]
 	require.True(t, ok)
 	require.Nil(t, attr.IntValue)
 	require.Equal(t, expected, attr.IntValues)
 }
 
 func TestGpuInfoAttributesIncludeStandardNumaNode(t *testing.T) {
-	gpu := newTestGpuInfo(ptr.To(1))
+	gpu := newTestGpuInfo(newScalarNumaNodeAttribute(1))
 
 	requireNumaNodeAttribute(t, gpu.Attributes(), 1)
 }
 
-func TestGpuInfoAttributesIncludeStandardNumaNodeListWhenEnabled(t *testing.T) {
-	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
-		string(featuregates.DRAListTypeAttributes): true,
-	}))
-	defer func() {
-		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
-			string(featuregates.DRAListTypeAttributes): false,
-		}))
-	}()
+func TestGpuInfoAttributesIncludeStandardNumaNodeList(t *testing.T) {
+	gpu := newTestGpuInfo(newListNumaNodeAttribute(1, 2))
 
-	gpu := newTestGpuInfo(ptr.To(1))
-
-	requireNumaNodeListAttribute(t, gpu.Attributes(), []int64{1})
+	requireNumaNodeListAttribute(t, gpu.Attributes(), []int64{1, 2})
 }
 
 func TestCommonMigAttributesIncludeStandardNumaNode(t *testing.T) {
-	parent := newTestGpuInfo(ptr.To(2))
+	parent := newTestGpuInfo(newScalarNumaNodeAttribute(2))
 
 	requireNumaNodeAttribute(t, CommonAttributesMig(parent, "1g.10gb"), 2)
 }
@@ -93,7 +101,7 @@ func TestVfioDeviceIncludesStandardNumaNode(t *testing.T) {
 		vendorID:               "0x10de",
 		index:                  0,
 		productName:            "NVIDIA Test GPU",
-		numaNode:               3,
+		numaNodeAttr:           newScalarNumaNodeAttribute(3),
 		addressableMemoryBytes: 1024,
 	}
 

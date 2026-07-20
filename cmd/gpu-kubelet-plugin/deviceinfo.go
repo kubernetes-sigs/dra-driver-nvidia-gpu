@@ -30,8 +30,6 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
-const standardNumaNodeAttribute resourceapi.QualifiedName = "resource.kubernetes.io/numaNode"
-
 // Represents a specific, full, physical GPU device.
 type GpuInfo struct {
 	UUID                  string `json:"uuid"`
@@ -49,7 +47,7 @@ type GpuInfo struct {
 	pciBusID              string
 	pciBusIDAttr          *deviceattribute.DeviceAttribute
 	pcieRootAttr          *deviceattribute.DeviceAttribute
-	numaNode              *int
+	numaNodeAttr          *deviceattribute.DeviceAttribute
 	migProfiles           []*MigProfileInfo
 	addressingMode        *string
 
@@ -110,7 +108,7 @@ type VfioDeviceInfo struct {
 	PciBusID               string `json:"pciBusID,omitempty"`
 	pciBusIDAttr           *deviceattribute.DeviceAttribute
 	pcieRootAttr           *deviceattribute.DeviceAttribute
-	numaNode               int
+	numaNodeAttr           *deviceattribute.DeviceAttribute
 	iommuGroup             int
 	iommuFDEnabled         bool
 	addressableMemoryBytes uint64
@@ -202,7 +200,7 @@ func (d *GpuInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.DeviceA
 		attrs[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
 	}
 
-	addNumaNodeAttribute(attrs, d.numaNode)
+	addDeviceAttribute(attrs, d.numaNodeAttr)
 
 	if d.addressingMode != nil {
 		attrs["addressingMode"] = resourceapi.DeviceAttribute{
@@ -288,7 +286,7 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
 		d.addFabricManagerAttributes(device.Attributes)
 	}
-	addNumaNodeAttribute(device.Attributes, &d.numaNode)
+	addDeviceAttribute(device.Attributes, d.numaNodeAttr)
 
 	return device
 }
@@ -326,22 +324,8 @@ func (d *VfioDeviceInfo) addFabricManagerAttributes(attrs map[resourceapi.Qualif
 	}
 }
 
-func addNumaNodeAttribute(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, numaNode *int) {
-	if numaNode == nil || *numaNode < 0 {
-		return
-	}
-
-	if featuregates.Enabled(featuregates.DRAListTypeAttributes) {
-		// KEP-6072 prefers the list form when DRAListTypeAttributes is enabled.
-		// Until this driver computes same-socket minimum-SLIT-distance nodes,
-		// publish the physical NUMA node as a valid single-element list.
-		attrs[standardNumaNodeAttribute] = resourceapi.DeviceAttribute{
-			IntValues: []int64{int64(*numaNode)},
-		}
-		return
-	}
-
-	attrs[standardNumaNodeAttribute] = resourceapi.DeviceAttribute{
-		IntValue: ptr.To(int64(*numaNode)),
+func addDeviceAttribute(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute, attr *deviceattribute.DeviceAttribute) {
+	if attr != nil {
+		attrs[attr.Name] = attr.Value
 	}
 }
