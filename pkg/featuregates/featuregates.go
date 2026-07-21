@@ -42,7 +42,7 @@ import (
 //
 // TODO: optionally isolate driver-only gates in their own registry so emulation can
 // stay purely on driver SemVer without sharing a single version stream with component-base.
-var featureGateEmulationVersion = version.MajorMinor(1, 36)
+var featureGateEmulationVersion = version.MajorMinor(1, 37)
 
 const (
 	// TimeSlicingSettings allows timeslicing settings to be customized.
