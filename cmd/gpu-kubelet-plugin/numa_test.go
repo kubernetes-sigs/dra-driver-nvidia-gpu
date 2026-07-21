@@ -41,10 +41,16 @@ func TestGetNUMANodeAttributeByPCIBusIDScalar(t *testing.T) {
 	require.Empty(t, attr.Value.IntValues)
 }
 
-func TestConfiguredSysfsRootUsesEnvOverride(t *testing.T) {
-	t.Setenv(sysfsRootEnvvar, "/mock/sys")
+func TestDiscoverNUMANodeAttributeUsesEnvOverride(t *testing.T) {
+	root := t.TempDir()
+	writeSysfsFile(t, root, "bus", "pci", "devices", testPCIBusID, "numa_node", "4\n")
+	t.Setenv(sysfsRootEnvvar, root)
 
-	require.Equal(t, "/mock/sys", configuredSysfsRoot())
+	attr := discoverNUMANodeAttribute(testPCIBusID)
+
+	require.NotNil(t, attr)
+	require.NotNil(t, attr.Value.IntValue)
+	require.Equal(t, int64(4), *attr.Value.IntValue)
 }
 
 func TestGetNUMANodeAttributeByPCIBusIDListWithSameSocketFilter(t *testing.T) {
