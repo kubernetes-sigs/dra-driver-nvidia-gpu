@@ -26,10 +26,7 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
-const (
-	defaultSysfsRoot = "/sys"
-	sysfsRootEnvvar  = "NVIDIA_DRA_SYSFS_ROOT"
-)
+const sysfsRootEnvvar = "NVIDIA_DRA_SYSFS_ROOT"
 
 func configuredNUMAAttributeForm() deviceattribute.AttributeForm {
 	if featuregates.Enabled(featuregates.DRAListTypeAttributes) {
@@ -39,7 +36,7 @@ func configuredNUMAAttributeForm() deviceattribute.AttributeForm {
 }
 
 func discoverNUMANodeAttribute(pciBusID string) *deviceattribute.DeviceAttribute {
-	attr, err := getNUMANodeAttributeByPCIBusID(pciBusID, configuredNUMAAttributeForm(), configuredSysfsRoot())
+	attr, err := getNUMANodeAttributeByPCIBusID(pciBusID, configuredNUMAAttributeForm(), os.Getenv(sysfsRootEnvvar))
 	if err != nil {
 		if strings.Contains(err.Error(), "no NUMA affinity") {
 			klog.V(4).Infof("NUMA node unavailable for PCI bus ID %s, continuing without attribute: %v", pciBusID, err)
@@ -51,13 +48,9 @@ func discoverNUMANodeAttribute(pciBusID string) *deviceattribute.DeviceAttribute
 	return &attr
 }
 
-func configuredSysfsRoot() string {
-	if root := os.Getenv(sysfsRootEnvvar); root != "" {
-		return root
+func getNUMANodeAttributeByPCIBusID(pciBusID string, attrForm deviceattribute.AttributeForm, sysfsRootOverride string) (deviceattribute.DeviceAttribute, error) {
+	if sysfsRootOverride != "" {
+		return deviceattribute.GetNUMANodeAttributeByPCIBusID(pciBusID, attrForm, deviceattribute.WithFSFromRoot(sysfsRootOverride))
 	}
-	return defaultSysfsRoot
-}
-
-func getNUMANodeAttributeByPCIBusID(pciBusID string, attrForm deviceattribute.AttributeForm, sysfsRoot string) (deviceattribute.DeviceAttribute, error) {
-	return deviceattribute.GetNUMANodeAttributeByPCIBusID(pciBusID, attrForm, deviceattribute.WithFSFromRoot(sysfsRoot))
+	return deviceattribute.GetNUMANodeAttributeByPCIBusID(pciBusID, attrForm)
 }

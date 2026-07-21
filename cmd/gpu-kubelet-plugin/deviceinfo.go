@@ -193,13 +193,8 @@ func (d *GpuInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.DeviceA
 		},
 	}
 
-	if d.pciBusIDAttr != nil {
-		attrs[d.pciBusIDAttr.Name] = d.pciBusIDAttr.Value
-	}
-	if d.pcieRootAttr != nil {
-		attrs[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
-	}
-
+	addDeviceAttribute(attrs, d.pciBusIDAttr)
+	addDeviceAttribute(attrs, d.pcieRootAttr)
 	addDeviceAttribute(attrs, d.numaNodeAttr)
 
 	if d.addressingMode != nil {
@@ -275,13 +270,8 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 		},
 	}
 
-	if d.pciBusIDAttr != nil {
-		device.Attributes[d.pciBusIDAttr.Name] = d.pciBusIDAttr.Value
-	}
-
-	if d.pcieRootAttr != nil {
-		device.Attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
-	}
+	addDeviceAttribute(device.Attributes, d.pciBusIDAttr)
+	addDeviceAttribute(device.Attributes, d.pcieRootAttr)
 
 	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
 		d.addFabricManagerAttributes(device.Attributes)
