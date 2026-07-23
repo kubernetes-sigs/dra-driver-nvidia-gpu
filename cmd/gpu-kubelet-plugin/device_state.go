@@ -252,7 +252,32 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		if c == DriverPluginCheckpointFileBasename {
 			cp, err := state.getCheckpoint(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("unable to get checkpoint: %w", err)
+				if !common.IsCheckpointCorruptionError(err) {
+					return nil, fmt.Errorf("unable to get checkpoint: %w", err)
+				}
+
+				// The checkpoint cannot be trusted.
+				// Use per-claim CDI specs as evidence of prepared claims.
+				// TODO: How to handle partially prepared device state?
+				// In case of a crash after device preparation but before CDI spec creation may
+				// leave partially prepared device state without CDI evidence.
+				corruption := common.DescribeCheckpointCorruption(err)
+				hasPreparedClaimSpec, checkErr := common.HasClaimCDISpec(config.flags.cdiRoot, DriverName)
+				if checkErr != nil {
+					message := fmt.Sprintf("Corrupt checkpoint detected (%s); automatic recovery blocked because per-claim CDI specs could not be inspected: %v", corruption, checkErr)
+					common.EmitCheckpointCorruptionEvent(ctx, config.clientsets.Core, DriverName, config.flags.nodeName, os.Getenv("POD_NAME"), config.flags.namespace, message)
+					return nil, fmt.Errorf("cannot safely replace corrupt checkpoint because per-claim CDI specs could not be inspected: %w", errors.Join(err, checkErr))
+				}
+				if hasPreparedClaimSpec {
+					message := fmt.Sprintf("Corrupt checkpoint detected (%s); automatic recovery blocked because per-claim CDI specs indicate prepared claims", corruption)
+					common.EmitCheckpointCorruptionEvent(ctx, config.clientsets.Core, DriverName, config.flags.nodeName, os.Getenv("POD_NAME"), config.flags.namespace, message)
+					return nil, fmt.Errorf("cannot safely replace corrupt checkpoint because per-claim CDI specs indicate prepared claims: %w", err)
+				}
+
+				message := fmt.Sprintf("Corrupt checkpoint detected (%s); no per-claim CDI specs found, replacing checkpoint", corruption)
+				common.EmitCheckpointCorruptionEvent(ctx, config.clientsets.Core, DriverName, config.flags.nodeName, os.Getenv("POD_NAME"), config.flags.namespace, message)
+				klog.Error(message)
+				break
 			}
 			storedBootID := cp.GetNodeBootID()
 			if storedBootID == "" { //nolint:gocritic,staticcheck
