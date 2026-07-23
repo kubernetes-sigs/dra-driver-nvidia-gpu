@@ -15,19 +15,9 @@ to the corresponding [`ResourceSlice`](https://kubernetes.io/docs/concepts/sched
 signaling the Kubernetes scheduler to avoid placing new workloads on the affected
 device.
 
-Key capabilities:
+With this feature enabled, unhealthy devices are tainted in the
+`ResourceSlice` so the scheduler stops placing new workloads on them.
 
-- Continuous NVML monitoring: an event monitor watches each GPU for XID
-  errors and device-loss events for as long as the kubelet plugin runs.
-- Automatic device taints: unhealthy devices are tainted on their
-  `ResourceSlice` so the scheduler stops placing new workloads on them.
-- Configurable XID handling: you control which XID codes are treated as
-  non-fatal, so application-level errors do not block scheduling.
-
-This is most useful for distributed training jobs, where a single unhealthy GPU
-can stall or corrupt an entire job; inference serving, where degraded devices
-can cause silent numerical errors; and cluster observability, where non-fatal
-warnings are surfaced to monitoring tools without affecting scheduling.
 
 ## Feature status
 
@@ -110,6 +100,45 @@ helm upgrade dra-driver-nvidia-gpu oci://registry.k8s.io/dra-driver-nvidia/chart
     --set featureGates.NVMLDeviceHealthCheck=true
 ```
 
+## View taints on ResourceSlice
+
+Each taint appears on an individual device entry in `ResourceSlice.spec.devices`, not on the `ResourceSlice` itself.
+Use `jq` to show only device entries that have taints:
+
+```bash
+kubectl get resourceslices -o json | jq '
+  .items[].spec.devices[]
+  | select((.taints // []) | length > 0)
+  | {
+      device: .name,
+      taints: [.taints[] | {key, value, effect, timeAdded}]
+    }
+'
+```
+
+The following output shows an example non-fatal XID event:
+
+```json
+    {
+  "device": "gpu-0-mig-1g12gb-19-0",
+  "taints": [
+    {
+      "key": "gpu.nvidia.com/xid",
+      "value": "43",
+      "effect": "None",
+      "timeAdded": "2026-07-22T02:24:46Z"
+    }
+  ]
+}
+```
+
+The response includes the following details:
+* The `device` field identifies the affected device entry in the `ResourceSlice`.
+* The `key` field identifies the health event category, and `gpu.nvidia.com/xid` indicates an XID error.
+* The `value` field contains the decimal XID code reported by NVML, which is `43` in this example.
+* The `effect` field is `None` because the driver classifies XID `43` as non-fatal by default, so this taint records the event without preventing new allocations. For fatal XID codes, the effect is `NoSchedule`, which prevents new allocations that do not tolerate the taint.
+* The `timeAdded` field records when the API server added the taint. The GPU kubelet plugin leaves this field unset when it adds or changes a taint so that the API server assigns the timestamp.
+
 ## Recovering from an unhealthy device
 
 Device taints persist until the GPU kubelet plugin restarts. There is no
@@ -117,9 +146,7 @@ automated taint removal in the current release.
 
 To clear taints after a hardware issue is resolved:
 
-1. Confirm the hardware error is resolved (for example, by checking
-   [`nvidia-smi`](https://docs.nvidia.com/deploy/nvidia-smi/index.html) output or
-   kernel logs).
+1. Confirm the hardware error is resolved. Use dmesg to check the kernal logs.
 2. Restart the GPU kubelet plugin by rolling its `kubelet-plugin` DaemonSet:
 
 ```bash
