@@ -26,8 +26,14 @@ If you plan to use ComputeDomains, you also need:
 
 - NVIDIA Driver v570.158.01 or later. The `IMEXDaemonsWithDNSNames` feature gate is enabled by default and requires this driver version. The ComputeDomain plugin will fail to start on older drivers unless `IMEXDaemonsWithDNSNames` is explicitly disabled.
 - Multi-Node NVLink (MNNVL) hardware. Nodes must be connected via NVLink fabric, such as GB200 NVL72 and similar systems.
-- GPU Feature Discovery (GFD) deployed via the [GPU Operator](#install-prerequisites-with-nvidia-gpu-operator). GFD generates the `nvidia.com/gpu.clique` node labels required by ComputeDomains.
-- On all GPU nodes where the `nvidia-imex-*` packages are installed, the `nvidia-imex.service` systemd unit must be disabled:
+- A component that manages the `nvidia.com/gpu.clique` node label.
+  Use GPU Feature Discovery (GFD), or set `kubeletPlugin.containers.computeDomains.gpuCliqueLabelEnabled=true` so the ComputeDomain kubelet plugin manages the label.
+
+
+### Driver-managed IMEX
+
+The default `resources.computeDomains.imex.mode=driverManaged` setting makes the DRA Driver create one `nvidia-imex` DaemonSet for each `ComputeDomain`.
+On all GPU nodes where the `nvidia-imex-*` packages are installed, disable the host `nvidia-imex.service` systemd unit:
 
 ```bash
 systemctl disable --now nvidia-imex.service && systemctl mask nvidia-imex.service
@@ -37,6 +43,11 @@ systemctl disable --now nvidia-imex.service && systemctl mask nvidia-imex.servic
 
 By default the driver owns the `nvidia-imex` daemon lifecycle, per the requirement above. For clusters where the operator already runs `nvidia-imex` as a host service (for example through systemd), set `resources.computeDomains.imex.mode=hostManaged` to stop the driver from creating per-ComputeDomain `nvidia-imex` DaemonSets. This **inverts** the requirement above: `nvidia-imex.service` must be installed, configured, and left **running** on every participating GPU node. Also, the `nvidia-imex` service should be configured with
 `IMEX_CMD_ENABLED=1` and `IMEX_CMD_UNIX_DOMAIN_PATH=/etc/nvidia-imex/imex_ctrl.sock` (configurable via Helm).
+
+{{% alert color="warning" title="Warning" %}}
+Some `nvidia-imex.service` units use `ProtectSystem=full`, which prevents the service from creating the default socket under `/etc`.
+For these units, set `IMEX_CMD_UNIX_DOMAIN_PATH` and `resources.computeDomains.imex.hostSocketPath` to the same writable runtime path, such as `/var/run/nvidia-imex-ctrl.sock`.
+{{% /alert %}}
 
 Host-managed mode requires two Helm values together:
 
@@ -78,6 +89,6 @@ It can manage the following DRA Driver for NVIDIA GPUs prerequisites for you:
 - NVIDIA Driver (v565+ for GPU allocation, v570.158.01+ for ComputeDomains). The GPU Operator installs a [default driver](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/platform-support.html#gpu-operator-component-matrix) that meets the DRA Driver's prerequisites. To use a specific version, see [Common chart customization options](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html#common-chart-customization-options) in the GPU Operator documentation.
 - CDI enabled through the NVIDIA Container Toolkit.
 - Node Feature Discovery (NFD).
-- GPU Feature Discovery (GFD), required for ComputeDomains.
+- GPU Feature Discovery (GFD), which can own the ComputeDomain `nvidia.com/gpu.clique` label when you do not enable driver ownership.
 
 If you choose to install the GPU Operator, follow the [DRA Driver for NVIDIA GPUs install guide](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/dra-intro-install.html) in the GPU Operator documentation. It covers installing the GPU Operator with the NVIDIA Kubernetes Device Plugin disabled and installing the DRA Driver for NVIDIA GPUs.

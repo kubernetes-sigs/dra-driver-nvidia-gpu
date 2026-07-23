@@ -39,7 +39,9 @@ helm install dra-driver-nvidia-gpu oci://registry.k8s.io/dra-driver-nvidia/chart
 | `ComputeDomainCliques` | Beta | `true` | Uses `ComputeDomainClique` CRD objects to track IMEX daemon membership. Requires `IMEXDaemonsWithDNSNames`. |
 | `CrashOnNVLinkFabricErrors` | Beta | `true` | Causes the kubelet plugin to crash rather than fall back to non-fabric mode when NVLink fabric errors are detected. |
 | `DeviceMetadata` | Alpha | `false` | Enables IOMMU API device exposure (`/dev/iommu` or `/dev/vfio/vfio`) for VFIO workloads via `VfioDeviceConfig`. Requires `PassthroughSupport`. |
-| `FabricManagerPartitioning` | Alpha | `false` | Enables Fabric Manager (NVSwitch) partition management in single-node NVL systems for Passthrough VFIO devices. Requires `PassthroughSupport`. |
+| `FabricManagerPartitioning` | Alpha | `false` | Enables Fabric Manager partition discovery, publication, activation, and deactivation for VFIO passthrough claims on supported HGX and single-node NVL systems and requires `PassthroughSupport`, a running Fabric Manager service, and a supported partition topology. |
+| `HostManagedIMEXDaemon` | Alpha | `false` | Allows `resources.computeDomains.imex.mode=hostManaged`, in which you manage the host `nvidia-imex` service instead of the DRA Driver creating per-ComputeDomain daemon DaemonSets, without changing the lifecycle unless you also set the mode. |
+| `DRAListTypeAttributes` | Alpha | `false` | Publishes list-valued DRA device attributes, including `resource.kubernetes.io/numaNode` as a one-element list, and requires the Kubernetes feature gate with the same name on the kube-apiserver and kube-scheduler. |
 
 ## Constraints
 
@@ -60,4 +62,5 @@ The feature gates below have the following dependencies:
 | `ComputeDomainCliques` | `IMEXDaemonsWithDNSNames` |
 | `DeviceMetadata` | `PassthroughSupport` |
 | `FabricManagerPartitioning` | `PassthroughSupport` |
+| `DRAListTypeAttributes` | `DRAListTypeAttributes` Kubernetes feature gate enabled on the kube-apiserver and kube-scheduler |
 | `DynamicMIG` (Kubernetes 1.34–1.35) | `DRAPartitionableDevices` Kubernetes feature gate enabled on kube-apiserver and kube-scheduler |

@@ -13,12 +13,13 @@ For KubeVirt feature gates, VM fields, and VM examples, refer to the [KubeVirt u
 
 ## Feature status
 
-This guide uses two Alpha feature gates, both disabled by default:
+This guide uses Alpha feature gates that are disabled by default:
 
-| Feature gate | Default | Stage |
-|---|---|---|
-| `PassthroughSupport` | `false` | Alpha |
-| `DeviceMetadata` | `false` | Alpha |
+| Feature gate | Stage | Default | Description |
+|---|---|---|---|
+| `PassthroughSupport` | Alpha | `false` | Enables VFIO passthrough allocation. |
+| `DeviceMetadata` | Alpha | `false` | Exposes the VFIO API device required by KubeVirt. |
+| `FabricManagerPartitioning` | Alpha | `false` | Optionally manages Fabric Manager partitions for supported multi-GPU VFIO claims. |
 
 Refer to the [feature gates reference](../../reference/feature-gates.md) and [constraints](../../reference/feature-gates.md#constraints) for details.
 
@@ -26,8 +27,16 @@ Refer to the [feature gates reference](../../reference/feature-gates.md) and [co
 
 - Meet the general driver [prerequisites](../../prerequisites.md).
 - **IOMMU enabled** on GPU nodes. VFIO passthrough requires IOMMU; the GPU kubelet plugin fails to start with `PassthroughSupport` enabled if IOMMU is off.
-- Use **DRA Driver for NVIDIA GPUs v0.4.0 or later** with the **`PassthroughSupport`** and **`DeviceMetadata`** feature gates enabled.
+- Enable the `PassthroughSupport` and `DeviceMetadata` feature gates in the DRA Driver.
 - Use **KubeVirt v1.8.0 or later** with the **`GPUsWithDRA`** feature gate enabled. This gate is enabled by default from KubeVirt v1.9.0, so it only needs to be set explicitly on v1.8.x.
+
+### NVIDIA Grace VFIO module selection
+
+The GPU kubelet plugin automatically selects the most specific VFIO module variant that matches each GPU PCI modalias.
+This selection supports NVIDIA Grace systems that provide a platform-specific `vfio_pci` variant and falls back to the standard `vfio-pci` module when no specific alias matches.
+The chart mounts the host `/lib/modules` directory into the GPU kubelet plugin.
+If your node image manages kernel modules outside the standard path, ensure that `/lib/modules/$(uname -r)/modules.alias` exists on the host before you enable `PassthroughSupport`.
+When sysfs associates a graphics auxiliary PCI function with the GPU through a `consumer:pci:*` link, the passthrough helper unbinds that related function as part of the GPU transition.
 
 ## Limitations and considerations
 
@@ -65,6 +74,34 @@ Set `nvidiaDriverRoot` based on how the NVIDIA driver is installed on your nodes
 - `/` for a host-installed driver.
 - `/run/nvidia/driver` for a GPU Operator-managed driver.
 - `/home/kubernetes/bin/nvidia` for a GKE-managed driver.
+
+### Optional Fabric Manager partitioning
+
+Fabric Manager partitioning has the following requirements and limitations:
+
+- Enable both `PassthroughSupport` and `FabricManagerPartitioning`.
+- Use a supported HGX or single-node NVL system with an NVSwitch-managed fabric.
+- Run Fabric Manager on the node and configure it to report the supported partition topology through its management interface.
+- Make the Fabric Manager client library available under `nvidiaDriverRoot` and keep the default `/run/nvidia-fabricmanager/socket` path available relative to that root.
+- Use the feature only for VFIO devices.
+- Apply at most one `VfioDeviceConfig` group in each `ResourceClaim`.
+
+The initial implementation does not manage multi-node Fabric Manager partitions.
+Designate and label nodes for Fabric Manager VFIO workloads so that other GPU services do not use the GPUs while the claim is prepared.
+
+Enable the optional gate on the existing Helm release:
+
+```bash
+helm upgrade -i dra-driver-nvidia-gpu oci://registry.k8s.io/dra-driver-nvidia/charts/dra-driver-nvidia-gpu \
+    --version {{< param "driver_version" >}} \
+    --namespace dra-driver-nvidia-gpu \
+    --reuse-values \
+    --set featureGates.FabricManagerPartitioning=true
+```
+
+With the gate enabled, VFIO ResourceSlice devices publish `gpuModuleId` and the available `partition1`, `partition2`, `partition4`, and `partition8` attributes.
+The GPU kubelet plugin activates the exact Fabric Manager partition before it binds the selected GPUs to VFIO and deactivates the partition after the GPUs return to the NVIDIA driver.
+For the attribute definitions, see [ResourceSlice device attributes](../../reference/resourceslice-attributes.md#fabric-manager-partition-attributes).
 
 Verify that the driver registered the expected `DeviceClass` and advertised node resources:
 
@@ -154,6 +191,28 @@ The opaque `VfioDeviceConfig` block tells the DRA Driver which VFIO device nodes
 - **`backendPolicy: LegacyOnly`** — Selects the legacy IOMMU VFIO backend (`/dev/vfio/<iommu-group>`). The alternative, `PreferIommuFD`, uses the IOMMUFD backend (`/dev/vfio/devices/vfio*`) when available on the host.
 
 Keep `backendPolicy: LegacyOnly` for KubeVirt, which does not support the IOMMUFD backend yet.
+
+### Select a Fabric Manager partition
+
+For a two-GPU VM on a Fabric Manager node, change the request count to `2` and require both GPUs to share a size-two partition:
+
+```yaml
+devices:
+  requests:
+  - name: dra-gpu
+    exactly:
+      allocationMode: ExactCount
+      count: 2
+      deviceClassName: vfio.gpu.nvidia.com
+  constraints:
+  - requests:
+    - dra-gpu
+    matchAttribute: gpu.nvidia.com/partition2
+```
+
+The scheduler selects two VFIO GPUs with the same `partition2` value.
+Claim preparation fails if the selected GPU set does not exactly match a partition reported by Fabric Manager.
+Keep a single `VfioDeviceConfig` block for all VFIO requests in the claim.
 
 ## Troubleshooting
 

@@ -10,7 +10,7 @@ For background on what a `ComputeDomain` is and how it fits together, see
 
 ## Prerequisites
 
-Refer to [Prerequisites](../prerequisites.md) for hardware and software requirements, including the ComputeDomain-specific requirements for Multi-Node NVLink hardware, GPU Feature Discovery, and `nvidia-imex` service configuration.
+Refer to [Prerequisites](../prerequisites.md) for hardware and software requirements, including the ComputeDomain-specific requirements for Multi-Node NVLink hardware, `nvidia.com/gpu.clique` label ownership, and `nvidia-imex` service configuration.
 
 ## Create a ComputeDomain
 
@@ -34,6 +34,12 @@ After applying this resource, the controller creates:
 
 - A per-domain `DaemonSet` of `compute-domain-daemon` pods, one per GPU node.
 - A `ResourceClaimTemplate` named `imex-channel-0` (or whatever name you gave it), which workload pods use to request a channel.
+
+These objects describe the default `driverManaged` mode.
+In `hostManaged` mode, the controller creates the workload `ResourceClaimTemplate` but does not create the per-domain daemon DaemonSet.
+The host service must be ready through its configured command socket before a workload claim can prepare.
+Host-managed mode currently provides domain isolation and channel 0 only, even if the `ComputeDomain` requests `allocationMode: All`.
+See [Host-managed IMEX](../prerequisites.md#host-managed-imex) before you select this mode.
 
 ## Use the channel in a workload
 
@@ -87,12 +93,13 @@ kubectl get computedomainclique -n dra-driver-nvidia-gpu
 
 ## Feature gates
 
-Both feature gates that affect ComputeDomains are Beta and enabled by default. You do not need to set them for standard operation.
+The default driver-managed mode uses two Beta feature gates that are enabled by default.
 
-| Feature gate | Stage | Default | Effect |
+| Feature gate | Stage | Default | Description |
 |---|---|---|---|
-| `IMEXDaemonsWithDNSNames` | Beta | `true` | Daemons communicate using DNS names instead of raw IP addresses. This is the recommended mode and required by `ComputeDomainCliques`. |
-| `ComputeDomainCliques` | Beta | `true` | Uses `ComputeDomainClique` CRD objects to track daemon membership per clique instead of storing that information in `ComputeDomain.status.nodes`. Requires `IMEXDaemonsWithDNSNames`. |
+| `IMEXDaemonsWithDNSNames` | Beta | `true` | Makes daemons communicate using DNS names instead of raw IP addresses and is required by `ComputeDomainCliques`. |
+| `ComputeDomainCliques` | Beta | `true` | Uses `ComputeDomainClique` CRD objects to track daemon membership per clique instead of storing that information in `ComputeDomain.status.nodes` and requires `IMEXDaemonsWithDNSNames`. |
+| `HostManagedIMEXDaemon` | Alpha | `false` | Allows you to select `resources.computeDomains.imex.mode=hostManaged` without changing the lifecycle mode by itself. |
 
 To disable a Beta gate (for example, to test a downgrade path):
 

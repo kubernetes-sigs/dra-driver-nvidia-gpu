@@ -9,6 +9,43 @@ This page covers upgrading the DRA Driver for NVIDIA GPUs between releases.
 
 ---
 
+## Upgrade from v0.4.1 to v0.5.0
+
+For the full release summary, see the [{{< param driver_release_tag >}} release notes](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/releases/tag/{{< param driver_release_tag >}}).
+
+Upgrade the Helm release and reuse the values from the existing installation:
+
+```bash
+helm upgrade -i nvidia-dra-driver-gpu oci://registry.k8s.io/dra-driver-nvidia/charts/dra-driver-nvidia-gpu \
+    --version {{< param "driver_version" >}} \
+    --namespace nvidia-dra-driver-gpu \
+    --reuse-values
+```
+
+Add any value changes that you want to make to the command.
+If you manage values in a file, pass that file with `--values` instead of using `--reuse-values`.
+The default configuration in {{< param driver_release_tag >}} does not require a data or API migration.
+If you already used `nameOverride` or upgraded the release to v0.4.0 or later, you do not need to add `nameOverride` for this upgrade.
+The per-claim MPS daemon inherits the existing `image.pullPolicy` and `imagePullSecrets` values, so existing MPS installations do not require an image configuration change.
+
+{{% alert color="warning" title="Warning" %}}
+If you change `resources.computeDomains.imex.mode` or `.isolation` as part of this upgrade, first drain ComputeDomain workloads and delete existing ComputeDomain resources.
+The DRA Driver does not enforce a safe transition while ComputeDomain workloads are active.
+{{% /alert %}}
+
+After the upgrade, verify the Helm release, driver pods, DeviceClasses, and node ResourceSlices:
+
+```bash
+helm status nvidia-dra-driver-gpu -n nvidia-dra-driver-gpu
+kubectl get pods -n nvidia-dra-driver-gpu
+kubectl get deviceclasses
+kubectl get resourceslices
+```
+
+Confirm that every driver pod reports `Running` and `Ready`, and that the expected DeviceClasses and node ResourceSlices remain available.
+
+---
+
 ## Upgrade from v0.4.0 to v0.4.1
 
 For the full release summary, see the [v0.4.1 release notes](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/releases/tag/v0.4.1).

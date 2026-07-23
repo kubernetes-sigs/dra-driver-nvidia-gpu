@@ -37,6 +37,7 @@ sharing:
   mpsConfig:
     defaultActiveThreadPercentage: 50             # optional, integer
     defaultPinnedDeviceMemoryLimit: "4Gi"         # optional, quantity
+    multiUser: true                               # optional, default false
     defaultPerDevicePinnedMemoryLimit:            # optional, map
       "0": "2Gi"
 ```
@@ -51,6 +52,7 @@ sharing:
 | `sharing.mpsConfig.defaultActiveThreadPercentage` | integer | Thread percentage limit applied to all processes sharing the GPU. Requires the [`MPSSupport`](feature-gates.md) feature gate. |
 | `sharing.mpsConfig.defaultPinnedDeviceMemoryLimit` | quantity | Pinned memory limit applied to all devices. |
 | `sharing.mpsConfig.defaultPerDevicePinnedMemoryLimit` | map | Per-device override of `defaultPinnedDeviceMemoryLimit`. Keys are device index (integer) or UUID string. |
+| `sharing.mpsConfig.multiUser` | bool | Starts the MPS control daemon in multi-user mode so processes with different user IDs can share the device, defaults to `false` when omitted, and requires a Volta or newer GPU. |
 
 
 ### MigDeviceConfig
@@ -75,6 +77,7 @@ sharing:
   strategy: MPS
   mpsConfig:
     defaultActiveThreadPercentage: 50
+    multiUser: true
 ```
 
 #### Fields
@@ -83,7 +86,7 @@ sharing:
 |---|---|---|
 | `sharing` | object | Optional. Supports `TimeSlicing` and `MPS` strategies. |
 | `sharing.strategy` | string | `TimeSlicing` or `MPS`. |
-| `sharing.mpsConfig` | object | MPS configuration. Same fields as `GpuConfig.sharing.mpsConfig`. Requires [`MPSSupport`](feature-gates.md). |
+| `sharing.mpsConfig` | object | Supports the same MPS fields, defaults, and Volta-or-newer `multiUser` requirement as `GpuConfig.sharing.mpsConfig` and requires [`MPSSupport`](feature-gates.md). |
 
 {{% alert title="Note" %}}
 `timeSlicingConfig` is not available for MIG devices. Time-slicing on MIG slices does not support interval configuration.

@@ -44,6 +44,17 @@ Disable a plugin you do not need with no impact on the other:
 
 When GPU allocation is enabled, the chart also creates DeviceClass resources for full GPUs, MIG slices, and VFIO passthrough. Individual device types still require the appropriate hardware and [feature gates](feature-gates/).
 
+## ComputeDomain IMEX
+
+| Value | Default | Description |
+|---|---|---|
+| `resources.computeDomains.imex.mode` | `driverManaged` | Selects who manages the `nvidia-imex` daemon lifecycle: `driverManaged` creates a per-ComputeDomain daemon DaemonSet, while `hostManaged` uses a host service that you manage and requires the [`HostManagedIMEXDaemon`](feature-gates.md) feature gate. |
+| `resources.computeDomains.imex.isolation` | `domain` | Selects IMEX isolation, where `domain` shares channel 0 among workloads in the same IMEX domain and `channel` is reserved but unsupported. |
+| `resources.computeDomains.imex.hostSocketPath` | `/etc/nvidia-imex/imex_ctrl.sock` | Sets the path under `nvidiaDriverRoot` to the host IMEX command socket that the ComputeDomain kubelet plugin queries for a `READY` response during claim preparation in `hostManaged` mode. |
+
+Drain ComputeDomain workload pods and delete existing `ComputeDomain` resources before you change `resources.computeDomains.imex.mode` or `resources.computeDomains.imex.isolation`.
+
+
 ## Kubernetes API version
 
 | Value | Default | Description |
@@ -66,8 +77,8 @@ When GPU allocation is enabled, the chart also creates DeviceClass resources for
 |---|---|---|
 | `image.repository` | `registry.k8s.io/dra-driver-nvidia/dra-driver-nvidia-gpu` | Container image repository for all driver components. |
 | `image.tag` | `""` | Image tag. When empty, defaults to the chart `appVersion` with a `v` prefix (for example, `v{{< param driver_version >}}`). |
-| `image.pullPolicy` | `IfNotPresent` | Image pull policy for all containers. |
-| `imagePullSecrets` | `[]` | Secrets for pulling images from private registries. |
+| `image.pullPolicy` | `IfNotPresent` | Image pull policy for all driver containers and per-claim MPS daemon containers. |
+| `imagePullSecrets` | `[]` | Secrets for pulling images for driver pods and per-claim MPS daemon pods from private registries. |
 
 ## Feature gates
 
@@ -138,6 +149,7 @@ Deployed as a DaemonSet on GPU nodes when either resource plugin is enabled.
 | `kubeletPlugin.metrics.computeDomainHttpEndpoint` | `:8081` | Metrics endpoint for the ComputeDomain plugin container. |
 | `kubeletPlugin.containers.gpus.healthcheckPort` | `51516` | gRPC health check port for the GPU container. Set to a negative value to disable. |
 | `kubeletPlugin.containers.computeDomains.healthcheckPort` | `51515` | gRPC health check port for the ComputeDomain container. Set to a negative value to disable. |
+| `kubeletPlugin.containers.computeDomains.gpuCliqueLabelEnabled` | `false` | Lets the ComputeDomain kubelet plugin set the `nvidia.com/gpu.clique` node label when GPU Feature Discovery does not own it. |
 | `kubeletPlugin.networkPolicy.enabled` | `false` | Create a NetworkPolicy for kubelet plugin pods. |
 
 The DaemonSet tolerates `nvidia.com/gpu` taints (`NoSchedule`) and requires nodes to match one of several GPU presence labels (NVIDIA GPU Operator or Node Feature Discovery). GPU and ComputeDomain plugin containers run as privileged by default. An init container prepares plugin directories before the main containers start. Additional `kubeletPlugin.*` values set per-container environment variables, resource limits, and scheduling constraints.
