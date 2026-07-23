@@ -37,6 +37,7 @@ const (
 	nvidiaDriver                 = "nvidia"
 	sysModulePath                = "/sys/module"
 	pciDevicesPath               = "/sys/bus/pci/devices"
+	pciDriversPath               = "/sys/bus/pci/drivers"
 	vfioDevicesRoot              = "/dev/vfio"
 	vfioDevicesPath              = "/dev/vfio/devices"
 	iommuDevicePath              = "/dev/iommu"
@@ -136,23 +137,6 @@ func (vm *VfioPciManager) verifyDisabledVFs(pciBusID string) error {
 
 // Configure binds the GPU to the vfio-pci driver.
 func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) error {
-	driver, err := getDriver(pciDevicesPath, info.PciBusID)
-	if err != nil {
-		return fmt.Errorf("error getting driver details for GPU %q: %w", info.PciBusID, err)
-	}
-
-	vfioDriver := getVfioDriverName(info.vfioModule)
-
-	// Skip if the GPU is already bound to the vfio-pci driver.
-	if driver == vfioDriver {
-		return nil
-	}
-
-	// Only support vfio-pci (or variant) or nvidia (if vm.nvidiaEnabled) driver.
-	if !vm.nvidiaEnabled || driver != nvidiaDriver {
-		return fmt.Errorf("GPU %q is bound to %q driver, expected %q or %q", info.PciBusID, driver, vfioDriver, nvidiaDriver)
-	}
-
 	if loaded, err := vm.checkKernelModuleLoaded(info.vfioModule); err == nil {
 		if !loaded {
 			err = vm.loadKernelModule(info.vfioModule)
@@ -162,6 +146,26 @@ func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) e
 		}
 	} else {
 		return fmt.Errorf("error checking if module %q is loaded: %w", info.vfioModule, err)
+	}
+
+	vfioDriver, err := getVfioDriverName(info.vfioModule)
+	if err != nil {
+		return fmt.Errorf("error getting vfio driver for GPU %q: %w", info.PciBusID, err)
+	}
+
+	driver, err := getDriver(pciDevicesPath, info.PciBusID)
+	if err != nil {
+		return fmt.Errorf("error getting driver details for GPU %q: %w", info.PciBusID, err)
+	}
+
+	// Skip if the GPU is already bound to the vfio-pci driver.
+	if driver == vfioDriver {
+		return nil
+	}
+
+	// Only support vfio-pci (or variant) or nvidia (if vm.nvidiaEnabled) driver.
+	if !vm.nvidiaEnabled || driver != nvidiaDriver {
+		return fmt.Errorf("GPU %q is bound to %q driver, expected %q or %q", info.PciBusID, driver, vfioDriver, nvidiaDriver)
 	}
 
 	// Disable GPU Persistence Mode.
@@ -191,12 +195,37 @@ func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) e
 	return nil
 }
 
-// The driver name of vfio_pci module (and its variants) can be derived
-// by substituting all occurrences of underscores `_` with dashes `-`.
-// Eg: Given the module `vfio_pci`, its corresponding driver name under
-// `/sys/bus/pci/drivers/` is `vfio-pci`.
-func getVfioDriverName(vfioModule string) string {
-	return strings.ReplaceAll(vfioModule, "_", "-")
+// Module names in the modules.alias file will only ever contain underscore
+// characters and not dashes -- this aligns with how the linux kernel
+// stores module names internally. This can sometimes differ from the name of the
+// directory in /sys/bus/pci/drivers/ for a given module. For example, this
+// contradiction exists for the standard vfio-pci module:
+//
+// $ file /sys/bus/pci/drivers/vfio-pci
+// sys/bus/pci/drivers/vfio-pci: directory
+//
+// $ modinfo vfio-pci | grep ^name:
+// name:           vfio_pci
+//
+// To account for this difference, we check if the module name exists in
+// /sys/bus/pci/drivers, and if not, we try again but with any underscore
+// characters converted to dashes.
+func getVfioDriverName(vfioModule string) (string, error) {
+	vfioDriver := vfioModule
+	if _, err := os.Stat(filepath.Join(pciDriversPath, vfioDriver)); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("unexpected error checking driver directory for vfio module %q at %q: %w", vfioModule, pciDriversPath, err)
+		}
+		vfioDriverNormalized := strings.ReplaceAll(vfioDriver, "_", "-")
+		if _, err := os.Stat(filepath.Join(pciDriversPath, vfioDriverNormalized)); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				return "", fmt.Errorf("unexpected error checking driver directory for vfio module %q at %q: %w", vfioModule, pciDriversPath, err)
+			}
+			return "", fmt.Errorf("failed to find driver directory for vfio module %q at %q, is the module loaded?", vfioModule, pciDriversPath)
+		}
+		vfioDriver = vfioDriverNormalized
+	}
+	return vfioDriver, nil
 }
 
 // Unconfigure binds the GPU to the nvidia driver.
