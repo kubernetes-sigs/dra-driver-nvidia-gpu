@@ -335,7 +335,9 @@ Deploy a sample workload that provisions an IMEX channel across NVLink-connected
 This section requires Multi-Node NVLink (MNNVL) hardware.
 {{% /alert %}}
 
-1. Validate clique node labels. GPU Feature Discovery labels each MNNVL-capable node with `nvidia.com/gpu.clique`. Confirm all expected nodes have this label:
+1. Validate clique node labels.
+   GPU Feature Discovery or the ComputeDomain kubelet plugin can own the `nvidia.com/gpu.clique` label on each MNNVL-capable node.
+   Confirm all expected nodes have this label:
 
 ```bash
 (echo -e "NODE\tLABEL\tCLIQUE"; kubectl get nodes -o json | \
@@ -351,7 +353,10 @@ gpu-node-001   nvidia.com/gpu.clique    a1b2c3d4-e5f6-7890-abcd-ef1234567890.0
 gpu-node-002   nvidia.com/gpu.clique    a1b2c3d4-e5f6-7890-abcd-ef1234567890.0
 ```
 
-Each value should have the shape `<CLUSTER_UUID>.<CLIQUE_ID>`. If any nodes are missing the label, confirm that GPU Feature Discovery is deployed and running on the affected nodes.
+Each value should have the shape `<CLUSTER_UUID>.<CLIQUE_ID>`.
+If any nodes are missing the label, confirm that GPU Feature Discovery is deployed and running on the affected nodes, or set `kubeletPlugin.containers.computeDomains.gpuCliqueLabelEnabled=true` and restart the kubelet plugin so the DRA Driver can manage the label instead.
+Do not configure both components to own the label.
+Refer to [Prerequisites](prerequisites.md#computedomains-additional-prerequisites) for details.
 
 2. Create a `ComputeDomain`. This groups nodes connected via NVLink fabric and provisions the IMEX channels needed for cross-node GPU communication. The `channel.resourceClaimTemplate` field names a `ResourceClaimTemplate` that the controller creates automatically, which pods then use to claim a channel:
 

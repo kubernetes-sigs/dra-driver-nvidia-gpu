@@ -59,6 +59,8 @@ are illustrative — confirm them on your own cluster.
       string: 0000:65:00.0          # PCI bus address in BDF notation, when available
     resource.kubernetes.io/pcieRoot:
       string: pci0000:64            # PCIe root complex identifier, when available
+    resource.kubernetes.io/numaNode:
+      int: 0                         # NUMA node, when available
     type:
       string: gpu                   # device kind: gpu, mig, or vfio
     uuid:
@@ -98,6 +100,8 @@ are illustrative — confirm them on your own cluster.
       string: 0000:65:00.0
     resource.kubernetes.io/pcieRoot:
       string: pci0000:64
+    resource.kubernetes.io/numaNode:
+      int: 0                         # inherited from the parent GPU, when available
     type:
       string: mig                   # device kind
     uuid:
@@ -126,12 +130,22 @@ are illustrative — confirm them on your own cluster.
 - attributes:
     deviceID:
       string: "0x20b0"              # PCI device ID
+    gpuModuleId:
+      int: 1                         # Fabric Manager GPU module ID, when enabled
     iommuFDEnabled:
       bool: true                    # whether the IOMMUFD backend is enabled
-    numa:
-      int: 0                        # NUMA node
+    partition1:
+      int: 8                         # ID of the size-1 Fabric Manager partition
+    partition2:
+      int: 4                         # ID of the size-2 Fabric Manager partition
+    partition4:
+      int: 2                         # ID of the size-4 Fabric Manager partition
+    partition8:
+      int: 1                         # ID of the size-8 Fabric Manager partition
     productName:
       string: NVIDIA A100-PCIE-40GB # product name reported by NVML
+    resource.kubernetes.io/numaNode:
+      int: 0                         # NUMA node, when available
     resource.kubernetes.io/pciBusID:
       string: 0000:65:00.0          # PCI bus address in BDF notation, when available
     resource.kubernetes.io/pcieRoot:
@@ -145,8 +159,54 @@ are illustrative — confirm them on your own cluster.
   capacity:
     addressableMemory:
       value: 40Gi                   # addressable device memory
-  name: gpu-0
+  name: gpu-vfio-0
 ```
+
+## NUMA locality
+
+The GPU kubelet plugin publishes the standard `resource.kubernetes.io/numaNode` attribute for full GPUs, MIG devices, and VFIO devices when the PCI NUMA node is available and non-negative.
+By default, the attribute uses the scalar `int` form shown in the examples.
+When you enable both the driver and Kubernetes `DRAListTypeAttributes` feature gates, the attribute uses a one-element `ints` list:
+
+```yaml
+resource.kubernetes.io/numaNode:
+  ints:
+  - 0
+```
+
+The GPU kubelet plugin omits the attribute when it cannot determine locality.
+Use `resource.kubernetes.io/numaNode` in a `matchAttribute` constraint when devices in a multi-device claim must have compatible NUMA locality.
+
+## Fabric Manager partition attributes
+
+When you enable `FabricManagerPartitioning`, the GPU kubelet plugin publishes Fabric Manager attributes on VFIO devices when Fabric Manager reports the corresponding data.
+
+| Attribute | Meaning |
+|---|---|
+| `gpuModuleId` | Physical GPU module identifier reported by NVML and used by Fabric Manager. |
+| `partition1` | Fabric Manager partition ID for the one-GPU partition that contains this GPU. |
+| `partition2` | Fabric Manager partition ID for the two-GPU partition that contains this GPU. |
+| `partition4` | Fabric Manager partition ID for the four-GPU partition that contains this GPU. |
+| `partition8` | Fabric Manager partition ID for the eight-GPU partition that contains this GPU. |
+
+The GPU kubelet plugin emits each `partitionN` attribute only when Fabric Manager reports a partition of that size containing the GPU.
+To request two VFIO GPUs from the same two-GPU Fabric Manager partition, add this constraint to the claim:
+
+```yaml
+constraints:
+- requests:
+  - gpus
+  matchAttribute: gpu.nvidia.com/partition2
+```
+
+You can also use a CEL selector for a known node-local module identifier:
+
+```text
+device.attributes['gpu.nvidia.com'].gpuModuleId == 1
+```
+
+Partition IDs and module IDs describe the local Fabric Manager topology, so use a `matchAttribute` constraint when you need portable co-placement instead of selecting a hardcoded partition ID.
+See [`FabricManagerPartitioning`](feature-gates.md) for the gate and its prerequisites.
 
 ## Attribute naming: bare keys vs CEL domain
 
@@ -155,7 +215,8 @@ driver attributes appear as **bare keys** (`type`, `productName`, and so on)
 because their domain is implied by the driver name. In a **CEL selector**, you
 address them through that domain, `device.attributes['gpu.nvidia.com'].type`. The
 standardized PCI attributes are the exception: they are stored fully qualified as
-`resource.kubernetes.io/pciBusID` and `resource.kubernetes.io/pcieRoot`.
+`resource.kubernetes.io/pciBusID`, `resource.kubernetes.io/pcieRoot`, and
+`resource.kubernetes.io/numaNode`.
 
 In selectors, attributes are read with
 `device.attributes['gpu.nvidia.com'].<name>` and capacity with

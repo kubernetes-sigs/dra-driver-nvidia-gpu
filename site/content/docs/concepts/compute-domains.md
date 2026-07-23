@@ -9,9 +9,22 @@ A `ComputeDomain` is a custom resource that sets up a group of nodes to run a mu
 
 ---
 
-## How it works
+## IMEX lifecycle modes
 
-Creating a `ComputeDomain` triggers the following sequence:
+The `resources.computeDomains.imex.mode` Helm value determines who manages the `nvidia-imex` daemon lifecycle.
+
+| Mode | Lifecycle |
+|---|---|
+| `driverManaged` | By default, the DRA Driver creates one `nvidia-imex` DaemonSet for each `ComputeDomain` and tracks daemon readiness through `ComputeDomainClique` resources. |
+| `hostManaged` | You run `nvidia-imex` as a host service with a ready command socket, and the DRA Driver does not create daemon DaemonSets or daemon claims; this mode requires the `HostManagedIMEXDaemon` feature gate. |
+
+Host-managed mode currently supports domain isolation only.
+All ComputeDomains that use the same host IMEX domain share channel 0.
+For service and socket configuration, see [Host-managed IMEX](../prerequisites.md#host-managed-imex).
+
+## How driver-managed mode works
+
+Creating a `ComputeDomain` in the default `driverManaged` mode triggers the following sequence:
 
 1. The `compute-domain-controller` watches for new `ComputeDomain` resources and creates a per-domain DaemonSet.
 2. Each daemon pod in that DaemonSet runs `nvidia-imex`, which manages the NVLink fabric connection on its node.
@@ -25,7 +38,7 @@ For the full sequence diagram, see [Architecture › ComputeDomain flow](archite
 
 ## Prerequisites
 
-See [Prerequisites](../prerequisites.md) for hardware and software requirements, including the ComputeDomain-specific requirements for Multi-Node NVLink hardware, GPU Feature Discovery, and `nvidia-imex` service configuration.
+See [Prerequisites](../prerequisites.md) for hardware and software requirements, including the ComputeDomain-specific requirements for Multi-Node NVLink hardware, `nvidia.com/gpu.clique` label ownership, and `nvidia-imex` service configuration.
 
 ---
 
