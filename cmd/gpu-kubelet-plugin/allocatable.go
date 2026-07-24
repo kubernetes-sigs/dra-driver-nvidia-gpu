@@ -96,18 +96,24 @@ func (d *AllocatableDevice) CanonicalName() string {
 	panic("unexpected type for AllocatableDevice")
 }
 
-func (d *AllocatableDevice) GetDevice() resourceapi.Device {
+func (d *AllocatableDevice) GetDevice(config *Config) resourceapi.Device {
 	switch d.Type() {
 	case GpuDeviceType:
-		return d.Gpu.GetDevice()
+		dev := d.Gpu.GetDevice()
+		applyConsumableShares(&dev, config)
+		return dev
 	case MigStaticDeviceType:
-		return d.MigStatic.GetDevice()
+		dev := d.MigStatic.GetDevice()
+		applyConsumableShares(&dev, config)
+		return dev
 	case MigDynamicDeviceType:
 		panic("GetDevice() must currently not be called for MigDynamicDeviceType")
 	case VfioDeviceType:
+		// VFIO passthrough devices do not support consumable shares.
 		return d.Vfio.GetDevice()
+	default:
+		panic("unexpected type for AllocatableDevice")
 	}
-	panic("unexpected type for AllocatableDevice")
 }
 
 // UUID() is here for `AllocatableDevices` to implement the `UUIDProvider`

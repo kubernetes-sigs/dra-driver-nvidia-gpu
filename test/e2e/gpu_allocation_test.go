@@ -171,4 +171,109 @@ var _ = Describe("GPU Allocation", func() {
 				"claim %s must not be allocated (no device matches h300)", rc.Name)
 		}
 	})
+
+	It("[consumable-shares/unlimited] schedules multiple pods sharing the same GPU concurrently", func(ctx SpecContext) {
+		slices, err := cs.ResourceV1().ResourceSlices().List(ctx, metav1.ListOptions{})
+		Expect(err).NotTo(HaveOccurred())
+
+		hasConsumableShares := false
+		for _, s := range slices.Items {
+			if s.Spec.Driver != "gpu.nvidia.com" {
+				continue
+			}
+			for _, d := range s.Spec.Devices {
+				if d.AllowMultipleAllocations != nil && *d.AllowMultipleAllocations {
+					hasConsumableShares = true
+					break
+				}
+			}
+		}
+		if !hasConsumableShares {
+			Skip("ConsumableShares feature is not enabled on the deployed cluster driver")
+		}
+
+		yaml, err := framework.Render("consumable-shares-unlimited", map[string]any{"Namespace": ns})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(framework.ApplyYAML(ctx, yaml)).To(Succeed())
+
+		for _, podName := range []string{"pod1", "pod2"} {
+			phase, err := framework.WaitForPodPhase(ctx, cs, ns, podName,
+				[]corev1.PodPhase{corev1.PodRunning, corev1.PodSucceeded},
+				3*time.Minute)
+			Expect(err).NotTo(HaveOccurred(), "pod %s never reached Running/Succeeded (phase=%s)", podName, phase)
+		}
+
+		claims, err := cs.ResourceV1().ResourceClaims(ns).List(ctx, metav1.ListOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(len(claims.Items)).To(BeNumerically(">=", 2))
+	})
+
+	It("[consumable-shares/memory] schedules multiple pods with explicit fractional memory requests", func(ctx SpecContext) {
+		slices, err := cs.ResourceV1().ResourceSlices().List(ctx, metav1.ListOptions{})
+		Expect(err).NotTo(HaveOccurred())
+
+		hasConsumableShares := false
+		for _, s := range slices.Items {
+			if s.Spec.Driver != "gpu.nvidia.com" {
+				continue
+			}
+			for _, d := range s.Spec.Devices {
+				if d.AllowMultipleAllocations != nil && *d.AllowMultipleAllocations {
+					hasConsumableShares = true
+					break
+				}
+			}
+		}
+		if !hasConsumableShares {
+			Skip("ConsumableShares feature is not enabled on the deployed cluster driver")
+		}
+
+		yaml, err := framework.Render("consumable-shares-memory", map[string]any{"Namespace": ns})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(framework.ApplyYAML(ctx, yaml)).To(Succeed())
+
+		for _, podName := range []string{"pod1", "pod2"} {
+			phase, err := framework.WaitForPodPhase(ctx, cs, ns, podName,
+				[]corev1.PodPhase{corev1.PodRunning, corev1.PodSucceeded},
+				3*time.Minute)
+			Expect(err).NotTo(HaveOccurred(), "pod %s never reached Running/Succeeded (phase=%s)", podName, phase)
+		}
+	})
+
+	It("[mps/decoupled] schedules multiple pods sharing GPU via decoupled node-level MPS", func(ctx SpecContext) {
+		slices, err := cs.ResourceV1().ResourceSlices().List(ctx, metav1.ListOptions{})
+		Expect(err).NotTo(HaveOccurred())
+
+		hasConsumableShares := false
+		for _, s := range slices.Items {
+			if s.Spec.Driver != "gpu.nvidia.com" {
+				continue
+			}
+			for _, d := range s.Spec.Devices {
+				if d.AllowMultipleAllocations != nil && *d.AllowMultipleAllocations {
+					hasConsumableShares = true
+					break
+				}
+			}
+		}
+		if !hasConsumableShares {
+			Skip("ConsumableShares feature is not enabled on the deployed cluster driver")
+		}
+
+		yaml, err := framework.Render("mps-decoupled", map[string]any{"Namespace": ns})
+		Expect(err).NotTo(HaveOccurred())
+		if err := framework.ApplyYAML(ctx, yaml); err != nil {
+			if strings.Contains(err.Error(), "MPSSupport") {
+				Skip("MPSSupport feature gate is not enabled on the deployed cluster driver")
+			}
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		for _, podName := range []string{"pod1", "pod2"} {
+			phase, err := framework.WaitForPodPhase(ctx, cs, ns, podName,
+				[]corev1.PodPhase{corev1.PodRunning, corev1.PodSucceeded},
+				3*time.Minute)
+			Expect(err).NotTo(HaveOccurred(), "pod %s never reached Running/Succeeded (phase=%s)", podName, phase)
+		}
+	})
 })

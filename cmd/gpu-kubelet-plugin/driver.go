@@ -229,7 +229,7 @@ func (d *driver) generateSplitResourceSlices(nodeName string) resourceslice.Driv
 			}
 
 			// Add device/partition to the device-only slice for this GPU.
-			deviceSlice.Devices = append(deviceSlice.Devices, device.PartGetDevice())
+			deviceSlice.Devices = append(deviceSlice.Devices, device.PartGetDevice(d.state.config))
 		}
 		if gpuInfo != nil {
 			allCounterSets = append(allCounterSets, gpuInfo.PartSharedCounterSets()...)
@@ -290,7 +290,7 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 			// Add all allocatable devices for this physical GPU to this slice.
 			// This includes not-yet-manifested MIG devices, and the physical
 			// GPU itself.
-			slice.Devices = append(slice.Devices, device.PartGetDevice())
+			slice.Devices = append(slice.Devices, device.PartGetDevice(d.state.config))
 		}
 
 		if gpuInfo != nil {
@@ -481,8 +481,8 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 	var resourceSlice resourceslice.Slice
 	for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
 		for _, device := range devices {
-			klog.V(4).Infof("About to announce device %s", device.GetDevice().Name)
-			resourceSlice.Devices = append(resourceSlice.Devices, device.GetDevice())
+			klog.V(4).Infof("About to announce device %s", device.GetDevice(config).Name)
+			resourceSlice.Devices = append(resourceSlice.Devices, device.GetDevice(config))
 		}
 	}
 
@@ -529,7 +529,7 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 			var resourceSlice resourceslice.Slice
 			for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
 				for _, dev := range devices {
-					d := dev.GetDevice()
+					d := dev.GetDevice(d.state.config)
 
 					taints := dev.Taints()
 					if len(taints) > 0 {

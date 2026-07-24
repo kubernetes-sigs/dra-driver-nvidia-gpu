@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -58,7 +59,8 @@ type OpaqueDeviceConfig struct {
 }
 
 type DeviceConfigState struct {
-	MpsControlDaemonID string              `json:"mpsControlDaemonID"`
+	MpsControlDaemonID string              `json:"mpsControlDaemonID,omitempty"`
+	MpsApplied         *bool               `json:"mpsApplied,omitempty"`
 	Config             configapi.Interface `json:"-"` // don't serialize this.
 	containerEdits     *cdiapi.ContainerEdits
 	TimeSliceApplied   *bool `json:"timeSliceApplied,omitempty"`
@@ -267,9 +269,11 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 					return nil, fmt.Errorf("unable to update checkpoint: %w", err)
 				}
 				syncPreparedDevicesGaugeFromCheckpoint(config.flags.nodeName, cp)
+				state.reconcileOnStartup(ctx, cp)
 				return state, nil
 			} else if storedBootID == currentBootID {
 				syncPreparedDevicesGaugeFromCheckpoint(config.flags.nodeName, cp)
+				state.reconcileOnStartup(ctx, cp)
 				return state, nil
 			} else {
 				klog.Infof("Invalidating checkpoint: checkpoint nodeBootID %q != current %q", storedBootID, currentBootID)
@@ -282,6 +286,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	if err := state.createCheckpoint(ctx, newCheckpoint); err != nil {
 		return nil, fmt.Errorf("unable to create fresh checkpoint: %w", err)
 	}
+	state.reconcileOnStartup(ctx, newCheckpoint)
 
 	return state, nil
 }
@@ -352,7 +357,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	klog.V(6).Infof("checkpoint updated for claim %v", claimUID)
 
 	tprep0 := time.Now()
-	preparedDevices, err := s.prepareDevices(ctx, claim)
+	preparedDevices, err := s.prepareDevices(ctx, claim, cp)
 	klog.V(6).Infof("t_prep_core %.3f s (claim %s)", time.Since(tprep0).Seconds(), ResourceClaimToString(claim))
 	if err != nil {
 		return nil, fmt.Errorf("prepare devices failed: %w", err)
@@ -510,7 +515,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 			return fmt.Errorf("unprepare failed for partially prepared claim %s failed: %w", claimRef.String(), err)
 		}
 	case ClaimCheckpointStatePrepareCompleted:
-		if err := s.unprepareDevices(ctx, claimUID, pc.PreparedDevices); err != nil {
+		if err := s.unprepareDevices(ctx, claimUID, pc.PreparedDevices, checkpoint); err != nil {
 			return fmt.Errorf("unprepare devices failed for claim %s: %w", claimRef.String(), err)
 		}
 	default:
@@ -525,6 +530,20 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 			if allocatableDevice == nil {
 				klog.Warningf("allocatable not found for device: %v", device.DeviceName)
 				continue
+			}
+			// If consumable shares is enabled and this shared GPU/MIG device is still in use
+			// by other active container claims, do not re-advertise its sibling VFIO device yet.
+			if isConsumableSharesEnabled(s.config) {
+				var inUse bool
+				if allocatableDevice.Type() == GpuDeviceType && allocatableDevice.Gpu != nil {
+					inUse = isGpuUUIDInUseByOtherClaims(checkpoint, claimUID, allocatableDevice.Gpu.UUID)
+				} else if allocatableDevice.IsStaticOrDynMigDevice() {
+					inUse = isMigDeviceInUseByOtherClaims(checkpoint, claimUID, allocatableDevice.UUID(), device.DeviceName)
+				}
+				if inUse {
+					klog.V(4).Infof("Unprepare: device %s still in use by other claims, skipping sibling rediscovery", device.DeviceName)
+					continue
+				}
 			}
 			isVfio := allocatableDevice.Type() == VfioDeviceType
 			// Rediscover all sibling devices on the parent GPU of the unprepared device.
@@ -661,6 +680,12 @@ func (s *DeviceState) unpreparePartiallyPrepairedClaim(ctx context.Context, cuid
 			if err := s.deactivateFabricPartition(infos); err != nil {
 				return fmt.Errorf("error deactivating fabric partition: %w", err)
 			}
+		}
+	}
+
+	if featuregates.Enabled(featuregates.MPSSupport) && s.mpsManager != nil {
+		if err := s.mpsManager.EnsureStoppedIfIdle(ctx, checkpoint, cuid); err != nil {
+			klog.Warningf("unprepare: error stopping idle MPS daemon during partial prepare rollback for claim %s: %v", cuid, err)
 		}
 	}
 
@@ -815,82 +840,16 @@ func (s *DeviceState) deleteClaimFromCheckpoint(ctx context.Context, claimRef ku
 	return nil
 }
 
-func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
+func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.ResourceClaim, cp *Checkpoint) (PreparedDevices, error) {
 	if claim.Status.Allocation == nil {
 		return nil, fmt.Errorf("claim not yet allocated")
 	}
 
 	klog.V(6).Infof("Preparing devices for claim %s", ResourceClaimToString(claim))
 
-	// Retrieve the full set of device configs for the driver.
-	configs, err := GetOpaqueDeviceConfigs(
-		configapi.StrictDecoder,
-		DriverName,
-		claim.Status.Allocation.Devices.Config,
-	)
+	configResultsMap, err := s.getConfigResultsMap(claim.Status.Allocation)
 	if err != nil {
-		return nil, fmt.Errorf("error getting opaque device configs: %w", err)
-	}
-
-	// Add the default GPU and MIG device Configs to the front of the config
-	// list with the lowest precedence. This guarantees there will be at least
-	// one of each config in the list with len(Requests) == 0 for the lookup below.
-	configs = slices.Insert(configs, 0, &OpaqueDeviceConfig{
-		Requests: []string{},
-		Config:   configapi.DefaultGpuConfig(),
-	})
-	configs = slices.Insert(configs, 0, &OpaqueDeviceConfig{
-		Requests: []string{},
-		Config:   configapi.DefaultMigDeviceConfig(),
-	})
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		configs = slices.Insert(configs, 0, &OpaqueDeviceConfig{
-			Requests: []string{},
-			Config:   configapi.DefaultVfioDeviceConfig(),
-		})
-	}
-
-	// Look through the configs and figure out which one will be applied to
-	// each device allocation result based on their order of precedence and type.
-	configResultsMap := make(map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult)
-	for _, result := range claim.Status.Allocation.Devices.Results {
-		if result.Driver != DriverName {
-			continue
-		}
-		device := s.perGPUAllocatable.GetAllocatableDevice(result.Device)
-		if device == nil {
-			return nil, fmt.Errorf("allocatable not found for device %q", result.Device)
-		}
-		for _, c := range slices.Backward(configs) {
-			if slices.Contains(c.Requests, result.Request) {
-				if _, ok := c.Config.(*configapi.GpuConfig); ok && device.Type() != GpuDeviceType {
-					return nil, fmt.Errorf("cannot apply GpuConfig to device %q of type %q (request: %v)", result.Device, device.Type(), result.Request)
-				}
-
-				if _, ok := c.Config.(*configapi.MigDeviceConfig); ok && !device.IsStaticOrDynMigDevice() {
-					return nil, fmt.Errorf("cannot apply MigDeviceConfig to device %q of type %q (request: %v)", result.Device, device.Type(), result.Request)
-				}
-
-				if _, ok := c.Config.(*configapi.VfioDeviceConfig); ok && device.Type() != VfioDeviceType {
-					return nil, fmt.Errorf("cannot apply VfioDeviceConfig to device %q of type %q (request: %v)", result.Device, device.Type(), result.Request)
-				}
-				configResultsMap[c.Config] = append(configResultsMap[c.Config], &result)
-				break
-			}
-			if len(c.Requests) == 0 {
-				if _, ok := c.Config.(*configapi.GpuConfig); ok && device.Type() != GpuDeviceType {
-					continue
-				}
-				if _, ok := c.Config.(*configapi.MigDeviceConfig); ok && !device.IsStaticOrDynMigDevice() {
-					continue
-				}
-				if _, ok := c.Config.(*configapi.VfioDeviceConfig); ok && device.Type() != VfioDeviceType {
-					continue
-				}
-				configResultsMap[c.Config] = append(configResultsMap[c.Config], &result)
-				break
-			}
-		}
+		return nil, err
 	}
 
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
@@ -936,7 +895,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		// Apply the config to the list of results associated with it. If this
 		// applies to a DynamicMIG device then at this point the device has not
 		// yet been created (i.e., the UUID of the MIG device is not yet known).
-		configState, err := s.applyConfig(ctx, config, claim, results)
+		configState, err := s.applyConfig(ctx, config, claim, results, cp)
 		if err != nil {
 			return nil, fmt.Errorf("error applying config: %w", err)
 		}
@@ -1001,18 +960,25 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 				}
 			case MigDynamicDeviceType:
 				migspec := allocatableDevice.MigDynamic
-				// Note: immediately after createMigDevice() returns, we could
-				// persist data to disk that may be useful for cleaning up a
-				// partial prepare more reliably (such as the MIG device UUID).
-				tcmig0 := time.Now()
-				migdev, err := s.nvdevlib.createMigDevice(migspec)
-				klog.V(6).Infof("t_prep_create_mig_dev %.3f s (claim %s)", time.Since(tcmig0).Seconds(), ResourceClaimToString(claim))
-				if err != nil {
-					return nil, fmt.Errorf("error creating MIG device: %w", err)
-				}
-				preparedDevice.Mig = &PreparedMigDevice{
-					Concrete: migdev.LiveTuple(),
-					Device:   device,
+				if existingMig := s.getPreparedMigDevice(cp, device.DeviceName); isConsumableSharesEnabled(s.config) && existingMig != nil {
+					preparedDevice.Mig = &PreparedMigDevice{
+						Concrete: existingMig.Concrete,
+						Device:   device,
+					}
+				} else {
+					// Note: immediately after createMigDevice() returns, we could
+					// persist data to disk that may be useful for cleaning up a
+					// partial prepare more reliably (such as the MIG device UUID).
+					tcmig0 := time.Now()
+					migdev, err := s.nvdevlib.createMigDevice(migspec)
+					klog.V(6).Infof("t_prep_create_mig_dev %.3f s (claim %s)", time.Since(tcmig0).Seconds(), ResourceClaimToString(claim))
+					if err != nil {
+						return nil, fmt.Errorf("error creating MIG device: %w", err)
+					}
+					preparedDevice.Mig = &PreparedMigDevice{
+						Concrete: migdev.LiveTuple(),
+						Device:   device,
+					}
 				}
 			case VfioDeviceType:
 				preparedDevice.Vfio = &PreparedVfioDevice{
@@ -1036,7 +1002,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 	return preparedDevices, nil
 }
 
-func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, devices PreparedDevices) error {
+func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, devices PreparedDevices, checkpoint *Checkpoint) error {
 	klog.V(6).Infof("Unpreparing claim '%s', previously prepared devices from checkpoint: %v", claimUID, devices.GetDeviceNames())
 	for _, group := range devices {
 		// Unconfigure the vfio-pci devices.
@@ -1055,6 +1021,10 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 			case PreparedMigDeviceType:
 				if featuregates.Enabled(featuregates.DynamicMIG) {
 					mig := device.Mig.Concrete
+					if isConsumableSharesEnabled(s.config) && isMigDeviceInUseByOtherClaims(checkpoint, claimUID, mig.MigUUID, device.Mig.Device.DeviceName) {
+						klog.V(4).Infof("Unprepare: dynamic MIG device '%s' still in use by other claims, skipping deletion", mig.MigUUID)
+						continue
+					}
 					klog.V(4).Infof("Unprepare: tear down MIG device '%s' for claim '%s'", mig.MigUUID, claimUID)
 					// Errors during MIG device deletion are generally rare but
 					// have to be expected, and should fail the
@@ -1074,10 +1044,9 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 			}
 		}
 
-		// Stop any MPS control daemons started for each group of prepared devices.
-		if featuregates.Enabled(featuregates.MPSSupport) {
-			mpsControlDaemon := s.mpsManager.NewMpsControlDaemon(claimUID, group)
-			if err := mpsControlDaemon.Stop(ctx); err != nil {
+		// Stop node-level MPS control daemon if no other active claims require MPS.
+		if featuregates.Enabled(featuregates.MPSSupport) && s.mpsManager != nil {
+			if err := s.mpsManager.EnsureStoppedIfIdle(ctx, checkpoint, claimUID); err != nil {
 				return fmt.Errorf("error stopping MPS control daemon: %w", err)
 			}
 		}
@@ -1085,13 +1054,23 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 		// checkpoint predates timeSliceApplied (nil — legacy implicit time-slicing).
 		if featuregates.Enabled(featuregates.TimeSlicingSettings) &&
 			ptr.Deref(group.ConfigState.TimeSliceApplied, true) {
-			defaultInterval := configapi.DefaultTimeSlice
-			tsc := &configapi.TimeSlicingConfig{Interval: &defaultInterval}
-			if err := s.tsManager.SetTimeSlice(group.Devices.GpuUUIDs(), tsc); err != nil {
-				if err == nvml.ERROR_NOT_SUPPORTED {
-					klog.Warningf("Unprepare: skip resetting time-slice policy for devices: %v", err)
+			var gpuUUIDsToReset []string
+			for _, gpuUUID := range group.Devices.GpuUUIDs() {
+				if isConsumableSharesEnabled(s.config) && isGpuUUIDInUseByOtherClaims(checkpoint, claimUID, gpuUUID) {
+					klog.V(4).Infof("Unprepare: GPU %s still in use by other claims, skipping time-slice reset", gpuUUID)
 				} else {
-					return fmt.Errorf("error setting timeslice for devices: %w", err)
+					gpuUUIDsToReset = append(gpuUUIDsToReset, gpuUUID)
+				}
+			}
+			if len(gpuUUIDsToReset) > 0 {
+				defaultInterval := configapi.DefaultTimeSlice
+				tsc := &configapi.TimeSlicingConfig{Interval: &defaultInterval}
+				if err := s.tsManager.SetTimeSlice(gpuUUIDsToReset, tsc); err != nil {
+					if err == nvml.ERROR_NOT_SUPPORTED {
+						klog.Warningf("Unprepare: skip resetting time-slice policy for devices: %v", err)
+					} else {
+						return fmt.Errorf("error setting timeslice for devices: %w", err)
+					}
 				}
 			}
 		}
@@ -1166,14 +1145,14 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 	return nil
 }
 
-func (s *DeviceState) applyConfig(ctx context.Context, config configapi.Interface, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult) (*DeviceConfigState, error) {
+func (s *DeviceState) applyConfig(ctx context.Context, config configapi.Interface, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult, cp *Checkpoint) (*DeviceConfigState, error) {
 	switch castConfig := config.(type) {
 	case *configapi.GpuConfig:
 		klog.V(7).Infof("applySharingConfig() for GpuConfig")
-		return s.applySharingConfig(ctx, castConfig.Sharing, claim, results)
+		return s.applySharingConfig(ctx, castConfig.Sharing, claim, results, cp)
 	case *configapi.MigDeviceConfig:
 		klog.V(7).Infof("applySharingConfig() for MigDeviceConfig")
-		return s.applySharingConfig(ctx, castConfig.Sharing, claim, results)
+		return s.applySharingConfig(ctx, castConfig.Sharing, claim, results, cp)
 	case *configapi.VfioDeviceConfig:
 		klog.V(7).Infof("applySharingConfig() for VfioDeviceConfig")
 		return s.applyVfioDeviceConfig(ctx, castConfig, claim, results)
@@ -1182,7 +1161,7 @@ func (s *DeviceState) applyConfig(ctx context.Context, config configapi.Interfac
 	}
 }
 
-func (s *DeviceState) applySharingConfig(ctx context.Context, config configapi.Sharing, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult) (*DeviceConfigState, error) {
+func (s *DeviceState) applySharingConfig(ctx context.Context, config configapi.Sharing, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult, cp *Checkpoint) (*DeviceConfigState, error) {
 	// Get the list of claim requests this config is being applied over.
 	var requests []string
 	for _, r := range results {
@@ -1233,19 +1212,23 @@ func (s *DeviceState) applySharingConfig(ctx context.Context, config configapi.S
 			// not based on `AllocatableDevices`.
 			return nil, fmt.Errorf("MPS is not yet supported when using featureGates.DynamicMIG=true")
 		}
+		requestedUUIDs := requestedDevices.UUIDs()
+		if err := ensureCapability(s.nvdevlib.gpuInfosByUUID, requestedUUIDs, voltaCudaComputeCapability); err != nil {
+			return nil, fmt.Errorf("requested device does not support MPS multi-user mode: %w", err)
+		}
 		mpsc, err := config.GetMpsConfig()
 		if err != nil {
 			return nil, fmt.Errorf("error getting MPS configuration: %w", err)
 		}
-		mpsControlDaemon := s.mpsManager.NewMpsControlDaemon(string(claim.UID), requestedDevices)
-		if err := mpsControlDaemon.Start(ctx, mpsc); err != nil {
-			return nil, fmt.Errorf("error starting MPS control daemon: %w", err)
+		if err := s.mpsManager.EnsureStarted(ctx); err != nil {
+			return nil, fmt.Errorf("error starting node MPS control daemon: %w", err)
 		}
-		if err := mpsControlDaemon.AssertReady(ctx); err != nil {
-			return nil, fmt.Errorf("MPS control daemon is not yet ready: %w", err)
+		edits, err := s.mpsManager.GetCDIContainerEdits(mpsc, requestedUUIDs)
+		if err != nil {
+			return nil, fmt.Errorf("error generating CDI container edits for MPS: %w", err)
 		}
-		configState.MpsControlDaemonID = mpsControlDaemon.GetID()
-		configState.containerEdits = mpsControlDaemon.GetCDIContainerEdits()
+		configState.MpsApplied = new(true)
+		configState.containerEdits = edits
 	}
 
 	return &configState, nil
@@ -1509,6 +1492,23 @@ func (s *DeviceState) validateNoOverlappingPreparedDevices(checkpoint *Checkpoin
 		// Check for overlaps between requested devices from the current claim and others.
 		for device := range requestedDevices {
 			if _, found := preparedDevices[device]; found {
+				if isConsumableSharesEnabled(s.config) {
+					dev := s.perGPUAllocatable.GetAllocatableDevice(device)
+					if dev != nil && dev.Type() != VfioDeviceType {
+						existingConfig, err := s.getNormalizedDeviceConfig(pc.Status.Allocation, device)
+						if err != nil {
+							return fmt.Errorf("error resolving config for existing prepared claim %s on device %s: %w", existingClaimUID, device, err)
+						}
+						incomingConfig, err := s.getNormalizedDeviceConfig(claim.Status.Allocation, device)
+						if err != nil {
+							return fmt.Errorf("error resolving config for incoming claim %s on device %s: %w", claimUID, device, err)
+						}
+						if !reflect.DeepEqual(existingConfig, incomingConfig) {
+							return fmt.Errorf("requested device %s has conflicting configuration with already prepared claim %s", device, existingClaimUID)
+						}
+						continue
+					}
+				}
 				return fmt.Errorf(
 					"requested device %s is already allocated to different claim %s",
 					device, existingClaimUID,
@@ -1517,6 +1517,221 @@ func (s *DeviceState) validateNoOverlappingPreparedDevices(checkpoint *Checkpoin
 		}
 	}
 	return nil
+}
+
+func (s *DeviceState) getNormalizedDeviceConfig(allocation *resourceapi.AllocationResult, deviceName string) (configapi.Interface, error) {
+	configResultsMap, err := s.getConfigResultsMap(allocation)
+	if err != nil {
+		return nil, err
+	}
+
+	for configObj, results := range configResultsMap {
+		for _, res := range results {
+			if res.Device == deviceName {
+				return normalizeAndValidateConfig(configObj)
+			}
+		}
+	}
+
+	return nil, nil
+}
+
+func (s *DeviceState) getConfigResultsMap(allocation *resourceapi.AllocationResult) (map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult, error) {
+	if allocation == nil {
+		return nil, nil
+	}
+
+	configs, err := getDeviceConfigsWithDefaults(allocation.Devices.Config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Look through the configs and figure out which one will be applied to
+	// each device allocation result based on their order of precedence and type.
+	configResultsMap := make(map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult)
+	for _, result := range allocation.Devices.Results {
+		if result.Driver != DriverName {
+			continue
+		}
+		device := s.perGPUAllocatable.GetAllocatableDevice(result.Device)
+		if device == nil {
+			return nil, fmt.Errorf("allocatable not found for device %q", result.Device)
+		}
+		for _, c := range slices.Backward(configs) {
+			if slices.Contains(c.Requests, result.Request) {
+				if err := validateDeviceConfigType(c.Config, device, &result); err != nil {
+					return nil, err
+				}
+				configResultsMap[c.Config] = append(configResultsMap[c.Config], &result)
+				break
+			}
+			if len(c.Requests) == 0 {
+				if !matchesDeviceType(c.Config, device) {
+					continue
+				}
+				configResultsMap[c.Config] = append(configResultsMap[c.Config], &result)
+				break
+			}
+		}
+	}
+
+	return configResultsMap, nil
+}
+
+func getDeviceConfigsWithDefaults(rawConfigs []resourceapi.DeviceAllocationConfiguration) ([]*OpaqueDeviceConfig, error) {
+	// Retrieve the full set of device configs for the driver.
+	configs, err := GetOpaqueDeviceConfigs(
+		configapi.StrictDecoder,
+		DriverName,
+		rawConfigs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("error getting opaque device configs: %w", err)
+	}
+
+	// Add the default GPU and MIG device Configs to the front of the config
+	// list with the lowest precedence. This guarantees there will be at least
+	// one of each config in the list with len(Requests) == 0 for the lookup below.
+	defaults := []*OpaqueDeviceConfig{
+		{Requests: []string{}, Config: configapi.DefaultGpuConfig()},
+		{Requests: []string{}, Config: configapi.DefaultMigDeviceConfig()},
+	}
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		defaults = append(defaults, &OpaqueDeviceConfig{
+			Requests: []string{},
+			Config:   configapi.DefaultVfioDeviceConfig(),
+		})
+	}
+
+	return append(defaults, configs...), nil
+}
+
+func validateDeviceConfigType(c runtime.Object, dev *AllocatableDevice, result *resourceapi.DeviceRequestAllocationResult) error {
+	switch c.(type) {
+	case *configapi.GpuConfig:
+		if dev.Type() != GpuDeviceType {
+			return fmt.Errorf("cannot apply GpuConfig to device %q of type %q (request: %v)", result.Device, dev.Type(), result.Request)
+		}
+	case *configapi.MigDeviceConfig:
+		if !dev.IsStaticOrDynMigDevice() {
+			return fmt.Errorf("cannot apply MigDeviceConfig to device %q of type %q (request: %v)", result.Device, dev.Type(), result.Request)
+		}
+	case *configapi.VfioDeviceConfig:
+		if dev.Type() != VfioDeviceType {
+			return fmt.Errorf("cannot apply VfioDeviceConfig to device %q of type %q (request: %v)", result.Device, dev.Type(), result.Request)
+		}
+	}
+	return nil
+}
+
+func matchesDeviceType(c runtime.Object, dev *AllocatableDevice) bool {
+	switch c.(type) {
+	case *configapi.GpuConfig:
+		return dev.Type() == GpuDeviceType
+	case *configapi.MigDeviceConfig:
+		return dev.IsStaticOrDynMigDevice()
+	case *configapi.VfioDeviceConfig:
+		return dev.Type() == VfioDeviceType
+	default:
+		return false
+	}
+}
+
+func normalizeAndValidateConfig(c runtime.Object) (configapi.Interface, error) {
+	cloned := c.DeepCopyObject()
+	var config configapi.Interface
+	switch castConfig := cloned.(type) {
+	case *configapi.GpuConfig:
+		config = castConfig
+	case *configapi.MigDeviceConfig:
+		config = castConfig
+	case *configapi.VfioDeviceConfig:
+		config = castConfig
+	default:
+		return nil, fmt.Errorf("runtime object is not a recognized configuration: %T", castConfig)
+	}
+
+	if err := config.Normalize(); err != nil {
+		return nil, fmt.Errorf("error normalizing config: %w", err)
+	}
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("error validating config: %w", err)
+	}
+	return config, nil
+}
+
+func (s *DeviceState) getPreparedMigDevice(checkpoint *Checkpoint, deviceName string) *PreparedMigDevice {
+	if checkpoint == nil || checkpoint.V2 == nil {
+		return nil
+	}
+	for _, pc := range checkpoint.V2.PreparedClaims {
+		if pc.CheckpointState != ClaimCheckpointStatePrepareCompleted {
+			continue
+		}
+		for _, group := range pc.PreparedDevices {
+			for _, dev := range group.Devices {
+				if dev.Type() == PreparedMigDeviceType && dev.Mig != nil && dev.Mig.Device != nil && dev.Mig.Device.DeviceName == deviceName {
+					return dev.Mig
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (s *DeviceState) reconcileOnStartup(ctx context.Context, cp *Checkpoint) {
+	if featuregates.Enabled(featuregates.MPSSupport) && s.mpsManager != nil {
+		if err := s.mpsManager.ReconcileOnStartup(ctx, cp); err != nil {
+			klog.Warningf("Failed to reconcile node MPS daemon on startup: %v", err)
+		}
+	}
+}
+
+func isMigDeviceInUseByOtherClaims(checkpoint *Checkpoint, claimUID string, migUUID string, deviceName string) bool {
+	if checkpoint == nil || checkpoint.V2 == nil {
+		return false
+	}
+	for otherUID, otherClaim := range checkpoint.V2.PreparedClaims {
+		if otherUID == claimUID {
+			continue
+		}
+		if otherClaim.CheckpointState != ClaimCheckpointStatePrepareCompleted &&
+			otherClaim.CheckpointState != ClaimCheckpointStatePrepareStarted {
+			continue
+		}
+		for _, devName := range otherClaim.PreparedDevices.GetDeviceNames() {
+			if devName == deviceName {
+				return true
+			}
+		}
+		for _, u := range otherClaim.PreparedDevices.MigDeviceUUIDs() {
+			if u == migUUID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isGpuUUIDInUseByOtherClaims(checkpoint *Checkpoint, claimUID string, gpuUUID string) bool {
+	if checkpoint == nil || checkpoint.V2 == nil {
+		return false
+	}
+	for otherUID, otherClaim := range checkpoint.V2.PreparedClaims {
+		if otherUID == claimUID {
+			continue
+		}
+		if otherClaim.CheckpointState != ClaimCheckpointStatePrepareCompleted &&
+			otherClaim.CheckpointState != ClaimCheckpointStatePrepareStarted {
+			continue
+		}
+		for _, u := range otherClaim.PreparedDevices.GpuUUIDs() {
+			if u == gpuUUID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Make this best-effort for now (do not return an error, but log details).
