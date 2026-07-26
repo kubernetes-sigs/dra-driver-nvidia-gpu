@@ -274,6 +274,51 @@ func (l deviceLib) getCliqueIDLegacy() (string, error) {
 	return "", fmt.Errorf("unexpected return")
 }
 
+// evaluateGpuFabricInfo decides how a single device's fabric registration
+// info contributes to the node clique: use the device's ClusterUuid/CliqueId,
+// skip the device (no-clique fallback), or fail hard.
+//
+// Transitional registration states (NOT_STARTED, IN_PROGRESS) are not errors
+// and must not be fatal: they occur legitimately when a GPU was re-bound to
+// the driver after Fabric Manager finished its initial registration sweep
+// (e.g. after fell-off-the-bus remediation), and for GPUs that are not part
+// of a currently activated partition when Fabric Manager runs in shared
+// NVSwitch mode. Crashing on them disables compute domain support for the
+// whole node; falling back to "no clique" for the device keeps the plugin
+// alive, and the periodic refresh (periodicGPUCliqueIDRefresh) picks up the
+// final state once registration completes.
+//
+// Only a completed registration that reports an error status is terminal:
+// that is a genuine fabric error, and silently degrading to non-fabric mode
+// could mislabel an MNNVL node.
+func evaluateGpuFabricInfo(i int, duid string, info nvml.GpuFabricInfo) (use bool, err error) {
+	if info.State == nvml.GPU_FABRIC_STATE_NOT_SUPPORTED {
+		klog.Infof("no-clique fallback: NVLink fabric not supported by device (device %d/%s, error: GPU_FABRIC_STATE_NOT_SUPPORTED)", i, duid)
+		return false, nil
+	}
+
+	// NVLink fabric is supported - fall back (do not fail) while registration
+	// has not completed.
+	if info.State != nvml.GPU_FABRIC_STATE_COMPLETED {
+		klog.Warningf("no-clique fallback: NVLink fabric registration not completed (device %d/%s): state=%d", i, duid, info.State)
+		return false, nil
+	}
+
+	// Registration completed - check Status field for errors (only valid when State == COMPLETED)
+	if nvml.Return(info.Status) != nvml.SUCCESS {
+		return false, fmt.Errorf("NVLink fabric registration error (device %d/%s): status=%v, refusing to start", i, duid, nvml.Return(info.Status))
+	}
+
+	// Cluster UUID with zero value: treat as MNNVL not supported. Expected
+	// for systems which are NVLink-capable, but not MNNVL-capable.
+	if info.ClusterUuid == [16]uint8{} {
+		klog.Infof("no-clique fallback: cluster UUID is zero, treat as fabric not attached (device %d/%s)", i, duid)
+		return false, nil
+	}
+
+	return true, nil
+}
+
 // getCliqueIDStrict performs strict validation of NVLink fabric state and crashes on errors.
 func (l deviceLib) getCliqueIDStrict() (string, error) {
 	uniqueClusterUUIDs := make(map[string]struct{})
@@ -301,25 +346,11 @@ func (l deviceLib) getCliqueIDStrict() (string, error) {
 			return fmt.Errorf("failed to get GPU fabric info (device %d/%s): %w", i, duid, ret)
 		}
 
-		if info.State == nvml.GPU_FABRIC_STATE_NOT_SUPPORTED {
-			klog.Infof("no-clique fallback: NVLink fabric not supported by device (device %d/%s, error: GPU_FABRIC_STATE_NOT_SUPPORTED)", i, duid)
-			return nil
+		use, err := evaluateGpuFabricInfo(i, duid, info)
+		if err != nil {
+			return err
 		}
-
-		// NVLink fabric is supported - check if registration completed
-		if info.State != nvml.GPU_FABRIC_STATE_COMPLETED {
-			return fmt.Errorf("NVLink fabric not attached (device %d/%s): state=%d, refusing to start", i, duid, info.State)
-		}
-
-		// Registration completed - check Status field for errors (only valid when State == COMPLETED)
-		if nvml.Return(info.Status) != nvml.SUCCESS {
-			return fmt.Errorf("NVLink fabric registration error (device %d/%s): status=%v, refusing to start", i, duid, nvml.Return(info.Status))
-		}
-
-		// Cluster UUID with zero value: treat as MNNVL not supported. Expected
-		// for systems which are NVLink-capable, but not MNNVL-capable.
-		if info.ClusterUuid == [16]uint8{} {
-			klog.Infof("no-clique fallback: cluster UUID is zero, treat as fabric not attached (device %d/%s)", i, duid)
+		if !use {
 			return nil
 		}
 
