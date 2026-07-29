@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	resourceapi "k8s.io/api/resource/v1"
@@ -100,10 +101,21 @@ func healthEventToTaint(monitor deviceHealthMonitor, event *DeviceHealthEvent) *
 // For a full device the returned 3-tuple is the device's uuid and (FullGPUInstanceID) 0xFFFFFFFF for the other two elements.
 type devicePlacementMap map[string]map[uint32]map[uint32]*AllocatableDevice
 
+// monitorHeartbeatInterval is how often the monitor's event loop signals that
+// it is alive. The kubelet reports device health as unknown when it is not
+// refreshed within each device's health check timeout (30 seconds by
+// default), so the driver re-sends its health report on every heartbeat. The
+// heartbeat deliberately originates from the event loop itself: if the loop
+// wedges, the resends stop and the kubelet correctly decays the devices'
+// health to unknown instead of trusting a stale report.
+const monitorHeartbeatInterval = 15 * time.Second
+
 type nvmlDeviceHealthMonitor struct {
 	nvmllib           nvml.Interface
 	eventSet          nvml.EventSet
 	unhealthy         chan *DeviceHealthEvent
+	heartbeat         chan struct{}
+	lastHeartbeat     time.Time
 	deviceByPlacement devicePlacementMap
 	skippedXids       map[uint64]bool
 	wg                sync.WaitGroup
@@ -127,6 +139,7 @@ func newNvmlDeviceHealthMonitor(config *Config, perGPUAllocatable *PerGPUAllocat
 	m := &nvmlDeviceHealthMonitor{
 		nvmllib:           nvdevlib.nvmllib,
 		unhealthy:         make(chan *DeviceHealthEvent, len(all)),
+		heartbeat:         make(chan struct{}, 1),
 		deviceByPlacement: getDevicePlacementMap(all),
 		skippedXids:       xidsToSkip(config.flags.additionalXidsToIgnore),
 	}
@@ -219,6 +232,10 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 			klog.V(6).Info("Stopping event-driven GPU health monitor...")
 			return
 		default:
+			// Every pass of this loop, whether an event arrived or the wait
+			// timed out, proves the monitor is alive.
+			m.beat()
+
 			event, ret := m.eventSet.Wait(5000) // timeout in 5000 ms.
 			if ret == nvml.ERROR_TIMEOUT {
 				continue
@@ -273,6 +290,26 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 
 func (m *nvmlDeviceHealthMonitor) Unhealthy() <-chan *DeviceHealthEvent {
 	return m.unhealthy
+}
+
+// beat signals liveness of the event loop at most once per
+// monitorHeartbeatInterval. Only called from the run goroutine.
+func (m *nvmlDeviceHealthMonitor) beat() {
+	if time.Since(m.lastHeartbeat) < monitorHeartbeatInterval {
+		return
+	}
+	m.lastHeartbeat = time.Now()
+	select {
+	case m.heartbeat <- struct{}{}:
+	default:
+	}
+}
+
+// Heartbeat signals that the monitor's event loop is alive. The driver
+// re-sends its current health report on each heartbeat to keep the kubelet's
+// health data fresh.
+func (m *nvmlDeviceHealthMonitor) Heartbeat() <-chan struct{} {
+	return m.heartbeat
 }
 
 // sendHealthEventForAllDevices aggregates every device across all GPUs into a
