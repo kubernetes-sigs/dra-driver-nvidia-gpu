@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/urfave/cli/v2"
@@ -201,6 +202,7 @@ func admitResourceClaimParameters(ar admissionv1.AdmissionReview) *admissionv1.A
 	klog.V(2).Info("admitting resource claim parameters")
 
 	var deviceConfigs []resourceapi.DeviceClaimConfiguration
+	var deviceRequests []resourceapi.DeviceRequest
 	var specPath string
 
 	switch ar.Request.Resource {
@@ -216,6 +218,7 @@ func admitResourceClaimParameters(ar admissionv1.AdmissionReview) *admissionv1.A
 			}
 		}
 		deviceConfigs = claim.Spec.Devices.Config
+		deviceRequests = claim.Spec.Devices.Requests
 		specPath = "spec"
 	case resourceClaimTemplateResourceV1, resourceClaimTemplateResourceV1Beta1, resourceClaimTemplateResourceV1Beta2:
 		claimTemplate, err := extractResourceClaimTemplate(ar)
@@ -229,6 +232,7 @@ func admitResourceClaimParameters(ar admissionv1.AdmissionReview) *admissionv1.A
 			}
 		}
 		deviceConfigs = claimTemplate.Spec.Spec.Devices.Config
+		deviceRequests = claimTemplate.Spec.Spec.Devices.Requests
 		specPath = "spec.spec"
 	default:
 		msg := fmt.Sprintf("expected resource to be one of the supported versions for resourceclaims or resourceclaimtemplates, got %s", ar.Request.Resource)
@@ -240,6 +244,8 @@ func admitResourceClaimParameters(ar admissionv1.AdmissionReview) *admissionv1.A
 			},
 		}
 	}
+
+	adminRequests := requestsWithAdminAccess(deviceRequests)
 
 	var errs []error
 	for configIndex, config := range deviceConfigs {
@@ -280,6 +286,21 @@ func admitResourceClaimParameters(ar admissionv1.AdmissionReview) *admissionv1.A
 		// Validate the config to ensure its integrity
 		if err := configInterface.Validate(); err != nil {
 			errs = append(errs, fmt.Errorf("object at %s is invalid: %w", fieldPath, err))
+			continue
+		}
+
+		// Reject sharing settings that apply to an adminAccess request. The kubelet
+		// plugin enforces the same rule at Prepare() time (see
+		// validateNoSharingWithAdminAccess in cmd/gpu-kubelet-plugin); checking here
+		// as well surfaces the error at admission time instead of at pod start.
+		//
+		// Only on CREATE: spec is immutable on both objects, so an object admitted
+		// before this check existed can never be brought into compliance, and failing
+		// its UPDATEs would block finalizer removal and wedge deletion.
+		if ar.Request.Operation == admissionv1.Create {
+			if err := validateNoSharingWithAdminAccess(configInterface, config.Requests, adminRequests); err != nil {
+				errs = append(errs, fmt.Errorf("object at %s is invalid: %w", fieldPath, err))
+			}
 		}
 	}
 
@@ -301,4 +322,75 @@ func admitResourceClaimParameters(ar admissionv1.AdmissionReview) *admissionv1.A
 	return &admissionv1.AdmissionResponse{
 		Allowed: true,
 	}
+}
+
+// requestsWithAdminAccess returns the names of all requests in the claim spec that
+// set adminAccess, in spec order. AdminAccess only exists on exact requests:
+// prioritized-list subrequests (firstAvailable) cannot set it.
+func requestsWithAdminAccess(requests []resourceapi.DeviceRequest) []string {
+	var admin []string
+	for _, r := range requests {
+		if r.Exactly != nil && r.Exactly.AdminAccess != nil && *r.Exactly.AdminAccess {
+			admin = append(admin, r.Name)
+		}
+	}
+	return admin
+}
+
+// validateNoSharingWithAdminAccess rejects a sharing configuration (TimeSlicing or
+// MPS) that applies to a request marked adminAccess. Such a claim is meant to be a
+// read-only observer of a device, but sharing settings are device-global: applying
+// them on Prepare, and tearing them down on Unprepare, would modify state that the
+// workload owning the device depends on. The kubelet plugin rejects the combination
+// at Prepare() time; this check reports the same error at admission time.
+//
+// Only configs that name their requests explicitly are checked. A config with an
+// empty request list applies to every request in the claim, but the kubelet plugin
+// narrows it further by device type, which the webhook cannot do from the claim spec
+// alone: rejecting on a name match that the plugin would never make would deny valid
+// claims. The plugin catches that case at Prepare() time instead.
+//
+// adminRequests only ever contains names of exact requests, so references to
+// subrequests ("<request>/<subrequest>") can never match, which is correct:
+// subrequests cannot set adminAccess.
+func validateNoSharingWithAdminAccess(config nvapi.Interface, targetRequests []string, adminRequests []string) error {
+	if len(adminRequests) == 0 || len(targetRequests) == 0 {
+		return nil
+	}
+
+	var sharing nvapi.Sharing
+	switch castConfig := config.(type) {
+	case *nvapi.GpuConfig:
+		sharing = castConfig.Sharing
+	case *nvapi.MigDeviceConfig:
+		sharing = castConfig.Sharing
+	default:
+		return nil
+	}
+
+	var strategy string
+	switch {
+	case sharing.IsTimeSlicing():
+		strategy = nvapi.TimeSlicingStrategy
+	case sharing.IsMps():
+		strategy = nvapi.MpsStrategy
+	default:
+		return nil
+	}
+
+	offending := ""
+	for _, t := range targetRequests {
+		if slices.Contains(adminRequests, t) {
+			offending = t
+			break
+		}
+	}
+	if offending == "" {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%s sharing configuration is not allowed for request %q: the request sets adminAccess, and sharing settings apply to the whole device",
+		strategy, offending,
+	)
 }

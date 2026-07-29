@@ -385,6 +385,164 @@ func TestResourceClaimValidatingWebhook(t *testing.T) {
 			expectedAllowed: false,
 			expectedMessage: `1 configs failed to validate: object at spec.spec.devices.config[0].opaque.parameters is invalid: "TimeSlicing" is selected as the GPU sharing strategy, but the "TimeSlicingSettings" feature gate is not enabled`,
 		},
+		// adminAccess + sharing tests: a sharing configuration must not apply to a
+		// request that sets adminAccess (issue #1280).
+		"TimeSlicing sharing targeting an adminAccess request is rejected": {
+			featureGates: map[string]bool{
+				string(featuregates.TimeSlicingSettings): true,
+			},
+			admissionReview: admissionReviewWithObject(
+				resourceClaimWithRequestsAndConfigs(
+					resourceClaimResourceV1Beta1,
+					[]resourceapi.DeviceRequest{
+						deviceRequest("monitor", true),
+					},
+					[]resourceapi.DeviceClaimConfiguration{
+						gpuDeviceConfig(&configapi.GpuConfig{
+							Sharing: &configapi.GpuSharing{
+								Strategy: configapi.TimeSlicingStrategy,
+							},
+						}, "monitor"),
+					},
+				),
+			),
+			expectedAllowed: false,
+			expectedMessage: `1 configs failed to validate: object at spec.devices.config[0].opaque.parameters is invalid: TimeSlicing sharing configuration is not allowed for request "monitor": the request sets adminAccess, and sharing settings apply to the whole device`,
+		},
+		// A config with no request names applies to every request in the claim, but
+		// the kubelet plugin narrows it further by device type and the webhook cannot
+		// see device types. Admitting it here and letting Prepare() reject it is the
+		// conservative choice: the opposite would deny claims the plugin would accept.
+		"MPS sharing applying to all requests is admitted even when a request sets adminAccess": {
+			featureGates: map[string]bool{
+				string(featuregates.MPSSupport): true,
+			},
+			admissionReview: admissionReviewWithObject(
+				resourceClaimWithRequestsAndConfigs(
+					resourceClaimResourceV1Beta1,
+					[]resourceapi.DeviceRequest{
+						deviceRequest("workload", false),
+						deviceRequest("monitor", true),
+					},
+					[]resourceapi.DeviceClaimConfiguration{
+						gpuDeviceConfig(&configapi.GpuConfig{
+							Sharing: &configapi.GpuSharing{
+								Strategy: configapi.MpsStrategy,
+							},
+						}),
+					},
+				),
+			),
+			expectedAllowed: true,
+		},
+		// spec is immutable on both objects, so an object admitted before this check
+		// existed can never comply. Failing its UPDATEs would block finalizer removal.
+		"sharing targeting an adminAccess request is admitted on UPDATE": {
+			featureGates: map[string]bool{
+				string(featuregates.TimeSlicingSettings): true,
+			},
+			admissionReview: asUpdate(admissionReviewWithObject(
+				resourceClaimWithRequestsAndConfigs(
+					resourceClaimResourceV1Beta1,
+					[]resourceapi.DeviceRequest{
+						deviceRequest("monitor", true),
+					},
+					[]resourceapi.DeviceClaimConfiguration{
+						gpuDeviceConfig(&configapi.GpuConfig{
+							Sharing: &configapi.GpuSharing{
+								Strategy: configapi.TimeSlicingStrategy,
+							},
+						}, "monitor"),
+					},
+				),
+			)),
+			expectedAllowed: true,
+		},
+		"sharing targeting only workload requests is allowed alongside an adminAccess request": {
+			featureGates: map[string]bool{
+				string(featuregates.TimeSlicingSettings): true,
+			},
+			admissionReview: admissionReviewWithObject(
+				resourceClaimWithRequestsAndConfigs(
+					resourceClaimResourceV1Beta1,
+					[]resourceapi.DeviceRequest{
+						deviceRequest("workload", false),
+						deviceRequest("monitor", true),
+					},
+					[]resourceapi.DeviceClaimConfiguration{
+						gpuDeviceConfig(&configapi.GpuConfig{
+							Sharing: &configapi.GpuSharing{
+								Strategy: configapi.TimeSlicingStrategy,
+							},
+						}, "workload"),
+					},
+				),
+			),
+			expectedAllowed: true,
+		},
+		"adminAccess request without sharing config is allowed": {
+			admissionReview: admissionReviewWithObject(
+				resourceClaimWithRequestsAndConfigs(
+					resourceClaimResourceV1Beta1,
+					[]resourceapi.DeviceRequest{
+						deviceRequest("monitor", true),
+					},
+					[]resourceapi.DeviceClaimConfiguration{
+						gpuDeviceConfig(&configapi.GpuConfig{}),
+					},
+				),
+			),
+			expectedAllowed: true,
+		},
+		// A prioritized-list request has no Exactly section, so it can never set
+		// adminAccess, and a config that targets one of its subrequests
+		// ("<request>/<subrequest>") must not be matched against the adminAccess
+		// request names.
+		"sharing targeting a subrequest is allowed alongside an adminAccess request": {
+			featureGates: map[string]bool{
+				string(featuregates.TimeSlicingSettings): true,
+			},
+			admissionReview: admissionReviewWithObject(
+				resourceClaimWithRequestsAndConfigs(
+					resourceClaimResourceV1Beta1,
+					[]resourceapi.DeviceRequest{
+						deviceRequestWithSubRequest("workload", "big"),
+						deviceRequest("monitor", true),
+					},
+					[]resourceapi.DeviceClaimConfiguration{
+						gpuDeviceConfig(&configapi.GpuConfig{
+							Sharing: &configapi.GpuSharing{
+								Strategy: configapi.TimeSlicingStrategy,
+							},
+						}, "workload/big"),
+					},
+				),
+			),
+			expectedAllowed: true,
+		},
+		"TimeSlicing sharing targeting an adminAccess request in ResourceClaimTemplate is rejected": {
+			featureGates: map[string]bool{
+				string(featuregates.TimeSlicingSettings): true,
+			},
+			admissionReview: admissionReviewWithObject(
+				resourceClaimTemplateWithRequestsAndConfigs(
+					resourceClaimTemplateResourceV1Beta1,
+					[]resourceapi.DeviceRequest{
+						deviceRequest("monitor", true),
+					},
+					[]resourceapi.DeviceClaimConfiguration{
+						gpuDeviceConfig(&configapi.GpuConfig{
+							Sharing: &configapi.GpuSharing{
+								Strategy: configapi.TimeSlicingStrategy,
+							},
+						}, "monitor"),
+					},
+				),
+			),
+			expectedAllowed: false,
+			expectedMessage: `1 configs failed to validate: object at spec.spec.devices.config[0].opaque.parameters is invalid: TimeSlicing sharing configuration is not allowed for request "monitor": the request sets adminAccess, and sharing settings apply to the whole device`,
+		},
+
 		"MpsStrategy rejected in ResourceClaimTemplate when MPSSupport feature gate is disabled": {
 			featureGates: map[string]bool{
 				string(featuregates.MPSSupport): false,
@@ -465,7 +623,8 @@ func admissionReviewWithObject(obj runtime.Object) *admissionv1.AdmissionReview 
 
 	requestedAdmissionReview := &admissionv1.AdmissionReview{
 		Request: &admissionv1.AdmissionRequest{
-			Resource: resource,
+			Resource:  resource,
+			Operation: admissionv1.Create,
 			Object: runtime.RawExtension{
 				Object: obj,
 			},
@@ -473,6 +632,96 @@ func admissionReviewWithObject(obj runtime.Object) *admissionv1.AdmissionReview 
 	}
 	requestedAdmissionReview.SetGroupVersionKind(admissionv1.SchemeGroupVersion.WithKind("AdmissionReview"))
 	return requestedAdmissionReview
+}
+
+// asUpdate rewrites an admission review to look like an UPDATE of an existing
+// object rather than a CREATE.
+func asUpdate(ar *admissionv1.AdmissionReview) *admissionv1.AdmissionReview {
+	ar.Request.Operation = admissionv1.Update
+	return ar
+}
+
+// deviceRequest builds a v1beta1 device request. In v1beta1 adminAccess is a flat
+// field on the request; the webhook's conversion to v1 moves it under `exactly`.
+func deviceRequest(name string, adminAccess bool) resourceapi.DeviceRequest {
+	r := resourceapi.DeviceRequest{
+		Name:            name,
+		DeviceClassName: DriverName,
+	}
+	if adminAccess {
+		r.AdminAccess = ptr.To(true)
+	}
+	return r
+}
+
+// deviceRequestWithSubRequest builds a prioritized-list request. Such a request
+// carries its details in FirstAvailable rather than at the top level, so after
+// conversion to v1 its Exactly section is nil and it cannot set adminAccess.
+func deviceRequestWithSubRequest(name, subRequestName string) resourceapi.DeviceRequest {
+	return resourceapi.DeviceRequest{
+		Name: name,
+		FirstAvailable: []resourceapi.DeviceSubRequest{
+			{
+				Name:            subRequestName,
+				DeviceClassName: DriverName,
+				AllocationMode:  resourceapi.DeviceAllocationModeExactCount,
+				Count:           1,
+			},
+		},
+	}
+}
+
+// gpuDeviceConfig wraps a GpuConfig in a DeviceClaimConfiguration applying to the
+// given request names (none means "applies to all requests").
+func gpuDeviceConfig(gpuConfig *configapi.GpuConfig, requests ...string) resourceapi.DeviceClaimConfiguration {
+	gpuConfig.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   configapi.GroupName,
+		Version: configapi.Version,
+		Kind:    "GpuConfig",
+	})
+	return resourceapi.DeviceClaimConfiguration{
+		Requests: requests,
+		DeviceConfiguration: resourceapi.DeviceConfiguration{
+			Opaque: &resourceapi.OpaqueDeviceConfiguration{
+				Driver: DriverName,
+				Parameters: runtime.RawExtension{
+					Object: gpuConfig,
+				},
+			},
+		},
+	}
+}
+
+func resourceClaimWithRequestsAndConfigs(gvr metav1.GroupVersionResource, requests []resourceapi.DeviceRequest, configs []resourceapi.DeviceClaimConfiguration) *resourceapi.ResourceClaim {
+	return &resourceapi.ResourceClaim{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: gvr.Group + "/" + gvr.Version,
+			Kind:       "ResourceClaim",
+		},
+		Spec: resourceapi.ResourceClaimSpec{
+			Devices: resourceapi.DeviceClaim{
+				Requests: requests,
+				Config:   configs,
+			},
+		},
+	}
+}
+
+func resourceClaimTemplateWithRequestsAndConfigs(gvr metav1.GroupVersionResource, requests []resourceapi.DeviceRequest, configs []resourceapi.DeviceClaimConfiguration) *resourceapi.ResourceClaimTemplate {
+	return &resourceapi.ResourceClaimTemplate{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: gvr.Group + "/" + gvr.Version,
+			Kind:       "ResourceClaimTemplate",
+		},
+		Spec: resourceapi.ResourceClaimTemplateSpec{
+			Spec: resourceapi.ResourceClaimSpec{
+				Devices: resourceapi.DeviceClaim{
+					Requests: requests,
+					Config:   configs,
+				},
+			},
+		},
+	}
 }
 
 func resourceClaimWithGpuConfigs(gvr metav1.GroupVersionResource, gpuConfigs ...*configapi.GpuConfig) *resourceapi.ResourceClaim {
