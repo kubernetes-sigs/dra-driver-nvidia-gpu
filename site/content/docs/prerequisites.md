@@ -80,6 +80,9 @@ To enable it:
 2. `nvidia-imex-ctl` must be present under the driver root alongside `nvidia-smi` (it ships with the `nvidia-imex` package).
 3. If a non-default socket path is used, set `resources.computeDomains.imex.hostSocketPath` (Helm value, plumbed to the kubelet plugin as `IMEX_HOST_SOCKET_PATH`) to match. It defaults to `/etc/nvidia-imex/imex_ctrl.sock`.
 
+After installation, follow [Validate host-managed IMEX](guides/compute-domain-workloads.md#validate-host-managed-imex)
+to verify the created objects, channel injection, and Prepare retry behavior.
+
 ## Install prerequisites with NVIDIA GPU Operator
 
 The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/index.html) is a Kubernetes operator that automates the deployment and lifecycle management of all NVIDIA software components needed to provision and monitor GPUs in a cluster.

@@ -20,6 +20,10 @@ The `resources.computeDomains.imex.mode` Helm value determines who manages the `
 
 Host-managed mode currently supports domain isolation only.
 All ComputeDomains that use the same host IMEX domain share channel 0.
+Because host-managed mode has no per-ComputeDomain daemon pods, the controller
+disables its `IMEXDaemonsWithDNSNames` and `ComputeDomainCliques` behaviors and
+does not create `ComputeDomainClique` objects. Those driver-managed readiness
+mechanisms do not report the health of the host service.
 For service and socket configuration, see [Host-managed IMEX](../prerequisites.md#host-managed-imex).
 
 ## How driver-managed mode works
