@@ -170,9 +170,13 @@ are illustrative — confirm them on your own cluster.
 
 ## NUMA locality
 
-The GPU kubelet plugin publishes the standard `resource.kubernetes.io/numaNode` attribute for full GPUs, MIG devices, and VFIO devices when the PCI NUMA node is available and non-negative.
+The GPU kubelet plugin publishes the standard
+`resource.kubernetes.io/numaNode` attribute for full GPUs, MIG devices, and
+VFIO devices when the PCI NUMA node is available and non-negative.
+
 By default, the attribute uses the scalar `int` form shown in the examples.
-When you enable both the driver and Kubernetes `DRAListTypeAttributes` feature gates, the attribute uses a one-element `ints` list:
+When you enable both the driver and Kubernetes `DRAListTypeAttributes` feature
+gates, the ResourceSlice serialization changes to a one-element `ints` list:
 
 ```yaml
 resource.kubernetes.io/numaNode:
@@ -180,8 +184,83 @@ resource.kubernetes.io/numaNode:
   - 0
 ```
 
-The GPU kubelet plugin omits the attribute when it cannot determine locality.
-Use `resource.kubernetes.io/numaNode` in a `matchAttribute` constraint when devices in a multi-device claim must have compatible NUMA locality.
+This representation change matters when inspecting or parsing ResourceSlices,
+but it does not change the attribute name that you specify in ResourceClaims,
+like the following example:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: same-numa-gpus
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpus
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          allocationMode: ExactCount
+          count: 2
+      constraints:
+      - requests:
+        - gpus
+        matchAttribute: resource.kubernetes.io/numaNode
+```
+
+This constraint requires all devices selected for `gpus` to have the same
+published NUMA value. It uses the same
+`resource.kubernetes.io/numaNode` spelling for both the scalar `int` and
+one-element `ints` representations.
+
+### Troubleshooting: verify the NUMA value
+
+List each GPU device with its node, PCI bus ID, and published NUMA value:
+
+```bash
+kubectl get resourceslices -o json | jq -r '
+  (
+    ["NODE", "DEVICE", "PCI_BUS_ID", "PUBLISHED_NUMA"],
+    (
+      .items[]
+      | select(.spec.driver == "gpu.nvidia.com")
+      | .spec.nodeName as $node
+      | .spec.devices[]
+      | .basic.attributes as $attrs
+      | select($attrs["resource.kubernetes.io/pciBusID"] != null)
+      | ($attrs["resource.kubernetes.io/numaNode"] // {}) as $numa
+      | [
+          $node,
+          .name,
+          $attrs["resource.kubernetes.io/pciBusID"].string,
+          (
+            if $numa.int != null then ($numa.int | tostring)
+            elif $numa.ints != null then ($numa.ints | join(","))
+            else "omitted"
+            end
+          )
+        ]
+    )
+  )
+  | @tsv'
+```
+
+For one row, use its `NODE` and `PCI_BUS_ID` values to read the host PCI
+device's NUMA node:
+
+```bash
+NODE=<node-from-output>
+BDF=<pci-bus-id-from-output>
+
+kubectl debug "node/${NODE}" -it --image=ubuntu -- chroot /host \
+  cat "/sys/bus/pci/devices/${BDF}/numa_node"
+```
+
+A non-negative host value must match `PUBLISHED_NUMA`. MIG devices report the
+locality of their parent GPU and therefore use the parent's PCI bus ID. If the
+host reports `-1`, the PCI device has no NUMA locality, or discovery is
+otherwise unavailable, the GPU kubelet plugin omits
+`resource.kubernetes.io/numaNode`; it does not publish `-1`.
 
 ## Fabric Manager partition attributes
 
