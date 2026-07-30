@@ -1,6 +1,6 @@
 ---
-title: MPS
-linkTitle: MPS
+title: GPU sharing with Multi-Process Service
+linkTitle: Multi-Process Service
 weight: 45
 description: Share a single GPU between multiple containers using NVIDIA Multi-Process Service (MPS).
 ---
@@ -32,8 +32,8 @@ available gates and their constraints.
 
 - The DRA Driver for NVIDIA GPUs must be installed. See [Installation](../install.md).
 - The `MPSSupport` feature gate must be enabled. See [Enabling the feature](#enabling-the-feature).
-- `MPSSupport` cannot be enabled at the same time as `DynamicMIG` or
-  `NVMLDeviceHealthCheck`. These combinations are mutually exclusive.
+- `MPSSupport` cannot be enabled at the same time as `DynamicMIG`.
+  These combinations are mutually exclusive.
 - To use multi-user mode (`multiUser: true`), the GPUs must be Volta
   architecture or newer.
 

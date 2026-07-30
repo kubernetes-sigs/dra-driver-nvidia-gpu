@@ -39,6 +39,8 @@ are illustrative — confirm them on your own cluster.
 
 ## Full GPU (type: gpu)
 
+<!-- gpuModuleID with ID, cmd/gpu-kubelet-plugin/deviceinfo.go:236 -->
+
 ```yaml
 - attributes:
     addressingMode:
@@ -53,6 +55,10 @@ are illustrative — confirm them on your own cluster.
       version: 13.0.0              # CUDA driver version
     driverVersion:
       version: 580.126.20          # NVIDIA driver version
+    gpuModuleID:
+      int: 1                        # Fabric Manager GPU module ID, when enabled
+    partition2:
+      int: 4                        # ID of a reported size-2 FM partition
     productName:
       string: NVIDIA A100-PCIE-40GB # product name reported by NVML
     resource.kubernetes.io/pciBusID:
@@ -130,7 +136,7 @@ are illustrative — confirm them on your own cluster.
 - attributes:
     deviceID:
       string: "0x20b0"              # PCI device ID
-    gpuModuleId:
+    gpuModuleID:
       int: 1                         # Fabric Manager GPU module ID, when enabled
     iommuFDEnabled:
       bool: true                    # whether the IOMMUFD backend is enabled
@@ -179,18 +185,24 @@ Use `resource.kubernetes.io/numaNode` in a `matchAttribute` constraint when devi
 
 ## Fabric Manager partition attributes
 
-When you enable `FabricManagerPartitioning`, the GPU kubelet plugin publishes Fabric Manager attributes on VFIO devices when Fabric Manager reports the corresponding data.
+When you enable `FabricManagerPartitioning`, the GPU kubelet plugin publishes
+Fabric Manager attributes on full-GPU and VFIO devices when Fabric Manager
+reports the corresponding data.
+MIG devices do not receive these attributes.
 
 | Attribute | Meaning |
 |---|---|
-| `gpuModuleId` | Physical GPU module identifier reported by NVML and used by Fabric Manager. |
-| `partition1` | Fabric Manager partition ID for the one-GPU partition that contains this GPU. |
-| `partition2` | Fabric Manager partition ID for the two-GPU partition that contains this GPU. |
-| `partition4` | Fabric Manager partition ID for the four-GPU partition that contains this GPU. |
-| `partition8` | Fabric Manager partition ID for the eight-GPU partition that contains this GPU. |
+| `gpuModuleID` | Physical GPU module identifier reported by NVML and used by Fabric Manager. |
+| `partitionN` | Fabric Manager partition ID for the N-GPU partition that contains this GPU; for example, `partition2` identifies a reported two-GPU partition. |
 
-The GPU kubelet plugin emits each `partitionN` attribute only when Fabric Manager reports a partition of that size containing the GPU.
-To request two VFIO GPUs from the same two-GPU Fabric Manager partition, add this constraint to the claim:
+The GPU kubelet plugin emits each `partitionN` attribute only when Fabric
+Manager reports a partition of that size containing the GPU.
+The attribute name uses the exact spelling `gpuModuleID`, including the
+uppercase `ID`.
+
+To request two full GPUs or VFIO GPUs from the same two-GPU Fabric Manager
+partition, set the request count to `2` and add this constraint to the same
+claim:
 
 ```yaml
 constraints:
@@ -202,11 +214,17 @@ constraints:
 You can also use a CEL selector for a known node-local module identifier:
 
 ```text
-device.attributes['gpu.nvidia.com'].gpuModuleId == 1
+device.attributes['gpu.nvidia.com'].gpuModuleID == 1
 ```
 
-Partition IDs and module IDs describe the local Fabric Manager topology, so use a `matchAttribute` constraint when you need portable co-placement instead of selecting a hardcoded partition ID.
-See [`FabricManagerPartitioning`](feature-gates.md) for the gate and its prerequisites.
+Partition IDs and module IDs describe the local Fabric Manager topology, so use
+a `matchAttribute` constraint when you need portable co-placement instead of
+selecting a hardcoded partition ID.
+The allocated physical-GPU set must exactly match the reported partition when
+the driver prepares the claim.
+Refer to
+[Fabric Manager partitioning](../guides/gpu-allocation/fabric-manager-partitioning.md)
+for prerequisites and complete full-GPU and VFIO examples.
 
 ## Attribute naming: bare keys vs CEL domain
 

@@ -19,7 +19,7 @@ This guide uses Alpha feature gates that are disabled by default:
 |---|---|---|---|
 | `PassthroughSupport` | Alpha | `false` | Enables VFIO passthrough allocation. |
 | `DeviceMetadata` | Alpha | `false` | Exposes the VFIO API device required by KubeVirt. |
-| `FabricManagerPartitioning` | Alpha | `false` | Optionally manages Fabric Manager partitions for supported multi-GPU VFIO claims. |
+| `FabricManagerPartitioning` | Alpha | `false` | Optionally constrains VFIO claims to partitions managed by Fabric Manager. |
 
 Refer to the [feature gates reference](../../reference/feature-gates.md) and [constraints](../../reference/feature-gates.md#constraints) for details.
 
@@ -75,19 +75,19 @@ Set `nvidiaDriverRoot` based on how the NVIDIA driver is installed on your nodes
 - `/run/nvidia/driver` for a GPU Operator-managed driver.
 - `/home/kubernetes/bin/nvidia` for a GKE-managed driver.
 
-### Optional Fabric Manager partitioning
+### Optional: Fabric Manager partitioning
 
-Fabric Manager partitioning has the following requirements and limitations:
+On supported HGX and single-node NVL systems, Fabric Manager partitioning is an
+optional topology layer for VFIO claims.
+It also supports full-GPU claims and does not depend on `PassthroughSupport`.
+This guide already enables `PassthroughSupport` because the base resource is
+VFIO.
 
-- Enable both `PassthroughSupport` and `FabricManagerPartitioning`.
-- Use a supported HGX or single-node NVL system with an NVSwitch-managed fabric.
-- Run Fabric Manager on the node and configure it to report the supported partition topology through its management interface.
-- Make the Fabric Manager client library available under `nvidiaDriverRoot` and keep the default `/run/nvidia-fabricmanager/socket` path available relative to that root.
-- Use the feature only for VFIO devices.
-- Apply at most one `VfioDeviceConfig` group in each `ResourceClaim`.
-
-The initial implementation does not manage multi-node Fabric Manager partitions.
-Designate and label nodes for Fabric Manager VFIO workloads so that other GPU services do not use the GPUs while the claim is prepared.
+Before enabling the gate, configure Fabric Manager with `FABRIC_MODE=1` and
+update every applicable VFIO claim to select one complete published partition.
+Refer to [Fabric Manager partitioning](fabric-manager-partitioning.md) for
+platform prerequisites, claim migration, topology inspection, and
+troubleshooting.
 
 Enable the optional gate on the existing Helm release:
 
@@ -99,9 +99,13 @@ helm upgrade -i dra-driver-nvidia-gpu oci://registry.k8s.io/dra-driver-nvidia/ch
     --set featureGates.FabricManagerPartitioning=true
 ```
 
-With the gate enabled, VFIO ResourceSlice devices publish `gpuModuleId` and the available `partition1`, `partition2`, `partition4`, and `partition8` attributes.
-The GPU kubelet plugin activates the exact Fabric Manager partition before it binds the selected GPUs to VFIO and deactivates the partition after the GPUs return to the NVIDIA driver.
-For the attribute definitions, see [ResourceSlice device attributes](../../reference/resourceslice-attributes.md#fabric-manager-partition-attributes).
+With the gate enabled, VFIO ResourceSlice devices publish `gpuModuleID` and
+the `partitionN` attributes reported for each physical GPU.
+The GPU kubelet plugin activates the exact partition before binding the
+selected GPUs to VFIO and deactivates it after the GPUs return to the NVIDIA
+driver.
+For the attribute definitions, refer to
+[ResourceSlice device attributes](../../reference/resourceslice-attributes.md#fabric-manager-partition-attributes).
 
 Verify that the driver registered the expected `DeviceClass` and advertised node resources:
 
@@ -194,7 +198,8 @@ Keep `backendPolicy: LegacyOnly` for KubeVirt, which does not support the IOMMUF
 
 ### Select a Fabric Manager partition
 
-For a two-GPU VM on a Fabric Manager node, change the request count to `2` and require both GPUs to share a size-two partition:
+For a two-GPU VM on a Fabric Manager node, change the request count to `2` and
+require both GPUs to share a size-two partition:
 
 ```yaml
 devices:
@@ -211,8 +216,11 @@ devices:
 ```
 
 The scheduler selects two VFIO GPUs with the same `partition2` value.
-Claim preparation fails if the selected GPU set does not exactly match a partition reported by Fabric Manager.
+Claim preparation fails if the selected GPU set does not exactly match a
+partition reported by Fabric Manager.
 Keep a single `VfioDeviceConfig` block for all VFIO requests in the claim.
+For why the count and constraint must be used together, refer to
+[Request a VFIO partition](fabric-manager-partitioning.md#request-a-vfio-partition).
 
 ## Troubleshooting
 
