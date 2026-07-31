@@ -27,10 +27,12 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	coreclientset "k8s.io/client-go/kubernetes"
 	drametadatav1alpha1 "k8s.io/dynamic-resource-allocation/api/metadata/v1alpha1"
+	drametadatav1beta1 "k8s.io/dynamic-resource-allocation/api/metadata/v1beta1"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
@@ -49,6 +51,10 @@ type deviceHealthMonitor interface {
 	Start(context.Context) error
 	Stop()
 	Unhealthy() <-chan *DeviceHealthEvent
+	// Heartbeat signals that the monitor's event loop is alive; the driver
+	// re-sends its health report to the kubelet on each heartbeat so the
+	// kubelet's health data does not go stale.
+	Heartbeat() <-chan struct{}
 	// Allows the driver to query the HealthMonitor's health policy
 	IsEventNonFatal(event *DeviceHealthEvent) bool
 }
@@ -61,13 +67,22 @@ type driver struct {
 	healthcheck         *healthcheck
 	deviceHealthMonitor deviceHealthMonitor
 	wg                  sync.WaitGroup
+	nodeName            string
+	// deviceHealth tracks the per-device health reported to the kubelet
+	// through WatchHealthStatus (see device_health_status.go).
+	healthMu     sync.RWMutex
+	deviceHealth map[string]kubeletplugin.DeviceHealth
+	healthSubMu  sync.RWMutex
+	// healthSubscribers holds one capacity-one notification channel per
+	// pending WatchHealthStatus call (see notifyHealthSubscribers).
+	healthSubscribers []chan struct{}
 	// Idicates whether to use separate ResourceSlices for SharedCounters and
 	// Devices (required for k8s 1.35+) or combined SharedCounters and Devices
 	// in the same slice (required for k8s 1.34).
 	useSplitResourceSlices bool
 }
 
-func NewDriver(ctx context.Context, config *Config) (*driver, error) {
+func NewDriver(ctx context.Context, config *Config) (_ *driver, retErr error) {
 	state, err := NewDeviceState(ctx, config)
 	if err != nil {
 		return nil, err
@@ -126,6 +141,35 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		state:                  state,
 		pulock:                 flock.NewFlock(puLockPath),
 		useSplitResourceSlices: useSplitSlices,
+		nodeName:               config.flags.nodeName,
+	}
+	// Initialize and start the NVML health monitor before seeding the health
+	// map, so that the seed describes devices which an already-running
+	// monitor watches. Events which fire before the consumer goroutine
+	// starts below queue in the monitor's event channel.
+	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
+		deviceHealthMonitor, err := newNvmlDeviceHealthMonitor(config, state.perGPUAllocatable, state.nvdevlib)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create NVML device health monitor: %w", err)
+		}
+		if err := deviceHealthMonitor.Start(ctx); err != nil {
+			return nil, fmt.Errorf("failed to start device health monitor: %w", err)
+		}
+		driver.deviceHealthMonitor = deviceHealthMonitor
+		// Stop the monitor again if any of the later setup steps fail, so
+		// that error returns do not leak its run goroutine and NVML state.
+		defer func() {
+			if retErr != nil {
+				deviceHealthMonitor.Stop()
+			}
+		}()
+
+		// Seed the device health map after the monitor is initialized and
+		// before Start(): the kubelet may subscribe to health updates as
+		// soon as the plugin registers, and the initial snapshot comes from
+		// this map. Without the feature gate nothing reads the map, so
+		// seeding stays inside this block.
+		driver.initDeviceHealth()
 	}
 
 	opts := []kubeletplugin.Option{
@@ -135,12 +179,18 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		kubeletplugin.Serialize(false),
 		kubeletplugin.RegistrarDirectoryPath(config.flags.kubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
+		// KEP-4680: device health is reported to the kubelet only when the
+		// NVML health monitor is enabled; otherwise the DRAResourceHealth
+		// service is not advertised.
+		kubeletplugin.HealthService(featuregates.Enabled(featuregates.NVMLDeviceHealthCheck)),
 	}
 	// KEP-5304: Enable Device Metadata support for the kubelet plugin implementation.
 	// See: https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api
 	if featuregates.Enabled(featuregates.DeviceMetadata) {
-		opts = append(opts, kubeletplugin.EnableDeviceMetadata(true))
-		opts = append(opts, kubeletplugin.MetadataVersions(drametadatav1alpha1.SchemeGroupVersion))
+		opts = append(opts, kubeletplugin.EnableDeviceMetadata(true, []schema.GroupVersion{
+			drametadatav1beta1.SchemeGroupVersion,
+			drametadatav1alpha1.SchemeGroupVersion,
+		}))
 	}
 	helper, err := kubeletplugin.Start(ctx, driver, opts...)
 	if err != nil {
@@ -154,20 +204,14 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	driver.healthcheck = healthcheck
 
-	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
-		deviceHealthMonitor, err := newNvmlDeviceHealthMonitor(config, state.perGPUAllocatable, state.nvdevlib)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create NVML device health monitor: %w", err)
-		}
-		if err := deviceHealthMonitor.Start(ctx); err != nil {
-			return nil, fmt.Errorf("failed to start device health monitor: %w", err)
-		}
-		driver.deviceHealthMonitor = deviceHealthMonitor
-
+	if driver.deviceHealthMonitor != nil {
+		// The consumer goroutine starts only now: it republishes
+		// ResourceSlices through the plugin helper, which exists only after
+		// Start() above.
 		driver.wg.Add(1)
 		go func() {
 			defer driver.wg.Done()
-			driver.deviceHealthEvents(ctx, config.flags.nodeName)
+			driver.deviceHealthEvents(ctx)
 		}()
 	}
 
@@ -500,19 +544,30 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 
 }
 
-func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
+func (d *driver) deviceHealthEvents(ctx context.Context) {
 	klog.V(4).Info("Starting to watch for device health notifications")
 	for {
 		select {
 		case <-ctx.Done():
 			klog.V(6).Info("Stop processing device health notifications")
 			return
+		case <-d.deviceHealthMonitor.Heartbeat():
+			// The monitor's event loop is alive: wake the health watchers to
+			// re-send the current report so the kubelet's health data does
+			// not go stale (the kubelet reports device health as unknown
+			// once it is older than the health check timeout).
+			d.notifyHealthSubscribers()
+			continue
 		case event, ok := <-d.deviceHealthMonitor.Unhealthy():
 			if !ok {
 				// NVML based deviceHealthMonitor is expected to close only during driver Shutdown.
 				klog.V(6).Info("Health monitor channel closed")
 				return
 			}
+
+			// Surface the event in the device health reported to the kubelet
+			// (KEP-4680) in addition to the taint handling below (KEP-5055).
+			d.updateDeviceHealth(event)
 
 			taint := healthEventToTaint(d.deviceHealthMonitor, event)
 			modified := false
@@ -555,7 +610,7 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 
 			resources := resourceslice.DriverResources{
 				Pools: map[string]resourceslice.Pool{
-					nodeName: {Slices: []resourceslice.Slice{resourceSlice}},
+					d.nodeName: {Slices: []resourceslice.Slice{resourceSlice}},
 				},
 			}
 
