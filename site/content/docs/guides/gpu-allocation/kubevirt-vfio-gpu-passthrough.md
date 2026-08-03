@@ -33,10 +33,7 @@ Refer to the [feature gates reference](../../reference/feature-gates.md) and [co
 ### NVIDIA Grace VFIO module selection
 
 The GPU kubelet plugin automatically selects the most specific VFIO module variant that matches each GPU PCI modalias.
-This selection supports NVIDIA Grace systems that provide a platform-specific `vfio_pci` variant and falls back to the standard `vfio-pci` module when no specific alias matches.
-The chart mounts the host `/lib/modules` directory into the GPU kubelet plugin.
-If your node image manages kernel modules outside the standard path, ensure that `/lib/modules/$(uname -r)/modules.alias` exists on the host before you enable `PassthroughSupport`.
-When sysfs associates a graphics auxiliary PCI function with the GPU through a `consumer:pci:*` link, the passthrough helper unbinds that related function as part of the GPU transition.
+For example, on NVIDIA Grace systems, the kubelet plugin automatically selects the `nvgrace_gpu_vfio_pci` drive.
 
 ## Limitations and considerations
 
@@ -77,9 +74,10 @@ Set `nvidiaDriverRoot` based on how the NVIDIA driver is installed on your nodes
 
 ### Optional: Fabric Manager partitioning
 
-On supported HGX and single-node NVL systems, Fabric Manager partitioning is an
-optional topology layer for VFIO claims.
-It also supports full-GPU claims and does not depend on `PassthroughSupport`.
+On supported HGX and single-node NVL systems, Fabric Manager partitioning provides
+additional isolation at the NVLink fabric level for passthrough workloads using
+claims with `vfio.gpu.nvidia.com` device classes.
+The partitioning also supports full-GPU claims and does not depend on `PassthroughSupport`.
 This guide already enables `PassthroughSupport` because the base resource is
 VFIO.
 

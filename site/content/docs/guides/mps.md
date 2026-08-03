@@ -14,7 +14,7 @@ pinned-memory limit.
 Use MPS when you want several cooperating workloads to make forward progress on
 the same GPU at once and you want coarse-grained control over how they share
 compute and memory. If you instead need workloads to take turns on an idle GPU
-with no configuration, see [Time-slicing](time-slicing.md).
+with no configuration, refer to [Time-slicing](./gpu-allocation/time-slicing.md).
 
 ## Feature status
 
