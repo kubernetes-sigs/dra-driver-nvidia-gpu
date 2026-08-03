@@ -577,6 +577,11 @@ func (in NodeList) OpenAPIModelName() string {
 }
 
 // OpenAPIModelName returns the OpenAPI model name for this type.
+func (in NodePodPreemptionPolicy) OpenAPIModelName() string {
+	return "io.k8s.api.core.v1.NodePodPreemptionPolicy"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
 func (in NodeProxyOptions) OpenAPIModelName() string {
 	return "io.k8s.api.core.v1.NodeProxyOptions"
 }
@@ -829,11 +834,6 @@ func (in PodSpec) OpenAPIModelName() string {
 // OpenAPIModelName returns the OpenAPI model name for this type.
 func (in PodStatus) OpenAPIModelName() string {
 	return "io.k8s.api.core.v1.PodStatus"
-}
-
-// OpenAPIModelName returns the OpenAPI model name for this type.
-func (in PodStatusResult) OpenAPIModelName() string {
-	return "io.k8s.api.core.v1.PodStatusResult"
 }
 
 // OpenAPIModelName returns the OpenAPI model name for this type.

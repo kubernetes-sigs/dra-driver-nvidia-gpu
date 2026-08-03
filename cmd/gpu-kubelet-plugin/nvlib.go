@@ -525,11 +525,6 @@ func (l deviceLib) getGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		return nil, fmt.Errorf("error getting PCI bus ID for device %d: %w", index, err)
 	}
 
-	numaNode, err := l.discoverNumaNode(pciBusID)
-	if err != nil {
-		return nil, fmt.Errorf("error getting NUMA node ID for device %d: %w", index, err)
-	}
-
 	// Get the memory-addressing mode supported by the device.
 	// On coherent-memory systems, the possible modes are:
 	//   - HMM  (Hardware Memory Management)
@@ -556,6 +551,8 @@ func (l deviceLib) getGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 	} else {
 		klog.Warningf("error getting PCIe root for device %d, continuing without attribute: %v", index, err)
 	}
+
+	numaNodeAttr := discoverNUMANodeAttribute(pciBusID)
 
 	var migProfiles []*MigProfileInfo
 	for i := 0; i < nvml.GPU_INSTANCE_PROFILE_COUNT; i++ {
@@ -625,7 +622,7 @@ func (l deviceLib) getGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		pciBusID:              pciBusID,
 		pciBusIDAttr:          pciBusIDAttr,
 		pcieRootAttr:          pcieRootAttr,
-		numaNode:              numaNode,
+		numaNodeAttr:          numaNodeAttr,
 		migProfiles:           migProfiles,
 		addressingMode:        addressingMode,
 	}
@@ -639,22 +636,6 @@ func (l deviceLib) getGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 	}
 
 	return gpuInfo, nil
-}
-
-func (l deviceLib) discoverNumaNode(pciBusID string) (*int, error) {
-	if l.nvpci == nil {
-		return nil, nil
-	}
-
-	gpu, err := l.nvpci.GetGPUByPciBusID(pciBusID)
-	if err != nil {
-		klog.Warningf("error getting PCI device for PCI bus ID %s, continuing without NUMA node attribute: %v", pciBusID, err)
-		return nil, nil
-	}
-	if gpu == nil || gpu.NumaNode < 0 {
-		return nil, nil
-	}
-	return &gpu.NumaNode, nil
 }
 
 func (l deviceLib) enumerateGpuVfioDevices(perGPUAllocatable *PerGPUAllocatableDevices) error {
@@ -719,6 +700,8 @@ func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*V
 		klog.Warningf("error getting PCIe root for device %q, continuing without attribute: %v", device.Address, err)
 	}
 
+	numaNodeAttr := discoverNUMANodeAttribute(device.Address)
+
 	_, memoryBytes := device.Resources.GetTotalAddressableMemory(true)
 
 	vfioModule, err := l.nvpasst.FindBestVFIOVariant(device.Address)
@@ -738,7 +721,7 @@ func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*V
 		pcieRootAttr:           pcieRootAttr,
 		deviceID:               fmt.Sprintf("0x%04x", device.Device),
 		vendorID:               fmt.Sprintf("0x%04x", device.Vendor),
-		numaNode:               device.NumaNode,
+		numaNodeAttr:           numaNodeAttr,
 		iommuGroup:             device.IommuGroup,
 		iommuFDEnabled:         iommuFDEnabled,
 		addressableMemoryBytes: memoryBytes,

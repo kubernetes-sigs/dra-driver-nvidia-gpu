@@ -173,15 +173,9 @@ func CommonAttributesMig(parent *GpuInfo, profileName string) map[resourceapi.Qu
 		}
 	}
 
-	if parent.pciBusIDAttr != nil {
-		attrs[parent.pciBusIDAttr.Name] = parent.pciBusIDAttr.Value
-	}
-
-	if parent.pcieRootAttr != nil {
-		attrs[parent.pcieRootAttr.Name] = parent.pcieRootAttr.Value
-	}
-
-	addNumaNodeAttribute(attrs, parent.numaNode)
+	addDeviceAttribute(attrs, parent.pciBusIDAttr)
+	addDeviceAttribute(attrs, parent.pcieRootAttr)
+	addDeviceAttribute(attrs, parent.numaNodeAttr)
 
 	return attrs
 }
