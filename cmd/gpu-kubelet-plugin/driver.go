@@ -128,6 +128,24 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		useSplitResourceSlices: useSplitSlices,
 	}
 
+	// Register NVML events before kubeletplugin.Start exposes Prepare/Unprepare.
+	// On plugin restart, previously prepared devices and their workloads can remain
+	// live and emit an XID before the kubelet service is available. NVML does not
+	// retain events that occur before registration.
+	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
+		deviceHealthMonitor, err := newNvmlDeviceHealthMonitor(config, state.perGPUAllocatable, state.nvdevlib)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create NVML device health monitor: %w", err)
+		}
+		driver.deviceHealthMonitor = deviceHealthMonitor
+
+		// Events recorded after registration remain queued until Start begins
+		// waiting after the kubelet helper is available.
+		if err := deviceHealthMonitor.RegisterEvents(); err != nil {
+			return nil, fmt.Errorf("failed to register NVML device events: %w", err)
+		}
+	}
+
 	opts := []kubeletplugin.Option{
 		kubeletplugin.KubeClient(driver.client),
 		kubeletplugin.NodeName(config.flags.nodeName),
@@ -154,23 +172,6 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	driver.healthcheck = healthcheck
 
-	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
-		deviceHealthMonitor, err := newNvmlDeviceHealthMonitor(config, state.perGPUAllocatable, state.nvdevlib)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create NVML device health monitor: %w", err)
-		}
-		if err := deviceHealthMonitor.Start(ctx); err != nil {
-			return nil, fmt.Errorf("failed to start device health monitor: %w", err)
-		}
-		driver.deviceHealthMonitor = deviceHealthMonitor
-
-		driver.wg.Add(1)
-		go func() {
-			defer driver.wg.Done()
-			driver.deviceHealthEvents(ctx, config.flags.nodeName)
-		}()
-	}
-
 	// Pass `nodeUnprepareResource` function to the cleanup manager.
 	if err := state.checkpointCleanupManager.Start(ctx, driver.nodeUnprepareResource); err != nil {
 		return nil, fmt.Errorf("error starting CheckpointCleanupManager: %w", err)
@@ -178,6 +179,25 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 
 	if err := driver.publishResources(ctx, config); err != nil {
 		return nil, err
+	}
+
+	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
+		// RegisterEvents can queue unmonitored events before this consumer
+		// starts. Publish the initial ResourceSlices first, so subsequent health
+		// updates republish tainted resources without an initial snapshot
+		// overwriting them.
+		// TODO: NVML does not replay XIDs emitted before registration. Because
+		// health taints are not persisted, a restart can advertise a device as
+		// healthy unless the fault emits another event. Persist health state or
+		// validate recovery before clearing taints during startup.
+		driver.wg.Add(1)
+		go func() {
+			defer driver.wg.Done()
+			driver.deviceHealthEvents(ctx, config.flags.nodeName)
+		}()
+		if err := driver.deviceHealthMonitor.Start(ctx); err != nil {
+			return nil, fmt.Errorf("failed to start device health monitor: %w", err)
+		}
 	}
 
 	klog.V(4).Infof("Current kubelet plugin registration status: %s", helper.RegistrationStatus())
