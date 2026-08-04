@@ -238,10 +238,6 @@ func ValidateFeatureGates() error {
 		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, PassthroughSupport)
 	}
 
-	if Enabled(DynamicMIG) && Enabled(NVMLDeviceHealthCheck) {
-		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, NVMLDeviceHealthCheck)
-	}
-
 	if Enabled(DynamicMIG) && Enabled(MPSSupport) {
 		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", DynamicMIG, MPSSupport)
 	}

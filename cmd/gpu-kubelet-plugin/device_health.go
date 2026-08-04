@@ -262,7 +262,7 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 				m.sendHealthEventForAllDevices(HealthEventGPULost)
 				continue
 			}
-			affectedDevice, err := m.resolveDeviceForEvent(eventUUID, gi, ci)
+			affectedDevice, err := m.resolveDeviceForEvent(eventUUID, event.Device, gi, ci)
 			// An error indicates inconsistent UUID/PCI inventory. A nil device
 			// without an error means the event's GI/CI is not available.
 			if err != nil {
@@ -274,7 +274,7 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 				continue
 			}
 
-			klog.V(4).Infof("Sending XID=%d health event for device %s", xid, affectedDevice.UUID())
+			klog.V(4).Infof("Sending XID=%d health event for device %s", xid, affectedDevice.CanonicalName())
 			m.unhealthy <- &DeviceHealthEvent{
 				Devices:   []*AllocatableDevice{affectedDevice},
 				EventType: HealthEventXID,
@@ -301,48 +301,113 @@ func (m *nvmlDeviceHealthMonitor) sendHealthEventForDevices(devices AllocatableD
 	m.sendBatchedHealthEvent(deviceList(devices), eventType)
 }
 
-func (m *nvmlDeviceHealthMonitor) resolveDeviceForEvent(parentUUID string, gi, ci uint32) (*AllocatableDevice, error) {
+func (m *nvmlDeviceHealthMonitor) resolveDeviceForEvent(parentUUID string, eventDevice nvml.Device, gi, ci uint32) (*AllocatableDevice, error) {
 	parent, ok := m.gpuInfosByUUID[parentUUID]
 	if !ok {
 		return nil, fmt.Errorf("parent GPU UUID %s is not in the discovered GPU inventory", parentUUID)
 	}
-	return resolveEventDeviceByPCIBusID(m.perGPUAllocatable, parentUUID, parent.pciBusID, gi, ci)
-}
-
-func resolveEventDeviceByPCIBusID(perGPU *PerGPUAllocatableDevices, parentUUID, pciBusID string, gi, ci uint32) (*AllocatableDevice, error) {
-	devices, ok := perGPU.allocatablesMap[pciBusID]
+	devices, ok := m.perGPUAllocatable.allocatablesMap[parent.pciBusID]
 	if !ok {
 		return nil, fmt.Errorf(
 			"PCI Bus ID %s for parent GPU UUID %s is not in the allocatable inventory",
-			pciBusID, parentUUID,
+			parent.pciBusID, parent.UUID,
 		)
 	}
 
+	affectedDevice, hasDynamicMIG := resolveKnownEventDevice(devices, parent, gi, ci)
+	if affectedDevice != nil || !hasDynamicMIG || gi == FullGPUInstanceID || ci == FullGPUInstanceID {
+		return affectedDevice, nil
+	}
+
+	eventSpec, err := resolveMigEvent(eventDevice, parent, gi, ci)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Dynamic MIG event for UUID:%s, GI:%d, CI:%d: %w", parent.UUID, gi, ci, err)
+	}
+	return findDynamicMIGDeviceBySpec(devices, eventSpec), nil
+}
+
+// resolveKnownEventDevice preserves full GPU and static MIG routing without
+// making additional NVML calls. The bool result reports whether the parent
+// inventory contains Dynamic MIG devices that may require live resolution.
+func resolveKnownEventDevice(devices AllocatableDevices, parent *GpuInfo, gi, ci uint32) (*AllocatableDevice, bool) {
+	var affectedDevice *AllocatableDevice
+	hasDynamicMIG := false
 	for _, dev := range devices {
 		switch dev.Type() {
 		case GpuDeviceType:
-			if dev.Gpu.UUID == parentUUID &&
+			if dev.Gpu.UUID == parent.UUID &&
 				gi == FullGPUInstanceID &&
 				ci == FullGPUInstanceID {
-				return dev, nil
+				affectedDevice = dev
 			}
 
 		case MigStaticDeviceType:
-			if dev.MigStatic.parent.UUID == parentUUID &&
+			if dev.MigStatic.parent.UUID == parent.UUID &&
 				uint32(dev.MigStatic.gIInfo.Id) == gi &&
 				uint32(dev.MigStatic.cIInfo.Id) == ci {
-				return dev, nil
+				affectedDevice = dev
 			}
+
+		case MigDynamicDeviceType:
+			hasDynamicMIG = true
 
 		default:
 			klog.V(6).Infof(
 				"Skipping unsupported device type %s while resolving event for UUID:%s, GI:%d, CI:%d",
-				dev.Type(), parentUUID, gi, ci,
+				dev.Type(), parent.UUID, gi, ci,
 			)
 		}
 	}
 
-	return nil, nil
+	return affectedDevice, hasDynamicMIG
+}
+
+// resolveMigEvent translates the live GI/CI address reported by NVML into the
+// abstract profile and placement used to advertise a Dynamic MIG device.
+func resolveMigEvent(device nvml.Device, parent *GpuInfo, giID, ciID uint32) (*MigSpecTuple, error) {
+	gi, ret := device.GetGpuInstanceById(int(giID))
+	if ret != nvml.SUCCESS {
+		return nil, fmt.Errorf("get GPU instance %d: %v", giID, ret)
+	}
+	giInfo, ret := gi.GetInfo()
+	if ret != nvml.SUCCESS {
+		return nil, fmt.Errorf("get GPU instance %d info: %v", giID, ret)
+	}
+
+	_, ret = gi.GetComputeInstanceById(int(ciID))
+	if ret != nvml.SUCCESS {
+		return nil, fmt.Errorf("get compute instance %d in GPU instance %d: %v", ciID, giID, ret)
+	}
+
+	klog.V(6).Infof(
+		"Resolved Dynamic MIG event (UUID:%s, GI:%d, CI:%d) to profile ID %d, placement start %d",
+		parent.UUID, giID, ciID, giInfo.ProfileId, giInfo.Placement.Start,
+	)
+	return &MigSpecTuple{
+		ParentMinor:    parent.minor,
+		ParentPCIBusID: parent.pciBusID,
+		ProfileID:      int(giInfo.ProfileId),
+		PlacementStart: int(giInfo.Placement.Start),
+	}, nil
+}
+
+func findDynamicMIGDeviceBySpec(devices AllocatableDevices, eventSpec *MigSpecTuple) *AllocatableDevice {
+	if eventSpec == nil {
+		return nil
+	}
+	for _, dev := range devices {
+		if dev.Type() != MigDynamicDeviceType {
+			continue
+		}
+		spec := dev.MigDynamic.Tuple()
+		if spec.ParentPCIBusID == eventSpec.ParentPCIBusID &&
+			spec.ProfileID == eventSpec.ProfileID &&
+			spec.PlacementStart == eventSpec.PlacementStart {
+			return dev
+		}
+	}
+
+	return nil
 }
 
 // sendBatchedHealthEvent sends a single DeviceHealthEvent containing all

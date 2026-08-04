@@ -471,11 +471,10 @@ func TestValidateFeatureGates(t *testing.T) {
 			description:  "should fail when both DynamicMIG and PassthroughSupport are enabled",
 		},
 		{
-			name:         "DynamicMIG enabled with NVMLDeviceHealthCheck",
-			fgMap:        map[featuregate.Feature]bool{DynamicMIG: true, NVMLDeviceHealthCheck: true},
-			expectError:  true,
-			errorMessage: "feature gate DynamicMIG is currently mutually exclusive with NVMLDeviceHealthCheck",
-			description:  "should fail when both DynamicMIG and NVMLDeviceHealthCheck are enabled",
+			name:        "DynamicMIG enabled with NVMLDeviceHealthCheck",
+			fgMap:       map[featuregate.Feature]bool{DynamicMIG: true, NVMLDeviceHealthCheck: true},
+			expectError: false,
+			description: "should allow DynamicMIG health monitoring",
 		},
 		{
 			name:         "DynamicMIG enabled with MPSSupport",

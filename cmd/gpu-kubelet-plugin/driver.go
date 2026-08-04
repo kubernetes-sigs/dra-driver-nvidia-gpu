@@ -537,7 +537,7 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 			taint := healthEventToTaint(d.deviceHealthMonitor, event)
 			modified := false
 			for _, dev := range event.Devices {
-				klog.Warningf("Received %s health event for device %s", event.EventType, dev.UUID())
+				klog.Warningf("Received %s health event for device %s", event.EventType, dev.CanonicalName())
 				if d.state.AddDeviceTaint(dev, taint) {
 					modified = true
 				}
@@ -546,16 +546,24 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 				continue
 			}
 
-			var resourceSlice resourceslice.Slice
-			for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
-				for _, dev := range devices {
-					d := dev.GetDevice()
-
-					taints := dev.Taints()
-					if len(taints) > 0 {
-						d.Taints = taints
+			var resources resourceslice.DriverResources
+			if featuregates.Enabled(featuregates.DynamicMIG) {
+				resources = d.GenerateDriverResources(nodeName)
+			} else {
+				var resourceSlice resourceslice.Slice
+				for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
+					for _, dev := range devices {
+						apiDev := dev.GetDevice()
+						if taints := dev.Taints(); len(taints) > 0 {
+							apiDev.Taints = taints
+						}
+						resourceSlice.Devices = append(resourceSlice.Devices, apiDev)
 					}
-					resourceSlice.Devices = append(resourceSlice.Devices, d)
+				}
+				resources = resourceslice.DriverResources{
+					Pools: map[string]resourceslice.Pool{
+						nodeName: {Slices: []resourceslice.Slice{resourceSlice}},
+					},
 				}
 			}
 
@@ -572,12 +580,6 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 			// a retry/backoff or switch to patch updates instead of full republish.
 			klog.V(4).Infof("Republishing ResourceSlice: %d device(s) tainted with %s=%q (effect=%s)",
 				len(event.Devices), taint.Key, taint.Value, taint.Effect)
-
-			resources := resourceslice.DriverResources{
-				Pools: map[string]resourceslice.Pool{
-					nodeName: {Slices: []resourceslice.Slice{resourceSlice}},
-				},
-			}
 
 			// NOTE: GPU_LOST and unmonitored events are already batched at the
 			// sender (all affected devices arrive in a single DeviceHealthEvent).

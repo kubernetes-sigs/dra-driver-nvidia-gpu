@@ -48,7 +48,6 @@ The following feature gate combinations are mutually exclusive and cannot be ena
 | Combination | Reason |
 |---|---|
 | `DynamicMIG` + `PassthroughSupport` | Mutually exclusive |
-| `DynamicMIG` + `NVMLDeviceHealthCheck` | Mutually exclusive |
 | `DynamicMIG` + `MPSSupport` | Mutually exclusive |
 | `PassthroughSupport` + `NVMLDeviceHealthCheck` | Mutually exclusive |
 | `MPSSupport` + `NVMLDeviceHealthCheck` | Mutually exclusive |

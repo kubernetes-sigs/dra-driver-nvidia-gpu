@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	resourceapi "k8s.io/api/resource/v1"
 
@@ -143,6 +144,32 @@ func TestAddOrUpdateTaint_TimeAddedResetOnChange(t *testing.T) {
 	})
 
 	assert.Nil(t, dev.Taints()[0].TimeAdded, "TimeAdded should be nil so the API server sets a fresh timestamp")
+}
+
+func TestPartGetDeviceIncludesHealthTaints(t *testing.T) {
+	parent := &GpuInfo{
+		UUID:                  "GPU-parent-1",
+		minor:                 0,
+		cudaComputeCapability: "9.0",
+		driverVersion:         "580.0",
+		cudaDriverVersion:     "13.0",
+	}
+	dev := &AllocatableDevice{MigDynamic: &MigSpec{
+		Parent:        parent,
+		Profile:       &nvdev.MigProfileInfo{G: 1, GB: 5, GIProfileID: 19},
+		GIProfileInfo: nvml.GpuInstanceProfileInfo{Id: 19},
+		Placement:     nvml.GpuInstancePlacement{Start: 0, Size: 1},
+	}}
+	taint := &resourceapi.DeviceTaint{
+		Key:    TaintKeyXID,
+		Value:  "43",
+		Effect: resourceapi.DeviceTaintEffectNone,
+	}
+	require.True(t, dev.AddOrUpdateTaint(taint))
+
+	got := dev.PartGetDevice()
+	require.Len(t, got.Taints, 1)
+	assert.Equal(t, *taint, got.Taints[0])
 }
 
 func TestHealthEventToTaint(t *testing.T) {
@@ -286,7 +313,7 @@ func TestIsEventNonFatal(t *testing.T) {
 	}
 }
 
-func TestResolveEventDeviceByPCIBusID(t *testing.T) {
+func TestResolveKnownEventDevice(t *testing.T) {
 	parent := &GpuInfo{UUID: "GPU-parent-1", minor: 0, pciBusID: "0000:01:00.0"}
 	fullGPU := &AllocatableDevice{Gpu: parent}
 	staticMIG := &AllocatableDevice{
@@ -296,31 +323,61 @@ func TestResolveEventDeviceByPCIBusID(t *testing.T) {
 			cIInfo: &nvml.ComputeInstanceInfo{Id: 3},
 		},
 	}
-	perGPU := &PerGPUAllocatableDevices{
-		allocatablesMap: map[PCIBusID]AllocatableDevices{
-			parent.pciBusID: {
-				"gpu":     fullGPU,
-				"static":  staticMIG,
-				"unknown": {},
-			},
-		},
+	dynamicMIG := &AllocatableDevice{MigDynamic: &MigSpec{
+		Parent:        parent,
+		GIProfileInfo: nvml.GpuInstanceProfileInfo{Id: 19},
+		Placement:     nvml.GpuInstancePlacement{Start: 0},
+	}}
+	devices := AllocatableDevices{
+		"gpu":     fullGPU,
+		"static":  staticMIG,
+		"dynamic": dynamicMIG,
+		"unknown": {},
 	}
 
 	tests := []struct {
-		name string
-		gi   uint32
-		ci   uint32
-		want *AllocatableDevice
+		name           string
+		gi             uint32
+		ci             uint32
+		want           *AllocatableDevice
+		wantHasDynamic bool
 	}{
-		{name: "full GPU", gi: FullGPUInstanceID, ci: FullGPUInstanceID, want: fullGPU},
-		{name: "static MIG", gi: 2, ci: 3, want: staticMIG},
-		{name: "unknown placement", gi: 7, ci: 0, want: nil},
+		{name: "full GPU", gi: FullGPUInstanceID, ci: FullGPUInstanceID, want: fullGPU, wantHasDynamic: true},
+		{name: "static MIG", gi: 2, ci: 3, want: staticMIG, wantHasDynamic: true},
+		{name: "dynamic MIG requires live resolution", gi: 7, ci: 0, wantHasDynamic: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveEventDeviceByPCIBusID(perGPU, parent.UUID, parent.pciBusID, tc.gi, tc.ci)
-			require.NoError(t, err)
+			got, hasDynamic := resolveKnownEventDevice(devices, parent, tc.gi, tc.ci)
 			require.Equal(t, tc.want, got)
+			assert.Equal(t, tc.wantHasDynamic, hasDynamic)
+		})
+	}
+}
+
+func TestFindDynamicMIGDeviceBySpec(t *testing.T) {
+	parent := &GpuInfo{UUID: "GPU-parent-1", minor: 0, pciBusID: "0000:01:00.0"}
+	dynamicMIG := &AllocatableDevice{MigDynamic: &MigSpec{
+		Parent:        parent,
+		GIProfileInfo: nvml.GpuInstanceProfileInfo{Id: 19},
+		Placement:     nvml.GpuInstancePlacement{Start: 0},
+	}}
+	devices := AllocatableDevices{"dynamic": dynamicMIG}
+
+	tests := []struct {
+		name string
+		spec *MigSpecTuple
+		want *AllocatableDevice
+	}{
+		{name: "exact match", spec: &MigSpecTuple{ParentPCIBusID: parent.pciBusID, ProfileID: 19, PlacementStart: 0}, want: dynamicMIG},
+		{name: "profile mismatch", spec: &MigSpecTuple{ParentPCIBusID: parent.pciBusID, ProfileID: 14, PlacementStart: 0}},
+		{name: "placement mismatch", spec: &MigSpecTuple{ParentPCIBusID: parent.pciBusID, ProfileID: 19, PlacementStart: 1}},
+		{name: "parent mismatch", spec: &MigSpecTuple{ParentPCIBusID: "0000:02:00.0", ProfileID: 19, PlacementStart: 0}},
+		{name: "nil spec"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, findDynamicMIGDeviceBySpec(devices, tc.spec))
 		})
 	}
 }
@@ -344,15 +401,15 @@ func TestResolveDeviceForEventUsesGPUUUIDIndex(t *testing.T) {
 		},
 		gpuInfosByUUID: map[string]*GpuInfo{parent.UUID: parent},
 	}
-	got, err := monitor.resolveDeviceForEvent(parent.UUID, 2, 3)
+	got, err := monitor.resolveDeviceForEvent(parent.UUID, nil, 2, 3)
 	require.NoError(t, err)
 	require.Equal(t, staticMIG, got)
 
-	_, err = monitor.resolveDeviceForEvent("GPU-unknown", 2, 3)
+	_, err = monitor.resolveDeviceForEvent("GPU-unknown", nil, 2, 3)
 	require.ErrorContains(t, err, "not in the discovered GPU inventory")
 }
 
-func TestResolveEventDeviceByPCIBusIDRejectsWrongParent(t *testing.T) {
+func TestResolveKnownEventDeviceRejectsWrongParent(t *testing.T) {
 	parent := &GpuInfo{
 		UUID:     "GPU-parent-1",
 		pciBusID: "0000:01:00.0",
@@ -362,42 +419,36 @@ func TestResolveEventDeviceByPCIBusIDRejectsWrongParent(t *testing.T) {
 		pciBusID: parent.pciBusID,
 	}
 
-	perGPU := &PerGPUAllocatableDevices{
-		allocatablesMap: map[PCIBusID]AllocatableDevices{
-			parent.pciBusID: {
-				"wrong-gpu": {
-					Gpu: otherParent,
-				},
-				"wrong-static-mig": {
-					MigStatic: &MigDeviceInfo{
-						parent: otherParent,
-						gIInfo: &nvml.GpuInstanceInfo{Id: 2},
-						cIInfo: &nvml.ComputeInstanceInfo{Id: 3},
-					},
-				},
+	devices := AllocatableDevices{
+		"wrong-gpu": {
+			Gpu: otherParent,
+		},
+		"wrong-static-mig": {
+			MigStatic: &MigDeviceInfo{
+				parent: otherParent,
+				gIInfo: &nvml.GpuInstanceInfo{Id: 2},
+				cIInfo: &nvml.ComputeInstanceInfo{Id: 3},
 			},
 		},
 	}
 
-	got, err := resolveEventDeviceByPCIBusID(
-		perGPU,
-		parent.UUID,
-		parent.pciBusID,
+	got, hasDynamic := resolveKnownEventDevice(
+		devices,
+		parent,
 		FullGPUInstanceID,
 		FullGPUInstanceID,
 	)
-	require.NoError(t, err)
 	require.Nil(t, got)
+	require.False(t, hasDynamic)
 
-	got, err = resolveEventDeviceByPCIBusID(
-		perGPU,
-		parent.UUID,
-		parent.pciBusID,
+	got, hasDynamic = resolveKnownEventDevice(
+		devices,
+		parent,
 		2,
 		3,
 	)
-	require.NoError(t, err)
 	require.Nil(t, got)
+	require.False(t, hasDynamic)
 }
 
 func TestHealthMonitorStartRequiresRegisteredEvents(t *testing.T) {
