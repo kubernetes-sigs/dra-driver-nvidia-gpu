@@ -128,6 +128,13 @@ func (m *ComputeDomainCliqueManager) List() ([]*nvapi.ComputeDomainClique, error
 	return m.lister.ComputeDomainCliques(m.config.driverNamespace).List(labels.Everything())
 }
 
+// GetLive returns the ComputeDomainClique from the API server (not the informer cache).
+// Callers that perform read-modify-write updates should use this before Update to reduce
+// stale resourceVersion conflicts.
+func (m *ComputeDomainCliqueManager) GetLive(ctx context.Context, name string) (*nvapi.ComputeDomainClique, error) {
+	return m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.driverNamespace).Get(ctx, name, metav1.GetOptions{})
+}
+
 // Update updates a ComputeDomainClique and caches the result in the mutation cache.
 func (m *ComputeDomainCliqueManager) Update(ctx context.Context, clique *nvapi.ComputeDomainClique) (*nvapi.ComputeDomainClique, error) {
 	updatedClique, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(clique.Namespace).Update(ctx, clique, metav1.UpdateOptions{})

@@ -105,7 +105,7 @@ func NewDaemonSetManager(config *ManagerConfig, getComputeDomain GetComputeDomai
 	// Create ComputeDomainStatusManager to sync node info to CD status
 	// - When feature gate ON: syncs from CDCliques + non-fabric-attached pods
 	// - When feature gate OFF: syncs from non-fabric-attached pods + handles deletions
-	m.cdStatusManager = NewComputeDomainStatusManager(config, listComputeDomains, updateComputeDomainStatus)
+	m.cdStatusManager = NewComputeDomainStatusManager(config, getComputeDomain, listComputeDomains, updateComputeDomainStatus)
 
 	m.cleanupManager = NewCleanupManager[*appsv1.DaemonSet](informer, getComputeDomain, m.cleanup)
 
