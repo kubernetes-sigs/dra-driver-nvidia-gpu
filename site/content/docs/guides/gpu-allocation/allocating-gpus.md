@@ -197,12 +197,12 @@ selectors.
 This example requires at least two allocatable GPUs in your cluster.
 
 {{% alert color="warning" title="Fabric Manager partitions require one claim" %}}
-The example below creates two independent one-GPU claims. It does not request
+The example below creates two independent single-GPU claims. It does not request
 one two-GPU Fabric Manager partition. On a node with
 `FabricManagerPartitioning` enabled, use one claim with `count: 2` and
 `matchAttribute: gpu.nvidia.com/partition2` when both GPUs must form one
-Fabric Manager partition. Each independent one-GPU claim must instead match a
-reported one-GPU partition. See
+Fabric Manager partition. Each independent single-GPU claim must instead match a
+reported single-GPU partition. See
 [Fabric Manager partitioning](fabric-manager-partitioning.md#request-a-full-gpu-partition).
 {{% /alert %}}
 

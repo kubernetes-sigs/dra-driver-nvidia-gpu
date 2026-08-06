@@ -255,8 +255,7 @@ GPU.
   hard throughput guarantees.
 - MPS requires the
   `EXCLUSIVE_PROCESS` compute mode; time-slicing requires `DEFAULT`.
-- `MPSSupport` cannot be enabled together
-  with `DynamicMIG` or `NVMLDeviceHealthCheck`.
+- `MPSSupport` cannot be enabled together with `DynamicMIG`.
 - Setting `multiUser: true`
   requires GPUs of Volta architecture or newer; otherwise the claim fails to
   prepare.

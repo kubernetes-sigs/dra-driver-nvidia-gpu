@@ -33,11 +33,11 @@ Refer to the [feature gates reference](../../reference/feature-gates.md) and [co
 ### NVIDIA Grace VFIO module selection
 
 The GPU kubelet plugin automatically selects the most specific VFIO module variant that matches each GPU PCI modalias.
-For example, on NVIDIA Grace systems, the kubelet plugin automatically selects the `nvgrace_gpu_vfio_pci` drive.
+For example, on NVIDIA Grace systems, the kubelet plugin automatically selects the `nvgrace_gpu_vfio_pci` driver.
 
 ## Limitations and considerations
 
-For a GPU to switch between the `nvidia` and `vfio-pci` drivers, nothing on the host may hold an open handle on that GPU's `/dev/nvidia*` device nodes.
+For a GPU to switch between the `nvidia` and `vfio-pci` drivers, no process on the host can have an open handle on that GPU's `/dev/nvidia*` device nodes.
 
 Make sure each of the following is either not using the GPU being prepared, or is configured to release it:
 
