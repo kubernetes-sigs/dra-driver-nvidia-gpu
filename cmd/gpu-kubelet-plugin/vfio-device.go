@@ -44,6 +44,7 @@ const (
 	nvidiaPersistencedSocketPath = "/run/nvidia-persistenced/socket"
 	gpuFreeCheckInterval         = 1 * time.Second
 	gpuFreeCheckTimeout          = 60 * time.Second
+	driverChangeTimeout          = 15 * time.Second
 )
 
 type VfioPciManager struct {
@@ -134,7 +135,14 @@ func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) e
 	}
 
 	// Change the GPU driver to vfio-pci (or variant).
-	err = vm.changeDriver(info.PciBusID, vfioDriver)
+	// Run the driver change operation in a separate goroutine because the
+	// underlying kernel operation may get stuck and cannot be cancelled. The
+	// driver change holds the inflight marker until it completes so that a
+	// subsequent Configure/Unconfigure call will not attempt to change the
+	// driver again.
+	err = runAsyncAndWait(ctx, driverChangeTimeout, func() error {
+		return vm.changeDriver(info.PciBusID, vfioDriver)
+	})
 	if err != nil {
 		return fmt.Errorf("error changing driver for GPU %q: %w", info.PciBusID, err)
 	}
@@ -433,4 +441,22 @@ func execCommandWithChroot(fsRoot, cmd string, args []string) ([]byte, error) {
 	chrootArgs := []string{fsRoot, cmd}
 	chrootArgs = append(chrootArgs, args...)
 	return exec.Command("chroot", chrootArgs...).CombinedOutput()
+}
+
+// Execute work in a separate goroutine and wait for it to complete..
+func runAsyncAndWait(ctx context.Context, timeout time.Duration, workFn func() error) error {
+	timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- workFn()
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-timeoutCtx.Done():
+		return timeoutCtx.Err()
+	}
 }
