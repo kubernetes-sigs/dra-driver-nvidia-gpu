@@ -452,7 +452,7 @@ func check(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	}
 
 	if string(outerr) != "READY\n" {
-		return fmt.Errorf("IMEX daemon not ready: %s", string(outerr))
+		return fmt.Errorf("IMEX daemon not ready: %s", outerr)
 	}
 
 	return nil
