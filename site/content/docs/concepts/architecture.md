@@ -65,9 +65,9 @@ sequenceDiagram
     Runtime-->>User: Container running with GPU
 ```
 
-## ComputeDomain flow
+## Driver-managed ComputeDomain flow
 
-User creates a `ComputeDomain` → controller creates a per-CD DaemonSet → each daemon pod runs `nvidia-imex` → daemons publish their IP and clique through `ComputeDomainClique` CRs → workload pods claim a channel from the `compute-domain-default-channel.nvidia.com` DeviceClass → the CD kubelet plugin asserts readiness and injects `/dev/nvidia-caps-imex-channels/chan*` plus `/imexd` into the container.
+User creates a `ComputeDomain` → controller creates a per-CD DaemonSet → each daemon pod runs `nvidia-imex` → daemons publish their IP and clique through `ComputeDomainClique` CRs → workload pods claim a channel from the `compute-domain-default-channel.nvidia.com` DeviceClass → the CD kubelet plugin asserts readiness and injects one or more selected `/dev/nvidia-caps-imex-channels/channelN` devices into the container.
 
 ```mermaid
 sequenceDiagram
@@ -86,7 +86,7 @@ sequenceDiagram
     User->>API: Create Pod claiming channel
     API->>Plugin: Prepare(channel ResourceClaim)
     Plugin-->>API: Assert readiness
-    Plugin->>Runtime: Inject /dev/nvidia-caps-imex-channels + /imexd
+    Plugin->>Runtime: Inject selected IMEX channel devices
     Runtime-->>User: Container running with NVLink fabric
 ```
 

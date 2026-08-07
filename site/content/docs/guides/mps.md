@@ -1,6 +1,6 @@
 ---
-title: MPS
-linkTitle: MPS
+title: GPU sharing with Multi-Process Service
+linkTitle: Multi-Process Service
 weight: 45
 description: Share a single GPU between multiple containers using NVIDIA Multi-Process Service (MPS).
 ---
@@ -14,7 +14,7 @@ pinned-memory limit.
 Use MPS when you want several cooperating workloads to make forward progress on
 the same GPU at once and you want coarse-grained control over how they share
 compute and memory. If you instead need workloads to take turns on an idle GPU
-with no configuration, see [Time-slicing](time-slicing.md).
+with no configuration, refer to [Time-slicing](./gpu-allocation/time-slicing.md).
 
 ## Feature status
 
@@ -32,8 +32,8 @@ available gates and their constraints.
 
 - The DRA Driver for NVIDIA GPUs must be installed. See [Installation](../install.md).
 - The `MPSSupport` feature gate must be enabled. See [Enabling the feature](#enabling-the-feature).
-- `MPSSupport` cannot be enabled at the same time as `DynamicMIG` or
-  `NVMLDeviceHealthCheck`. These combinations are mutually exclusive.
+- `MPSSupport` cannot be enabled at the same time as `DynamicMIG`.
+  These combinations are mutually exclusive.
 - To use multi-user mode (`multiUser: true`), the GPUs must be Volta
   architecture or newer.
 
@@ -255,8 +255,7 @@ GPU.
   hard throughput guarantees.
 - MPS requires the
   `EXCLUSIVE_PROCESS` compute mode; time-slicing requires `DEFAULT`.
-- `MPSSupport` cannot be enabled together
-  with `DynamicMIG` or `NVMLDeviceHealthCheck`.
+- `MPSSupport` cannot be enabled together with `DynamicMIG`.
 - Setting `multiUser: true`
   requires GPUs of Volta architecture or newer; otherwise the claim fails to
   prepare.

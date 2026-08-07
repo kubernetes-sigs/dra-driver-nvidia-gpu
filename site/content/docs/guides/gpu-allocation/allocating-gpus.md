@@ -196,6 +196,16 @@ selectors.
 
 This example requires at least two allocatable GPUs in your cluster.
 
+{{% alert color="warning" title="Fabric Manager partitions require one claim" %}}
+The example below creates two independent single-GPU claims. It does not request
+one two-GPU Fabric Manager partition. On a node with
+`FabricManagerPartitioning` enabled, use one claim with `count: 2` and
+`matchAttribute: gpu.nvidia.com/partition2` when both GPUs must form one
+Fabric Manager partition. Each independent single-GPU claim must instead match a
+reported single-GPU partition. See
+[Fabric Manager partitioning](fabric-manager-partitioning.md#request-a-full-gpu-partition).
+{{% /alert %}}
+
 To give each container its own GPU, create separate device requests. This
 example reuses the `single-gpu` `ResourceClaimTemplate` from [Request any GPU](#request-any-gpu).
 
@@ -617,3 +627,4 @@ kubectl delete resourceclaimtemplate -n gpu-example single-gpu a100-gpu large-gp
 
 - [Time-slicing](time-slicing.md) — share a single GPU across multiple containers using CUDA time-slicing.
 - [MIG](mig.md) — partition a GPU into isolated hardware slices for multi-tenant workloads.
+- [Fabric Manager partitioning](fabric-manager-partitioning.md) — constrain a full-GPU or VFIO claim to one complete NVSwitch partition.

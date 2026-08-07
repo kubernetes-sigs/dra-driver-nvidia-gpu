@@ -133,6 +133,25 @@ Requires the `PassthroughSupport` feature gate (Alpha, default: false). See [Fea
 | Feature gate required | No (sharing gates optional) | No | `PassthroughSupport` (Alpha) |
 | Typical use case | ML training, general workloads | Multi-tenant inference, strict isolation | VM passthrough, specialized environments |
 
+### Add optional allocation features
+
+Choose a resource type first, and then add only the features that apply to that
+resource:
+
+- **Sharing:** time-slicing or MPS can share supported full-GPU or MIG
+  allocations. A device configuration uses one sharing strategy.
+- **Fabric topology:** Fabric Manager partitioning constrains a claim to one
+  complete NVSwitch partition.
+  The partitioning applies to full GPUs and VFIO devices, not MIG slices.
+  `PassthroughSupport` is required if you want to use VFIO devices.
+- **Operational features:** health checking and device metadata modify
+  supported workflows without creating another resource type.
+
+Refer to [Feature gate constraints](../reference/feature-gates.md#constraints)
+for the combinations enforced at driver startup.
+For the topology workflow, refer to
+[Fabric Manager partitioning](../guides/gpu-allocation/fabric-manager-partitioning.md).
+
 ---
 
 ## How scheduling works
@@ -199,4 +218,5 @@ For more details on using these with the DRA, refer to the how-to guides:
 - [View available GPU resources](../guides/gpu-allocation/view-resources.md)
 - [MIG](../guides/gpu-allocation/mig.md)
 - [Time-slicing](../guides/gpu-allocation/time-slicing.md)
+- [Fabric Manager partitioning](../guides/gpu-allocation/fabric-manager-partitioning.md)
 - [VFIO GPU passthrough](../guides/gpu-allocation/kubevirt-vfio-gpu-passthrough.md)
