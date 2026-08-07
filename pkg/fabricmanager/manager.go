@@ -62,7 +62,7 @@ func Open(client Client) (*Manager, error) {
 	partitions, err := client.GetSupportedFabricPartitions()
 	if err != nil {
 		_ = client.Shutdown()
-		return nil, fmt.Errorf("fabricmanager: fmGetSupportedFabricPartitions: %w. Ensure FABRIC_MODE is correctly set", err)
+		return nil, fmt.Errorf("fabricmanager: fmGetSupportedFabricPartitions: %w. \n NOTE: Ensure FABRIC_MODE is correctly set", err)
 	}
 
 	if err := m.recordsPartitions(partitions); err != nil {
