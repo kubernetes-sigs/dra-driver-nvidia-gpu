@@ -1,0 +1,4 @@
+{{ if hugo.IsProduction -}}
+<link rel="stylesheet" href='{{ "pagefind/pagefind-component-ui.css" | relURL }}'>
+<script type="module" src='{{ "pagefind/pagefind-component-ui.js" | relURL }}'></script>
+{{- end }}

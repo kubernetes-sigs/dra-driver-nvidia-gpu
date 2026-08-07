@@ -20,14 +20,26 @@ provides `npm`), and [Git](https://git-scm.com/downloads) installed. The version
 ```bash
 git clone https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu.git
 cd dra-driver-nvidia-gpu/site
-npm ci          # one-time; installs PostCSS deps from package-lock.json
+npm ci          # one-time; installs the locked site build dependencies
 npm run serve   # http://localhost:1313, live-reload, drafts visible
 ```
+
+Pagefind creates its search index after Hugo finishes, so search is not
+available from the live-reload server. To build the site with drafts and future
+content, create the Pagefind index, and start a local server for testing search,
+run:
+
+```bash
+npm run preview-search
+```
+
+Open the URL printed by Pagefind. Stop the server with `Ctrl+C`. Re-run the
+command after changing content that you want to test in search.
 
 To produce the same output Netlify builds for production, from `site/`:
 
 ```bash
-npm run build   # output written to ./public
+npm run build   # Hugo output and Pagefind index written to ./public
 ```
 
 ## Updating docs for a release

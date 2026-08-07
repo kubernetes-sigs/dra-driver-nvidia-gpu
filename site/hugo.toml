@@ -61,7 +61,6 @@ enableGitInfo = true
   github_branch = "main"
   github_subdir = "site"
   github_project_repo = "https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu"
-  offlineSearch = false
   prism_syntax_highlighting = false
 
   [params.taxonomy]
@@ -78,19 +77,10 @@ enableGitInfo = true
     readingtime.enable = false
     sidebar_menu_compact = true
     sidebar_menu_foldable = true
-    # Search hidden until Algolia DocSearch is approved + configured.
-    # Flip to false once [params.search.algolia] is populated below.
-    sidebar_search_disable = true
+    sidebar_search_disable = false
 
     [params.ui.feedback]
       enable = false
-
-  # Algolia DocSearch — uncomment and populate after the OSS application
-  # is approved. Also flip params.ui.sidebar_search_disable to false above.
-  # [params.search.algolia]
-  #   appId = ""
-  #   apiKey = ""
-  #   indexName = ""
 
   [params.links]
     [[params.links.user]]
@@ -104,7 +94,7 @@ enableGitInfo = true
       icon = "fab fa-github"
       desc = "Source code and issue tracker"
 
-# Output formats — required for Docsy search & sitemaps
+# Output formats
 [outputs]
   home = ["HTML", "RSS", "SITEMAP"]
   section = ["HTML", "RSS"]

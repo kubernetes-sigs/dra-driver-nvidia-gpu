@@ -1,0 +1,29 @@
+// Match Pagefind's generated component UI to Docsy and Bootstrap.
+.td-search--pagefind,
+.td-pagefind {
+  --pf-text: var(--bs-body-color);
+  --pf-text-secondary: var(--bs-secondary-color);
+  --pf-text-muted: var(--bs-secondary-color);
+  --pf-background: var(--bs-body-bg);
+  --pf-border: var(--bs-border-color);
+  --pf-border-focus: var(--bs-primary);
+  --pf-skeleton: var(--bs-secondary-bg);
+  --pf-skeleton-shine: var(--bs-tertiary-bg);
+  --pf-hover: var(--bs-tertiary-bg);
+  --pf-mark: var(--bs-body-color);
+  --pf-outline-focus: var(--bs-primary);
+  --pf-font: "Open Sans", sans-serif;
+}
+
+.td-search--pagefind pagefind-modal-trigger {
+  display: block;
+  width: 100%;
+}
+
+.td-navbar .td-search--pagefind {
+  --pf-text-muted: var(--bs-navbar-color, rgba(255, 255, 255, 0.85));
+  --pf-background: rgba(255, 255, 255, 0.1);
+  --pf-border: rgba(255, 255, 255, 0.5);
+  --pf-border-focus: #fff;
+  --pf-hover: rgba(255, 255, 255, 0.2);
+}

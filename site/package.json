@@ -9,12 +9,16 @@
     "url": "https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu.git"
   },
   "scripts": {
-    "build": "hugo --gc --minify",
+    "build:hugo": "hugo --gc --minify",
+    "index": "pagefind --site public",
+    "build": "npm run build:hugo && npm run index",
+    "preview-search": "npm run build:hugo -- --buildDrafts --buildFuture && pagefind --site public --serve",
     "serve": "hugo server --bind 0.0.0.0 --buildDrafts --buildFuture"
   },
   "devDependencies": {
     "autoprefixer": "^10.4.20",
     "postcss": "^8.5.25",
+    "pagefind": "^1.5.2",
     "postcss-cli": "^11.0.0"
   }
 }

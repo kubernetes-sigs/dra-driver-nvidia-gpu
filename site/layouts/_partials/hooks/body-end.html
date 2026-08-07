@@ -1,0 +1,6 @@
+{{ if hugo.IsProduction -}}
+<div class="td-pagefind">
+  <pagefind-config base-url="{{ .Site.Home.RelPermalink }}"></pagefind-config>
+  <pagefind-modal reset-on-close></pagefind-modal>
+</div>
+{{- end }}

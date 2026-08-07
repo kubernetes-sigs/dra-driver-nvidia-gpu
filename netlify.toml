@@ -1,7 +1,7 @@
 [build]
   base    = "site"
   publish = "public"
-  command = "npm ci && hugo --gc --minify"
+  command = "npm ci && npm run build"
 
 [build.environment]
   HUGO_VERSION = "0.157.0"
@@ -10,7 +10,7 @@
   GIT_DEPTH    = "0"
 
 [context.deploy-preview]
-  command = "npm ci && hugo --gc --minify --buildDrafts --buildFuture --baseURL $DEPLOY_PRIME_URL"
+  command = "npm ci && npm run build:hugo -- --buildDrafts --buildFuture --baseURL $DEPLOY_PRIME_URL && npm run index"
 
 [context.branch-deploy]
-  command = "npm ci && hugo --gc --minify --buildDrafts --buildFuture --baseURL $DEPLOY_PRIME_URL"
+  command = "npm ci && npm run build:hugo -- --buildDrafts --buildFuture --baseURL $DEPLOY_PRIME_URL && npm run index"
