@@ -26,7 +26,9 @@ function from_versions_mk() {
 }
 DRIVER_NAME=$(from_versions_mk "DRIVER_NAME")
 DRIVER_IMAGE_REGISTRY=$(from_versions_mk "REGISTRY")
-DRIVER_IMAGE_VERSION=$(from_versions_mk "VERSION")
+# VERSION in versions.mk is a `$(shell ...)` expression, not a literal;
+# read the VERSION file directly, as the Makefile does.
+DRIVER_IMAGE_VERSION=$(tr -d '[:space:]' < "${PROJECT_DIR}/VERSION")
 
 : ${DRIVER_IMAGE_NAME:=${DRIVER_NAME}}
 # TODO: update to the latest tag once we remove the ubi tag suffix
