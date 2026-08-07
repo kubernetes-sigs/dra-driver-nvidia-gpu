@@ -80,17 +80,17 @@ enableGitInfo = true
     sidebar_menu_foldable = true
     # Search hidden until Algolia DocSearch is approved + configured.
     # Flip to false once [params.search.algolia] is populated below.
-    sidebar_search_disable = true
+    sidebar_search_disable = false
 
     [params.ui.feedback]
       enable = false
 
   # Algolia DocSearch — uncomment and populate after the OSS application
   # is approved. Also flip params.ui.sidebar_search_disable to false above.
-  # [params.search.algolia]
-  #   appId = ""
-  #   apiKey = ""
-  #   indexName = ""
+   [params.search.algolia]
+     appId = "W12287PLRG"
+     apiKey = "2d752a2eb1d1da62d8f0bab90c35f299"
+     indexName = "DRA Driver Site"
 
   [params.links]
     [[params.links.user]]

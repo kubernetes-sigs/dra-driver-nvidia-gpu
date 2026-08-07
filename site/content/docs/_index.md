@@ -7,6 +7,7 @@ type: docs
 cascade:
   type: docs
 ---
+<meta name="algolia-site-verification"  content="80E709C1F52CF68E" />
 
 The DRA Driver for NVIDIA GPUs is a Kubernetes [Dynamic Resource Allocation (DRA)](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/) driver that enables flexible GPU allocation and provisioning of multi-node NVLink fabrics for Kubernetes workloads.
 It requires Kubernetes 1.32 or later. Starting in Kubernetes 1.34, DRA is enabled by default. On Kubernetes 1.32 and 1.33, the `DynamicResourceAllocation` feature gate must be enabled.
