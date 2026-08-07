@@ -8,17 +8,48 @@ description: Cluster, node, and tooling requirements before installing the drive
 Cluster, software, and hardware requirements for the DRA Driver for NVIDIA GPUs.
 
 {{% alert title="Tip" %}}
-Most of these prerequisites can be installed and managed for you by the [NVIDIA GPU Operator](#install-prerequisites-with-nvidia-gpu-operator).
+[NVIDIA GPU Operator](#install-prerequisites-with-nvidia-gpu-operator) can install and manage the component software identified in the following table, such as the GPU driver, container toolkit, and so on as a convenience.
 {{% /alert %}}
 
+## Software support matrix
 
-| Requirement | Version / Notes |
+This page describes DRA Driver for NVIDIA GPUs v{{< param "driver_version" >}}.
+GPU allocation and ComputeDomains can be enabled independently. If you enable
+both, satisfy the requirements for both features.
+
+| Component | Supported version / requirement | Applies to |
+|---|---|---|
+| Kubernetes | v1.34.2 or later.<br><br>Some features require enabling Kubernetes feature gates and can require newer Kubernetes versions.  Refer to [Feature gates](reference/feature-gates.md). | GPU allocation |
+| Kubernetes | v1.32 or later; v1.34.2 or later is recommended. DRA is enabled by default in v1.34 and later. On v1.32 and v1.33, enable the `DynamicResourceAllocation` feature gate and the corresponding `resource.k8s.io` API groups. | ComputeDomains |
+| Helm | v3.8 or later. | Both |
+| NVIDIA GPU Driver | v565 or later for a direct installation. GPU Operator v25.10.0 and later uses v580 or later for DRA. | GPU allocation |
+| NVIDIA GPU Driver | v570.158.01 or later for a direct installation. GPU Operator v25.10.0 and later uses v580 or later for DRA. | ComputeDomains |
+| NVIDIA Container Toolkit | v1.18.0 or higher. | Both |
+| Container runtime with CDI | CDI must be enabled. It is enabled by default in containerd v2.0 and later and CRI-O v1.27 and later. The DRA Driver uses CDI to expose GPUs to containers. | Both |
+| Node Feature Discovery (NFD) | v0.18.2 or higher. The DRA Driver has no version-specific NFD API dependency. The driver requires NFD's NVIDIA PCI node labels to target the kubelet plugin. | Both |
+| GPU Feature Discovery (GFD) | v0.18.0 or higher. GFD must generate the `nvidia.com/gpu.clique` node label. | ComputeDomains |
+
+The GPU Operator owns the compatibility of the NVIDIA components that it deploys.
+
+### Supported GPU hardware
+
+Hardware requirements depend on the resource type and feature:
+
+| Resource or feature | Hardware requirement |
 |---|---|
-| Kubernetes | v1.34.2 or later, with at least one node that has one or more NVIDIA GPUs. The use of DRA became GA in Kubernetes v1.34+ and earlier versions required the `DynamicResourceAllocation` feature gate. |
-| Helm | v3.8 or later. |
-| NVIDIA Driver | v565 or later for GPU allocation. v570.158.01 or later if using [ComputeDomains](#computedomains-additional-prerequisites). |
-| CDI  | Enabled in your container runtime. This is enabled by default in containerd 2.0+ and CRIO v1.27+. The DRA Driver uses CDI to expose GPUs to containers.  |
-| Node Feature Discovery (NFD) | Labels GPU nodes in the cluster. The DRA Driver uses these labels to target the GPU kubelet plugin to the correct nodes. |
+| Full GPU allocation, time-slicing, or VFIO passthrough | NVIDIA Data Center GPUs |
+| MPS multi-user mode | NVIDIA V100 or newer. This requirement applies specifically to `multiUser: true`. Refer to [MPS prerequisites](guides/mps.md#prerequisites). |
+| MIG | A [MIG-capable data center GPU](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/#supported-gpus) with Ampere architecture or newer. |
+| ComputeDomains | Grace Blackwell GPUs with Multi-Node NVLink, such as NVIDIA HGX GB200 NVL72 or GB300 NVL72. |
+
+Check the GPU model and installed driver version on every GPU node:
+
+```bash
+nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+```
+
+For ComputeDomain-specific software and node configuration, see
+[ComputeDomains additional prerequisites](#computedomains-additional-prerequisites).
 
 ## ComputeDomains additional prerequisites
 
