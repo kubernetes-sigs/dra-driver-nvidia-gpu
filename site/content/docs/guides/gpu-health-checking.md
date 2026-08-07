@@ -18,7 +18,6 @@ device.
 With this feature enabled, unhealthy devices are tainted in the
 `ResourceSlice` so the scheduler stops placing new workloads on them.
 
-
 ## Feature status
 
 `NVMLDeviceHealthCheck` is an Alpha feature gate, disabled by default.
@@ -28,12 +27,8 @@ With this feature enabled, unhealthy devices are tainted in the
 | `NVMLDeviceHealthCheck` | `false` | Alpha | v0.4.0 |
 
 `NVMLDeviceHealthCheck` is mutually exclusive with the `DynamicMIG`,
-`PassthroughSupport`, and `MPSSupport` feature gates. See
-
+`PassthroughSupport`, and `MPSSupport` feature gates.
 Refer to the [feature gate constraints](../reference/feature-gates/#constraints) documentation for more details.
-> [!NOTE]
->
-> This page describes the v0.4.0 and later implementation of health checking with the driver.
 
 ## Prerequisites
 
@@ -41,7 +36,7 @@ Refer to the [feature gate constraints](../reference/feature-gates/#constraints)
   Kubernetes feature gate must be enabled on the `kube-apiserver`,
   `kube-controller-manager`, and `kube-scheduler`.
   In Kubernetes v1.34 and 1.35, `DRADeviceTaints` is disabled by default and must be explicitly enabled.
-  In Kubernetes v1.36, it is enabled by default.
+  In Kubernetes v1.36, the feature gate is enabled by default.
 - NVIDIA DRA driver v0.4.0 or later installed via Helm.
 
 ## How it works
@@ -63,24 +58,40 @@ The monitor tracks three event categories:
 
 ### Taint effects
 
-The driver applies the following [upstream Kubernetes device taint effects](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#device-taints-and-tolerations):
+The driver applies the following [Kubernetes device taint effects](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#device-taints-and-tolerations):
 
-- `NoSchedule` — the Kubernetes scheduler does not allocate the device to new
+- `NoSchedule`: The Kubernetes scheduler does not allocate the device to new
   workloads. Existing workloads that already hold a claim to the device are not
   evicted.
-- `None` — informational only; scheduling is not affected, but the taint is
+- `None`: This taint is informational only. Scheduling is not affected, but the taint is
   visible in the `ResourceSlice`.
 
-The driver only ever applies the `None` and `NoSchedule` effects. It never evicts running workloads with `NoExecute`. If you would like to implement eviction rules when a device is tainted, an administrator can create a `DeviceTaintRule` with `effect: NoExecute`. Follow the Kubernetes documentation for [taints set up admins](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#taints-set-by-an-admin) for details.
+The driver only applies the `None` and `NoSchedule` effects.
+The driver never evicts running workloads with `NoExecute`.
+If you want to implement eviction rules when a device is tainted, create a `DeviceTaintRule` with `effect: NoExecute`.
+Follow the Kubernetes documentation for [taints set by an admin](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#taints-set-by-an-admin) for details.
 
 ### XID errors
 
 XID codes are NVIDIA-defined error identifiers for GPU hardware and firmware
-conditions. The driver classifies XIDs as fatal or non-fatal. Fatal XIDs produce
-a `NoSchedule` taint and non-fatal XIDs produce a `None` taint. Refer to the [NVIDIA XID Errors documentation](https://docs.nvidia.com/deploy/xid-errors/index.html) for full descriptions for XID errors and codes.
+conditions.
+The driver classifies XIDs as fatal or non-fatal.
+Fatal XIDs produce a `NoSchedule` taint and non-fatal XIDs produce a `None` taint.
+Refer to the [NVIDIA XID Errors documentation](https://docs.nvidia.com/deploy/xid-errors/latest/introduction.html) for information about XID errors and codes.
 
-By default, the driver sets the some XID errors as non-fatal because they indicate application-level failures rather than hardware degradation. For a full list of these XID errors, refer to in the [Driver repo](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/blob/{{< param driver_release_tag >}}/cmd/gpu-kubelet-plugin/device_health.go#L421).
+By default, the driver classifies the following XID errors as non-fatal because they indicate application-level failures rather than hardware degradation.
+The following table identifies these errors:
 
+| Code | Description |
+| ---- | ----------- |
+| 13 | Graphics Engine Exception |
+| 31 | GPU memory page fault |
+| 43 | GPU stopped processing |
+| 45 | Preemptive cleanup, due to previous errors |
+| 68 | Video processor exception |
+| 109 | Context Switch Timeout Error |
+
+You can classify additional XID errors as non-fatal by specifying a comma-separated list in the `--additional-xids-to-ignore` CLI argument or the `ADDITIONAL_XIDS_TO_IGNORE` environment variable.
 
 ## Enabling the feature
 
@@ -167,7 +178,7 @@ objects to manually remove or override device taints without restarting the driv
 >
 > `DeviceTaintRule` is gated separately from `DRADeviceTaints`. It requires the
 > [`DRADeviceTaintRules`](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#taints-set-by-an-admin)
-> feature gate and the `resource.k8s.io/v1beta2` API. 
+> feature gate and the `resource.k8s.io/v1beta2` API.
 
 ## Limitations and considerations
 
@@ -183,4 +194,3 @@ objects to manually remove or override device taints without restarting the driv
   after a health event (for example, due to a transient API server error), the
   failure is logged but not retried. The `ResourceSlice` may remain stale until
   the next successful publish or driver restart.
-

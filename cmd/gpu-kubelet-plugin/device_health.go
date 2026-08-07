@@ -416,8 +416,9 @@ func getAdditionalXids(input string) []uint64 {
 
 func xidsToSkip(additionalXids string) map[uint64]bool {
 	// Add the list of hardcoded disabled (ignored) XIDs:
-	// http://docs.nvidia.com/deploy/xid-errors/index.html#topic_4
+	// https://docs.nvidia.com/deploy/xid-errors/latest/analyzing-xid-catalog.html
 	// Application errors: the GPU should still be healthy.
+	// If you change this list, update the documentation.
 	ignoredXids := []uint64{
 		13,  // Graphics Engine Exception
 		31,  // GPU memory page fault
