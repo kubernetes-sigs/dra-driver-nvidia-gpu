@@ -1155,14 +1155,13 @@ func (s *DeviceState) applyConfig(ctx context.Context, config configapi.Interfac
 	}
 }
 
-// isAdminAccess reports whether an allocation result was allocated with admin
-// access. AdminAccess is a *bool, where nil means "not admin access".
+// isAdminAccess reports whether a result was allocated with admin access.
+// AdminAccess is a *bool, where nil means "not admin access".
 func isAdminAccess(r *resourceapi.DeviceRequestAllocationResult) bool {
 	return r.AdminAccess != nil && *r.AdminAccess
 }
 
 // sharingRequested reports whether a decoded config asks for a sharing strategy.
-// Configs without a Sharing field can never request one.
 func sharingRequested(c runtime.Object) bool {
 	switch castConfig := c.(type) {
 	case *configapi.GpuConfig:
@@ -1174,20 +1173,14 @@ func sharingRequested(c runtime.Object) bool {
 }
 
 // validateNoSharingWithAdminAccess rejects a sharing configuration (TimeSlicing or
-// MPS) that is being applied over a request allocated with admin access.
-//
-// A claim with adminAccess is a read-only observer: it deliberately bypasses the
-// exclusivity check in validateNoOverlappingPreparedDevices so it can attach to a
-// device another claim already owns. Sharing settings are device-global, so applying
-// them on Prepare overwrites the owning workload's settings, and tearing them down on
-// Unprepare disrupts a workload that is still running. A plain adminAccess claim with
-// no sharing config is unaffected: Sharing is nil and both IsTimeSlicing() and
-// IsMps() are nil-receiver-safe.
+// MPS) applied over a request allocated with admin access. Such a request is a
+// read-only observer of a device another claim owns, but sharing settings are
+// device-global: applying them on Prepare overwrites the owning workload's
+// settings, and tearing them down on Unprepare disrupts it while it still runs.
 func validateNoSharingWithAdminAccess(config configapi.Sharing, results []*resourceapi.DeviceRequestAllocationResult) error {
-	// Identify the requested strategy so the error message can name it. This is
-	// deliberately not guarded by the TimeSlicingSettings/MPSSupport feature gates:
-	// a claim that would corrupt device state as soon as an operator enables a gate
-	// should not be accepted while that gate happens to be disabled.
+	// Not guarded by the TimeSlicingSettings/MPSSupport feature gates: a claim that
+	// would corrupt device state as soon as an operator enables a gate should not be
+	// accepted while that gate happens to be disabled.
 	var strategy string
 	switch {
 	case config.IsTimeSlicing():
@@ -1198,9 +1191,8 @@ func validateNoSharingWithAdminAccess(config configapi.Sharing, results []*resou
 		return nil
 	}
 
-	// Check every result, not just the first: a config with an empty Requests list
-	// applies to every request in the claim, so one group can contain both a workload
-	// request and an adminAccess request, in any order.
+	// Every result, not just the first: a config with an empty Requests list applies
+	// to the whole claim, so one group can mix workload and adminAccess requests.
 	for _, r := range results {
 		if isAdminAccess(r) {
 			return fmt.Errorf(
@@ -1213,9 +1205,8 @@ func validateNoSharingWithAdminAccess(config configapi.Sharing, results []*resou
 }
 
 func (s *DeviceState) applySharingConfig(ctx context.Context, config configapi.Sharing, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult, cp *Checkpoint) (*DeviceConfigState, error) {
-	// Reject before anything reads or mutates device state: applyConfig routes both
-	// GpuConfig and MigDeviceConfig here, so this one guard covers both, and failing
-	// first means the GPU is never touched on the rejected path.
+	// First statement, so the GPU is never touched on the rejected path. applyConfig
+	// routes both GpuConfig and MigDeviceConfig here, so one guard covers both.
 	if err := validateNoSharingWithAdminAccess(config, results); err != nil {
 		return nil, err
 	}
@@ -1639,12 +1630,11 @@ func (s *DeviceState) getConfigResultsMap(allocation *resourceapi.AllocationResu
 			return nil, fmt.Errorf("allocatable not found for device %q", result.Device)
 		}
 		for _, c := range slices.Backward(configs) {
-			// A sharing config inherited from the DeviceClass must not be applied to
-			// an adminAccess request. The claim author cannot remove it, so letting it
-			// reach applySharingConfig would make every monitoring claim against that
-			// class permanently unpreparable. Skip it and fall through to the next
-			// candidate, which is at worst the default config with no sharing.
-			// Sharing that the claim itself asks for is still rejected there.
+			// Sharing inherited from the DeviceClass cannot be removed by the claim
+			// author, so rejecting it would make every monitoring claim against that
+			// class unpreparable. Skip it and fall through to the next candidate,
+			// at worst the default config. Claim-sourced sharing is still rejected
+			// in applySharingConfig.
 			if isAdminAccess(&result) && c.Source == resourceapi.AllocationConfigSourceClass && sharingRequested(c.Config) {
 				klog.V(4).Infof("Ignoring DeviceClass sharing config for adminAccess request %q", result.Request)
 				continue

@@ -289,14 +289,9 @@ func admitResourceClaimParameters(ar admissionv1.AdmissionReview) *admissionv1.A
 			continue
 		}
 
-		// Reject sharing settings that apply to an adminAccess request. The kubelet
-		// plugin enforces the same rule at Prepare() time (see
-		// validateNoSharingWithAdminAccess in cmd/gpu-kubelet-plugin); checking here
-		// as well surfaces the error at admission time instead of at pod start.
-		//
 		// Only on CREATE: spec is immutable on both objects, so an object admitted
-		// before this check existed can never be brought into compliance, and failing
-		// its UPDATEs would block finalizer removal and wedge deletion.
+		// before this check existed can never comply, and failing its UPDATEs would
+		// block finalizer removal.
 		if ar.Request.Operation == admissionv1.Create {
 			if err := validateNoSharingWithAdminAccess(configInterface, config.Requests, adminRequests); err != nil {
 				errs = append(errs, fmt.Errorf("object at %s is invalid: %w", fieldPath, err))
@@ -324,9 +319,9 @@ func admitResourceClaimParameters(ar admissionv1.AdmissionReview) *admissionv1.A
 	}
 }
 
-// requestsWithAdminAccess returns the names of all requests in the claim spec that
-// set adminAccess, in spec order. AdminAccess only exists on exact requests:
-// prioritized-list subrequests (firstAvailable) cannot set it.
+// requestsWithAdminAccess returns the names of the requests that set adminAccess.
+// AdminAccess only exists on exact requests: prioritized-list subrequests cannot
+// set it, so a request with no Exactly section is never an admin request.
 func requestsWithAdminAccess(requests []resourceapi.DeviceRequest) []string {
 	var admin []string
 	for _, r := range requests {
@@ -337,22 +332,14 @@ func requestsWithAdminAccess(requests []resourceapi.DeviceRequest) []string {
 	return admin
 }
 
-// validateNoSharingWithAdminAccess rejects a sharing configuration (TimeSlicing or
-// MPS) that applies to a request marked adminAccess. Such a claim is meant to be a
-// read-only observer of a device, but sharing settings are device-global: applying
-// them on Prepare, and tearing them down on Unprepare, would modify state that the
-// workload owning the device depends on. The kubelet plugin rejects the combination
-// at Prepare() time; this check reports the same error at admission time.
+// validateNoSharingWithAdminAccess reports, at admission time, the rule the kubelet
+// plugin enforces at Prepare() time: sharing settings are device-global, so they
+// must not apply to a request that only asks for read-only admin access.
 //
-// Only configs that name their requests explicitly are checked. A config with an
-// empty request list applies to every request in the claim, but the kubelet plugin
-// narrows it further by device type, which the webhook cannot do from the claim spec
-// alone: rejecting on a name match that the plugin would never make would deny valid
-// claims. The plugin catches that case at Prepare() time instead.
-//
-// adminRequests only ever contains names of exact requests, so references to
-// subrequests ("<request>/<subrequest>") can never match, which is correct:
-// subrequests cannot set adminAccess.
+// Only configs that name their requests are checked. A config with an empty request
+// list applies to the whole claim, but the plugin narrows it further by device type,
+// which the webhook cannot see, so matching on name alone would deny claims the
+// plugin would accept. The plugin catches that case instead.
 func validateNoSharingWithAdminAccess(config nvapi.Interface, targetRequests []string, adminRequests []string) error {
 	if len(adminRequests) == 0 || len(targetRequests) == 0 {
 		return nil
