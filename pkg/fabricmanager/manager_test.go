@@ -18,6 +18,7 @@ package fabricmanager
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -447,5 +448,140 @@ func TestStubClient(t *testing.T) {
 	}
 	if err := c.Shutdown(); err != nil {
 		t.Errorf("stub Shutdown: %v", err)
+	}
+}
+
+// pciGPUs builds partition members carrying both a module id and a PCI bus id,
+// in the 8-digit upper-case domain form FM actually reports.
+func pciGPUs(ids ...int) []PartitionGPU {
+	out := make([]PartitionGPU, len(ids))
+	for i, id := range ids {
+		out[i] = PartitionGPU{
+			PhysicalID: id,
+			PCIBusID:   fmt.Sprintf("00000000:%02X:00.0", id),
+		}
+	}
+	return out
+}
+
+func TestNormalizePCIBusID(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"fm form", "00000000:0F:00.0", "0000:0f:00.0"},
+		{"sysfs form", "0000:0f:00.0", "0000:0f:00.0"},
+		{"surrounding whitespace", "  00000000:0F:00.0\n", "0000:0f:00.0"},
+		{"already lower 8-digit", "00000000:0f:00.0", "0000:0f:00.0"},
+		// Anything shorter than a full BDF is lower-cased but not truncated, so a
+		// malformed value cannot accidentally equal a well-formed one.
+		{"short value", "0F:00.0", "0f:00.0"},
+		{"empty", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NormalizePCIBusID(tc.in); got != tc.want {
+				t.Errorf("NormalizePCIBusID(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestModuleIDByPCIBusID(t *testing.T) {
+	client := &fakeClient{partitions: []Partition{
+		{ID: 1, GPUs: pciGPUs(1, 2, 3, 4)},
+		{ID: 2, GPUs: pciGPUs(1, 2)},
+	}}
+	m, err := Open(client)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// A GPU appearing in several partitions is indexed once, and the caller may
+	// present the address in either the FM or the sysfs form.
+	for _, query := range []string{"00000000:02:00.0", "0000:02:00.0", "0000:02:00.0"} {
+		id, ok := m.ModuleIDByPCIBusID(query)
+		if !ok {
+			t.Fatalf("ModuleIDByPCIBusID(%q): not found", query)
+		}
+		if id != 2 {
+			t.Errorf("ModuleIDByPCIBusID(%q) = %d, want 2", query, id)
+		}
+	}
+
+	if _, ok := m.ModuleIDByPCIBusID("0000:ff:00.0"); ok {
+		t.Error("ModuleIDByPCIBusID for an address FM never reported: got ok=true, want false")
+	}
+}
+
+func TestModuleIDByPCIBusIDMissingAddresses(t *testing.T) {
+	// FM reporting no PCI bus id must not produce a bogus "" -> moduleID entry
+	// that every unknown address would then match.
+	client := &fakeClient{partitions: []Partition{{ID: 1, GPUs: gpus(1, 2)}}}
+	m, err := Open(client)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if id, ok := m.ModuleIDByPCIBusID(""); ok {
+		t.Errorf("ModuleIDByPCIBusID(\"\") = (%d, true), want not found", id)
+	}
+}
+
+func TestOpenRejectsConflictingPCIBusID(t *testing.T) {
+	// The same address reported with two different module ids means we cannot
+	// trust the index; activating a partition built from the wrong GPU would
+	// program the fabric for devices the claim does not hold.
+	client := &fakeClient{partitions: []Partition{
+		{ID: 1, GPUs: []PartitionGPU{{PhysicalID: 1, PCIBusID: "00000000:01:00.0"}}},
+		{ID: 2, GPUs: []PartitionGPU{{PhysicalID: 2, PCIBusID: "00000000:01:00.0"}}},
+	}}
+	if _, err := Open(client); err == nil {
+		t.Fatal("Open with conflicting PCI bus ids: got nil error, want failure")
+	}
+}
+
+func TestActivePartitions(t *testing.T) {
+	client := &fakeClient{partitions: []Partition{
+		{ID: 1, GPUs: pciGPUs(1, 2, 3, 4)},
+		{ID: 2, GPUs: pciGPUs(1, 2)},
+		{ID: 3, GPUs: pciGPUs(3, 4)},
+	}}
+	m, err := Open(client)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	active, err := m.ActivePartitions()
+	if err != nil {
+		t.Fatalf("ActivePartitions: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("ActivePartitions before any activation = %v, want none", active)
+	}
+
+	if err := m.ActivatePartition(2); err != nil {
+		t.Fatalf("ActivatePartition: %v", err)
+	}
+
+	// The result must come from a fresh query, not the topology recorded at Open
+	// time -- activation state changes underneath the Manager.
+	active, err = m.ActivePartitions()
+	if err != nil {
+		t.Fatalf("ActivePartitions: %v", err)
+	}
+	if len(active) != 1 || active[0].ID != 2 {
+		t.Fatalf("ActivePartitions after activating 2 = %v, want just partition 2", active)
+	}
+}
+
+func TestActivePartitionsClientError(t *testing.T) {
+	client := &fakeClient{partitions: designDocPartitions()}
+	m, err := Open(client)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	client.listErr = errors.New("boom")
+	if _, err := m.ActivePartitions(); err == nil {
+		t.Fatal("ActivePartitions with a failing client: got nil error, want failure")
 	}
 }
