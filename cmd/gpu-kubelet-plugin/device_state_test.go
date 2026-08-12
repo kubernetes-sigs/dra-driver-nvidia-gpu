@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/fabricmanager"
@@ -384,4 +385,89 @@ func TestDeactivateFabricPartitionRefCounting(t *testing.T) {
 	err = state.deactivateFabricPartition("claim-1", &pc1, checkpoint)
 	require.NoError(t, err)
 	require.Equal(t, []int{1}, fmClient.deactivatedIDs, "FM partition deactivation MUST be called when no active claims remain")
+}
+
+func TestValidateAdminAccessDeviceTypes(t *testing.T) {
+	state := &DeviceState{
+		perGPUAllocatable: &PerGPUAllocatableDevices{
+			allocatablesMap: map[PCIBusID]AllocatableDevices{
+				"0000:00:00.0": {
+					"gpu-0":    &AllocatableDevice{Gpu: &GpuInfo{minor: 0}},
+					"mig-0":    &AllocatableDevice{MigStatic: &MigDeviceInfo{}},
+					"migdyn-0": &AllocatableDevice{MigDynamic: &MigSpec{}},
+					"vfio-0":   &AllocatableDevice{Vfio: &VfioDeviceInfo{index: 0}},
+				},
+			},
+		},
+	}
+
+	claim := func(results ...resourceapi.DeviceRequestAllocationResult) *resourceapi.ResourceClaim {
+		return &resourceapi.ResourceClaim{
+			Status: resourceapi.ResourceClaimStatus{
+				Allocation: &resourceapi.AllocationResult{
+					Devices: resourceapi.DeviceAllocationResult{Results: results},
+				},
+			},
+		}
+	}
+	admin := func(request, device string) resourceapi.DeviceRequestAllocationResult {
+		return resourceapi.DeviceRequestAllocationResult{
+			Request: request, Driver: DriverName, Device: device, AdminAccess: ptr.To(true),
+		}
+	}
+	workload := func(request, device string) resourceapi.DeviceRequestAllocationResult {
+		return resourceapi.DeviceRequestAllocationResult{
+			Request: request, Driver: DriverName, Device: device,
+		}
+	}
+
+	testCases := map[string]struct {
+		claim       *resourceapi.ResourceClaim
+		errContains string
+	}{
+		"adminAccess on a full GPU is allowed": {
+			claim: claim(admin("monitor", "gpu-0")),
+		},
+		"workload on a MIG device is allowed": {
+			claim: claim(workload("workload", "mig-0")),
+		},
+		"adminAccess on a static MIG device is rejected": {
+			claim:       claim(admin("monitor", "mig-0")),
+			errContains: `adminAccess is only supported for full GPU devices: request "monitor"`,
+		},
+		"adminAccess on a dynamic MIG device is rejected": {
+			claim:       claim(admin("monitor", "migdyn-0")),
+			errContains: `adminAccess is only supported for full GPU devices: request "monitor"`,
+		},
+		"adminAccess on a VFIO device is rejected": {
+			claim:       claim(admin("monitor", "vfio-0")),
+			errContains: `adminAccess is only supported for full GPU devices: request "monitor"`,
+		},
+		// The admin result is second on purpose: an implementation that only
+		// inspected results[0] passes every other case in this table.
+		"adminAccess on MIG alongside a workload request is rejected": {
+			claim:       claim(workload("workload", "gpu-0"), admin("monitor", "mig-0")),
+			errContains: `adminAccess is only supported for full GPU devices: request "monitor"`,
+		},
+		"results for another driver are ignored": {
+			claim: claim(resourceapi.DeviceRequestAllocationResult{
+				Request: "monitor", Driver: "other.example.com", Device: "unknown-0",
+				AdminAccess: ptr.To(true),
+			}),
+		},
+		"unallocated claim is allowed": {
+			claim: &resourceapi.ResourceClaim{},
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			err := state.validateAdminAccessDeviceTypes(tc.claim)
+			if tc.errContains == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.errContains)
+		})
+	}
 }

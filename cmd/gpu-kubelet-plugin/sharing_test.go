@@ -178,9 +178,10 @@ func TestValidateNoSharingWithAdminAccess(t *testing.T) {
 }
 
 // TestGetConfigResultsMapSharingSourceForAdminAccess pins which sharing configs
-// reach applySharingConfig for an adminAccess result. DeviceClass-sourced sharing
-// is skipped, so the result falls through to the default config; claim-sourced
-// sharing is left in place for validateNoSharingWithAdminAccess to reject.
+// reach applySharingConfig for an adminAccess result. A config is skipped for
+// that result unless it is claim-sourced AND names the request explicitly; that
+// is exactly the case validateNoSharingWithAdminAccess also rejects, matching
+// what the webhook admits.
 func TestGetConfigResultsMapSharingSourceForAdminAccess(t *testing.T) {
 	sharingConfig := configapi.DefaultGpuConfig()
 	sharingConfig.Sharing = &configapi.GpuSharing{Strategy: configapi.TimeSlicingStrategy}
@@ -189,15 +190,21 @@ func TestGetConfigResultsMapSharingSourceForAdminAccess(t *testing.T) {
 
 	for name, tc := range map[string]struct {
 		source          resourceapi.AllocationConfigSource
+		requests        []string
 		expectedSharing bool
 	}{
 		"DeviceClass sharing config is not applied to an adminAccess result": {
 			source:          resourceapi.AllocationConfigSourceClass,
 			expectedSharing: false,
 		},
-		"claim sharing config still reaches the adminAccess result": {
+		"claim sharing config naming the admin request still reaches it": {
 			source:          resourceapi.AllocationConfigSourceClaim,
+			requests:        []string{"monitor"},
 			expectedSharing: true,
+		},
+		"claim sharing config with no named request is not applied to an adminAccess result": {
+			source:          resourceapi.AllocationConfigSourceClaim,
+			expectedSharing: false,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -223,7 +230,8 @@ func TestGetConfigResultsMapSharingSourceForAdminAccess(t *testing.T) {
 					},
 					Config: []resourceapi.DeviceAllocationConfiguration{
 						{
-							Source: tc.source,
+							Source:   tc.source,
+							Requests: tc.requests,
 							DeviceConfiguration: resourceapi.DeviceConfiguration{
 								Opaque: &resourceapi.OpaqueDeviceConfiguration{
 									Driver:     DriverName,

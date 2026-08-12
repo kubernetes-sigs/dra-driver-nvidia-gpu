@@ -262,7 +262,7 @@ func (c *PreparedClaim) GetNonAdminDevices() map[string]struct{} {
 		if r.Driver != DriverName {
 			continue
 		}
-		if r.AdminAccess != nil && *r.AdminAccess {
+		if isAdminAccess(&r) {
 			continue
 		}
 		requested[r.Device] = struct{}{}

@@ -341,6 +341,10 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		}
 	}
 
+	if err := s.validateAdminAccessDeviceTypes(claim); err != nil {
+		return nil, fmt.Errorf("unable to prepare claim %v: %w", claimUID, err)
+	}
+
 	tucp0 := time.Now()
 	err = s.updateCheckpoint(ctx, func(cp *Checkpoint) {
 		cp.V2.PreparedClaims[claimUID] = PreparedClaim{
@@ -1161,6 +1165,31 @@ func isAdminAccess(r *resourceapi.DeviceRequestAllocationResult) bool {
 	return r.AdminAccess != nil && *r.AdminAccess
 }
 
+// validateAdminAccessDeviceTypes rejects an adminAccess request allocated a device
+// that is not a whole GPU. adminAccess bypasses device exclusivity, which is only
+// meaningful for a whole device.
+func (s *DeviceState) validateAdminAccessDeviceTypes(claim *resourceapi.ResourceClaim) error {
+	if claim.Status.Allocation == nil {
+		return nil
+	}
+	for _, r := range claim.Status.Allocation.Devices.Results {
+		if r.Driver != DriverName || !isAdminAccess(&r) {
+			continue
+		}
+		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
+		if device == nil {
+			return fmt.Errorf("allocatable not found for device %q", r.Device)
+		}
+		if device.Type() != GpuDeviceType {
+			return fmt.Errorf(
+				"adminAccess is only supported for full GPU devices: request %q was allocated device %q",
+				r.Request, r.Device,
+			)
+		}
+	}
+	return nil
+}
+
 // sharingRequested reports whether a decoded config asks for a sharing strategy.
 func sharingRequested(c runtime.Object) bool {
 	switch castConfig := c.(type) {
@@ -1526,7 +1555,7 @@ func (s *DeviceState) requestedNonAdminDevices(claim *resourceapi.ResourceClaim)
 		if r.Driver != DriverName {
 			continue
 		}
-		if r.AdminAccess != nil && *r.AdminAccess {
+		if isAdminAccess(&r) {
 			continue
 		}
 		requested[r.Device] = struct{}{}
@@ -1630,13 +1659,14 @@ func (s *DeviceState) getConfigResultsMap(allocation *resourceapi.AllocationResu
 			return nil, fmt.Errorf("allocatable not found for device %q", result.Device)
 		}
 		for _, c := range slices.Backward(configs) {
-			// Sharing inherited from the DeviceClass cannot be removed by the claim
-			// author, so rejecting it would make every monitoring claim against that
-			// class unpreparable. Skip it and fall through to the next candidate,
-			// at worst the default config. Claim-sourced sharing is still rejected
-			// in applySharingConfig.
-			if isAdminAccess(&result) && c.Source == resourceapi.AllocationConfigSourceClass && sharingRequested(c.Config) {
-				klog.V(4).Infof("Ignoring DeviceClass sharing config for adminAccess request %q", result.Request)
+			// Skip a sharing config that does not explicitly name this adminAccess
+			// request: DeviceClass sharing cannot be removed by the claim author,
+			// and a claim-sourced config with an empty Requests list is exactly
+			// what the webhook also admits. A config that does name the request is
+			// still rejected in applySharingConfig.
+			if isAdminAccess(&result) && sharingRequested(c.Config) &&
+				(c.Source == resourceapi.AllocationConfigSourceClass || len(c.Requests) == 0) {
+				klog.V(4).Infof("Ignoring untargeted sharing config for adminAccess request %q", result.Request)
 				continue
 			}
 			if slices.Contains(c.Requests, result.Request) {
