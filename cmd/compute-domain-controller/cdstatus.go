@@ -211,12 +211,12 @@ func (m *ComputeDomainStatusManager) syncCD(ctx context.Context, cd *nvapi.Compu
 	if m.cliqueManager != nil {
 		// Feature gate enabled: build from cliques + non-fabric pods
 		fabricNodes = m.buildNodesFromCliques(cliques)
-		nonFabricNodes = m.buildNodesFromPods(nonFabricPods)
+		nonFabricNodes = m.buildNodesFromPods(nonFabricPods, cd.Status.Nodes)
 		newNodes = slices.Concat(fabricNodes, nonFabricNodes)
 	} else {
 		// Feature gate disabled: filter stale fabric nodes + rebuild non-fabric nodes
 		fabricNodes = m.getNonStaleFabricNodes(cd.Status.Nodes, fabricPods)
-		nonFabricNodes = m.buildNodesFromPods(nonFabricPods)
+		nonFabricNodes = m.buildNodesFromPods(nonFabricPods, cd.Status.Nodes)
 		newNodes = slices.Concat(fabricNodes, nonFabricNodes)
 	}
 
@@ -256,12 +256,66 @@ func (m *ComputeDomainStatusManager) buildNodesFromCliques(cliques []*nvapi.Comp
 }
 
 // buildNodesFromPods builds ComputeDomainNode entries from non-fabric-attached pods.
-func (m *ComputeDomainStatusManager) buildNodesFromPods(pods []*corev1.Pod) []*nvapi.ComputeDomainNode {
-	var nodes []*nvapi.ComputeDomainNode
+func (m *ComputeDomainStatusManager) buildNodesFromPods(pods []*corev1.Pod, existingNodes []*nvapi.ComputeDomainNode) []*nvapi.ComputeDomainNode {
+	podsByNode := make(map[string]*corev1.Pod)
 	for _, pod := range pods {
 		if pod.Spec.NodeName == "" || pod.Status.PodIP == "" {
 			continue
 		}
+		existingPod, exists := podsByNode[pod.Spec.NodeName]
+		if !exists || preferNonFabricPod(pod, existingPod) {
+			podsByNode[pod.Spec.NodeName] = pod
+		}
+	}
+
+	nodeNames := make([]string, 0, len(podsByNode))
+	for nodeName := range podsByNode {
+		nodeNames = append(nodeNames, nodeName)
+	}
+	slices.Sort(nodeNames)
+
+	// Preserve valid indices for surviving nodes. Count first so that legacy
+	// duplicate indices are repaired instead of arbitrarily preserving one.
+	indexCounts := make(map[int]int)
+	nodeCounts := make(map[string]int)
+	existingIndices := make(map[string]int)
+	for _, node := range existingNodes {
+		if node.CliqueID != "" || node.Index < 0 {
+			continue
+		}
+		if _, exists := podsByNode[node.Name]; !exists {
+			continue
+		}
+		indexCounts[node.Index]++
+		nodeCounts[node.Name]++
+		existingIndices[node.Name] = node.Index
+	}
+
+	assignedIndices := make(map[string]int, len(nodeNames))
+	usedIndices := make(map[int]bool, len(nodeNames))
+	for _, nodeName := range nodeNames {
+		index, exists := existingIndices[nodeName]
+		if exists && nodeCounts[nodeName] == 1 && indexCounts[index] == 1 {
+			assignedIndices[nodeName] = index
+			usedIndices[index] = true
+		}
+	}
+
+	nextIndex := 0
+	for _, nodeName := range nodeNames {
+		if _, exists := assignedIndices[nodeName]; exists {
+			continue
+		}
+		for usedIndices[nextIndex] {
+			nextIndex++
+		}
+		assignedIndices[nodeName] = nextIndex
+		usedIndices[nextIndex] = true
+	}
+
+	nodes := make([]*nvapi.ComputeDomainNode, 0, len(nodeNames))
+	for _, nodeName := range nodeNames {
+		pod := podsByNode[nodeName]
 
 		status := nvapi.ComputeDomainStatusNotReady
 		for _, condition := range pod.Status.Conditions {
@@ -272,14 +326,39 @@ func (m *ComputeDomainStatusManager) buildNodesFromPods(pods []*corev1.Pod) []*n
 		}
 
 		nodes = append(nodes, &nvapi.ComputeDomainNode{
-			Name:      pod.Spec.NodeName,
+			Name:      nodeName,
 			IPAddress: pod.Status.PodIP,
 			CliqueID:  "",
-			Index:     -1,
+			Index:     assignedIndices[nodeName],
 			Status:    status,
 		})
 	}
 	return nodes
+}
+
+// preferNonFabricPod deterministically selects the active pod when a rollout
+// temporarily leaves more than one daemon pod on the same node.
+func preferNonFabricPod(candidate, current *corev1.Pod) bool {
+	if (candidate.DeletionTimestamp == nil) != (current.DeletionTimestamp == nil) {
+		return candidate.DeletionTimestamp == nil
+	}
+
+	candidateTerminal := candidate.Status.Phase == corev1.PodSucceeded || candidate.Status.Phase == corev1.PodFailed
+	currentTerminal := current.Status.Phase == corev1.PodSucceeded || current.Status.Phase == corev1.PodFailed
+	if candidateTerminal != currentTerminal {
+		return !candidateTerminal
+	}
+
+	if !candidate.CreationTimestamp.Equal(&current.CreationTimestamp) {
+		return candidate.CreationTimestamp.After(current.CreationTimestamp.Time)
+	}
+	if candidate.Name != current.Name {
+		return candidate.Name > current.Name
+	}
+	if candidate.UID != current.UID {
+		return candidate.UID > current.UID
+	}
+	return candidate.Status.PodIP > current.Status.PodIP
 }
 
 // cleanupClique removes stale daemon entries from a single clique.

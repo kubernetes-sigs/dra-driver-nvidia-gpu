@@ -127,8 +127,9 @@ type ComputeDomainNode struct {
 	// mapping across all machines within an IMEX domain. Each node's index
 	// directly determines its DNS name within a given NVLink partition
 	// (i.e. clique). In other words, the 2-tuple of (CliqueID, Index) will
-	// always be unique. This field is marked as optional (but not
-	// omitempty) in order to support downgrades and avoid an API bump.
+	// always be unique. Nodes without a clique receive a stable synthetic index
+	// which is not used for DNS mapping. This field is marked as optional (but
+	// not omitempty) in order to support downgrades and avoid an API bump.
 	// +kubebuilder:validation:Optional
 	Index int `json:"index"`
 	// The Status field tracks the readiness of the IMEX daemon running on

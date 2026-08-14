@@ -151,7 +151,7 @@ spec:
 | `status.nodes[].name` | string | Node name. |
 | `status.nodes[].ipAddress` | string | Node IP used by the IMEX daemon. |
 | `status.nodes[].cliqueID` | string | NVLink clique identifier for the node. |
-| `status.nodes[].index` | integer | Deterministic index for the node within its clique. Used to map IPs to DNS names. |
+| `status.nodes[].index` | integer | Deterministic index for the node within its clique. Used to map IPs to DNS names for fabric-attached nodes; nodes without a clique receive a stable synthetic index that is not used for DNS mapping. |
 | `status.nodes[].status` | string | Per-node daemon readiness: `Ready` or `NotReady`. |
 
 {{% alert title="Note" %}}
