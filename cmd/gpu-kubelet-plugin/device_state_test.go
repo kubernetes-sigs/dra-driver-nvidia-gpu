@@ -673,3 +673,51 @@ func TestIsAdminAccessIgnoresOtherDrivers(t *testing.T) {
 
 	require.True(t, isAdminAccess(results))
 }
+
+// Prepare() checkpoints the claim status whole, so a ResourceClaim allocated
+// from more than one driver leaves results here that we do not own.
+func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
+	const ownedMIG = "gpu-0-mig-1g10gb-19-0"
+
+	// nvdevlib is the only part of this path that talks to hardware, so leaving
+	// it nil turns reaching MIG teardown into a panic the test can see.
+	state := &DeviceState{}
+
+	claimWith := func(results ...resourceapi.DeviceRequestAllocationResult) PreparedClaim {
+		return PreparedClaim{Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{Results: results},
+			},
+		}}
+	}
+
+	// Only a dynamic MIG device of ours brings either caller here, so the mixed
+	// claim carries one, held back from teardown by a completed claim.
+	t.Run("another driver's MIG-shaped name", func(t *testing.T) {
+		completed := claimWith(resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: ownedMIG})
+		completed.CheckpointState = ClaimCheckpointStatePrepareCompleted
+
+		pc := claimWith(
+			resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: "gpu-0-mig-foreign-19-0"},
+			resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: ownedMIG},
+		)
+
+		var err error
+		require.NotPanics(t, func() {
+			err = state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
+				&Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{"completed": completed}}})
+		}, "a result owned by another driver MUST NOT reach MIG teardown")
+		require.NoError(t, err)
+	})
+
+	// Without this the case above would pass just as well if the loop stopped
+	// looking at MIG devices at all.
+	t.Run("our own MIG name", func(t *testing.T) {
+		pc := claimWith(resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: ownedMIG})
+
+		require.Panics(t, func() {
+			_ = state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
+				&Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
+		}, "our own result MUST still reach MIG teardown")
+	})
+}
