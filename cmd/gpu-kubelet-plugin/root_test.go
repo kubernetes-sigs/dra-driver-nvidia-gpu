@@ -190,7 +190,7 @@ func TestRootGetDriverAndBinaryPaths(t *testing.T) {
 		return want
 	}
 	wantNVML := writeFile("usr/lib64/libnvidia-ml.so.1")
-	wantFM := writeFile("usr/lib64/libnvfm.so")
+	wantFM := writeFile("usr/lib64/libnvfm.so.1")
 	wantSMI := writeFile("usr/bin/nvidia-smi")
 
 	r := root(testRoot)

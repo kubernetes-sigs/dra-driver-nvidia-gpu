@@ -48,7 +48,7 @@ func (r root) getDriverLibraryPath() (string, error) {
 }
 
 func (r root) getFMLibraryPath() (string, error) {
-	libraryPath, err := r.findFile("libnvfm.so", librarySearchPaths...)
+	libraryPath, err := r.findFile("libnvfm.so.1", librarySearchPaths...)
 	if err != nil {
 		return "", err
 	}
