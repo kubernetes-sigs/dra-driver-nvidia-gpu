@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -674,14 +675,45 @@ func TestIsAdminAccessIgnoresOtherDrivers(t *testing.T) {
 	require.True(t, isAdminAccess(results))
 }
 
+// nvmlStub answers the handful of calls the MIG teardown path makes and counts
+// the parent lookup. Anything else it is asked for panics, which is the signal
+// we want if that path ever grows.
+type nvmlStub struct {
+	nvml.Interface
+	handleLookups int
+}
+
+func (s *nvmlStub) InitWithFlags(uint32) nvml.Return { return nvml.SUCCESS }
+func (s *nvmlStub) Shutdown() nvml.Return            { return nvml.SUCCESS }
+
+func (s *nvmlStub) DeviceGetHandleByUUID(string) (nvml.Device, nvml.Return) {
+	s.handleLookups++
+	return migFreeGPU{}, nvml.SUCCESS
+}
+
+// migFreeGPU is a GPU with no MIG devices on it. A real one answers a count of
+// zero here, so the spec lookup iterates nothing and finds nothing to delete.
+type migFreeGPU struct {
+	nvml.Device
+}
+
+func (migFreeGPU) GetMaxMigDeviceCount() (int, nvml.Return) { return 0, nvml.SUCCESS }
+
 // Prepare() checkpoints the claim status whole, so a ResourceClaim allocated
 // from more than one driver leaves results here that we do not own.
 func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
 	const ownedMIG = "gpu-0-mig-1g10gb-19-0"
 
-	// nvdevlib is the only part of this path that talks to hardware, so leaving
-	// it nil turns reaching MIG teardown into a panic the test can see.
-	state := &DeviceState{}
+	// MIG teardown reaches hardware by looking the parent GPU up through NVML, so
+	// counting that lookup is how a case sees which results got that far.
+	newState := func() (*DeviceState, *nvmlStub) {
+		nvmllib := &nvmlStub{}
+		state := &DeviceState{nvdevlib: &deviceLib{
+			nvmllib:         nvmllib,
+			devhandleByUUID: make(map[string]nvml.Device),
+		}}
+		return state, nvmllib
+	}
 
 	claimWith := func(results ...resourceapi.DeviceRequestAllocationResult) PreparedClaim {
 		return PreparedClaim{Status: resourceapi.ResourceClaimStatus{
@@ -694,6 +726,8 @@ func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
 	// Only a dynamic MIG device of ours brings either caller here, so the mixed
 	// claim carries one, held back from teardown by a completed claim.
 	t.Run("another driver's MIG-shaped name", func(t *testing.T) {
+		state, nvmllib := newState()
+
 		completed := claimWith(resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: ownedMIG})
 		completed.CheckpointState = ClaimCheckpointStatePrepareCompleted
 
@@ -702,22 +736,26 @@ func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
 			resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: ownedMIG},
 		)
 
-		var err error
-		require.NotPanics(t, func() {
-			err = state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
-				&Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{"completed": completed}}})
-		}, "a result owned by another driver MUST NOT reach MIG teardown")
+		err := state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
+			&Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{"completed": completed}}})
+
 		require.NoError(t, err)
+		require.Zero(t, nvmllib.handleLookups,
+			"a result owned by another driver MUST NOT reach MIG teardown")
 	})
 
 	// Without this the case above would pass just as well if the loop stopped
 	// looking at MIG devices at all.
 	t.Run("our own MIG name", func(t *testing.T) {
+		state, nvmllib := newState()
+
 		pc := claimWith(resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: ownedMIG})
 
-		require.Panics(t, func() {
-			_ = state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
-				&Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
-		}, "our own result MUST still reach MIG teardown")
+		err := state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
+			&Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
+
+		require.NoError(t, err)
+		require.Equal(t, 1, nvmllib.handleLookups,
+			"our own result MUST still reach MIG teardown")
 	})
 }
