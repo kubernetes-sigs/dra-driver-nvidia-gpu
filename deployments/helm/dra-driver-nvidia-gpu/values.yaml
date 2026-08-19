@@ -41,6 +41,44 @@ gpuResourcesEnabledOverride: false
 # Configure consumable shares support ("disabled", "memory", "unlimited", or a positive integer)
 consumableShares: ""
 
+# Node-allocatable overhead published on devices, per device class: gpu
+# (full GPUs), mig (statically and dynamically partitioned MIG devices), and
+# vfio (passthrough devices). Each value is an optional Kubernetes resource
+# quantity (e.g. "100Mi", "250m") describing the node memory/CPU overhead
+# consumed per pod or per container using such a device. Empty or zero values
+# are omitted from the published ResourceSlices; a class with no values
+# publishes nothing. Setting any value requires
+# featureGates.NodeAllocatableResources=true; the plugin fails to start
+# otherwise. The cluster must also enable the Kubernetes feature gate
+# DRANodeAllocatableResources for the field to be accepted by the API server.
+# Caution for vfio: when passthrough devices are consumed by VMs (e.g.
+# KubeVirt), guest RAM pinning is typically already accounted through the VM
+# pod's own memory requests; configuring vfio overhead on top of that double
+# counts. Leave the vfio values empty unless you know your VM stack does not
+# account for it.
+nodeAllocatableOverhead:
+  gpu:
+    memory:
+      perPod: ""
+      perContainer: ""
+    cpu:
+      perPod: ""
+      perContainer: ""
+  mig:
+    memory:
+      perPod: ""
+      perContainer: ""
+    cpu:
+      perPod: ""
+      perContainer: ""
+  vfio:
+    memory:
+      perPod: ""
+      perContainer: ""
+    cpu:
+      perPod: ""
+      perContainer: ""
+
 allowDefaultNamespace: false
 
 # resourceApiVersion sets the resource.k8s.io API version used for DRA resources (DeviceClass,
@@ -118,6 +156,7 @@ resources:
 #   HostManagedIMEXDaemon: false       # Gate allowing resources.computeDomains.imex.mode=hostManaged
 #   DRAListTypeAttributes: false       # Publish list-valued DRA device attributes
 #   ConsumableShares: false            # Publish consumable capacity and multi-allocation support for devices
+#   NodeAllocatableResources: false    # Publish node-allocatable overhead for gpu, mig, and vfio devices (see nodeAllocatableOverhead)
 featureGates: {}
 
 # Log verbosity for all components. Zero or greater, higher number means higher

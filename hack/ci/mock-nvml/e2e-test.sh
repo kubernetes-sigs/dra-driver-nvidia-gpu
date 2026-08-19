@@ -200,11 +200,14 @@ if [ "${K8S_MINOR}" -ge 35 ]; then
   echo "K8s >= 1.35 (${RESOLVED_K8S_VERSION}): enabling DRAExtendedResource,DRAPartitionableDevices"
 fi
 TEST_DRA_LIST_TYPE_ATTRIBUTES=false
+TEST_DRA_NODE_ALLOCATABLE_RESOURCES=false
 if [ "${K8S_MINOR}" -ge 37 ]; then
   TEST_DRA_LIST_TYPE_ATTRIBUTES=true
-  echo "K8s >= 1.37 (${RESOLVED_K8S_VERSION}): enabling DRAListTypeAttributes"
+  TEST_DRA_NODE_ALLOCATABLE_RESOURCES=true
+  echo "K8s >= 1.37 (${RESOLVED_K8S_VERSION}): enabling DRAListTypeAttributes,DRANodeAllocatableResources"
 fi
 export TEST_DRA_LIST_TYPE_ATTRIBUTES
+export TEST_DRA_NODE_ALLOCATABLE_RESOURCES
 
 # --- Step 4: Create Kind cluster ---
 echo ""
@@ -262,11 +265,23 @@ fi
 if [ "${TEST_DRA_LIST_TYPE_ATTRIBUTES}" = "true" ]; then
   sed -i '/DynamicResourceAllocation: true/a\  DRAListTypeAttributes: true' "${KIND_CONFIG}"
 fi
+if [ "${TEST_DRA_NODE_ALLOCATABLE_RESOURCES}" = "true" ]; then
+  # KEP-5517 (alpha in 1.37): lets test_gpu_node_allocatable.bats verify
+  # node-allocatable overhead publishing and scheduler accounting.
+  sed -i '/DynamicResourceAllocation: true/a\  DRANodeAllocatableResources: true' "${KIND_CONFIG}"
+fi
 
 # Select Kind node image if k8s version specified
 KIND_IMAGE_ARG=""
 if [ -n "${K8S_VERSION}" ]; then
   KIND_IMAGE_ARG="--image kindest/node:${K8S_VERSION}"
+  # Pre-release versions have no published kindest/node image; build one from
+  # source so the script also works for release candidates.
+  if ! docker image inspect "kindest/node:${K8S_VERSION}" > /dev/null 2>&1 \
+     && ! docker manifest inspect "kindest/node:${K8S_VERSION}" > /dev/null 2>&1; then
+    echo "No kindest/node:${K8S_VERSION} image available; building it from source"
+    kind build node-image "${K8S_VERSION}" --image "kindest/node:${K8S_VERSION}"
+  fi
 fi
 
 kind create cluster \

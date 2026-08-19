@@ -309,6 +309,18 @@ spec:
         - name: CONSUMABLE_SHARES
           value: "{{ .Values.consumableShares }}"
         {{- end }}
+        {{- range $class := tuple "gpu" "mig" "vfio" }}
+        {{- $classValues := get (default (dict) $.Values.nodeAllocatableOverhead) $class | default (dict) }}
+        {{- range $res := tuple "memory" "cpu" }}
+        {{- $resValues := get $classValues $res | default (dict) }}
+        {{- range $granularity := tuple "Pod" "Container" }}
+        {{- with get $resValues (printf "per%s" $granularity) }}
+        - name: NODE_ALLOCATABLE_{{ upper $class }}_{{ upper $res }}_OVERHEAD_PER_{{ upper $granularity }}
+          value: {{ . | quote }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
         {{- if .Values.featureGates }}
         - name: FEATURE_GATES
           value: "{{ range $key, $value := .Values.featureGates }}{{ $key }}={{ $value }},{{ end }}"

@@ -30,6 +30,8 @@ import (
 
 	"github.com/urfave/cli/v2"
 
+	corev1 "k8s.io/api/core/v1"
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/component-base/logs"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
@@ -68,13 +70,18 @@ type Flags struct {
 	klogVerbosity                 int
 	additionalXidsToIgnore        string
 	consumableShares              string
+
+	gpuNodeAllocatableOverhead  nodeAllocatableOverheadValues
+	migNodeAllocatableOverhead  nodeAllocatableOverheadValues
+	vfioNodeAllocatableOverhead nodeAllocatableOverheadValues
 }
 
 type Config struct {
-	flags                *Flags
-	clientsets           pkgflags.ClientSets
-	imagePullSecretNames []string
-	imagePullPolicy      string
+	flags                    *Flags
+	clientsets               pkgflags.ClientSets
+	imagePullSecretNames     []string
+	imagePullPolicy          string
+	nodeAllocatableOverheads map[string]map[corev1.ResourceName]resourceapi.NodeAllocatableResource
 }
 
 func (c Config) DriverPluginPath() string {
@@ -218,6 +225,7 @@ func newApp() *cli.App {
 			EnvVars:     []string{"CONSUMABLE_SHARES"},
 		},
 	}
+	cliFlags = append(cliFlags, nodeAllocatableOverheadCLIFlags(flags)...)
 	cliFlags = append(cliFlags, flags.kubeClientConfig.Flags()...)
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)
 	cliFlags = append(cliFlags, loggingConfig.Flags()...)
@@ -256,11 +264,17 @@ func newApp() *cli.App {
 				return fmt.Errorf("create client: %w", err)
 			}
 
+			nodeAllocatableOverheads, err := parseNodeAllocatableOverheadFlags(flags)
+			if err != nil {
+				return err
+			}
+
 			config := &Config{
-				flags:                flags,
-				clientsets:           clientSets,
-				imagePullSecretNames: strings.Fields(strings.ReplaceAll(strings.TrimSpace(flags.imagePullSecrets), ",", " ")),
-				imagePullPolicy:      strings.TrimSpace(flags.imagePullPolicy),
+				flags:                    flags,
+				clientsets:               clientSets,
+				imagePullSecretNames:     strings.Fields(strings.ReplaceAll(strings.TrimSpace(flags.imagePullSecrets), ",", " ")),
+				imagePullPolicy:          strings.TrimSpace(flags.imagePullPolicy),
+				nodeAllocatableOverheads: nodeAllocatableOverheads,
 			}
 
 			return RunPlugin(c.Context, config)

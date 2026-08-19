@@ -146,7 +146,20 @@ func TestDefaultFeatureGates(t *testing.T) {
 		// Test that real features have expected defaults
 		require.False(t, fg.Enabled(TimeSlicingSettings), "TimeSlicingSettings should be disabled by default (alpha)")
 		require.False(t, fg.Enabled(HostManagedIMEXDaemon), "HostManagedIMEXDaemon should be disabled by default (alpha)")
+		require.False(t, fg.Enabled(NodeAllocatableResources), "NodeAllocatableResources should be disabled by default (alpha)")
 	})
+}
+
+func TestNodeAllocatableResourcesFeatureGate(t *testing.T) {
+	fg := newFeatureGates(TestVersion)
+
+	require.False(t, fg.Enabled(NodeAllocatableResources), "NodeAllocatableResources should be disabled by default (alpha)")
+
+	err := fg.SetFromMap(map[string]bool{
+		string(NodeAllocatableResources): true,
+	})
+	require.NoError(t, err, "SetFromMap should not fail")
+	require.True(t, fg.Enabled(NodeAllocatableResources), "NodeAllocatableResources should be enabled after SetFromMap")
 }
 
 func TestEnabledConvenienceFunction(t *testing.T) {

@@ -1,0 +1,32 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: single-gpu
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-overhead-pod
+spec:
+  restartPolicy: Never
+  containers:
+  - name: ctr
+    image: ubuntu:24.04
+    command: ["bash", "-c", "nvidia-smi -L; sleep 3600"]
+    resources:
+      requests:
+        memory: 128Mi
+      limits:
+        memory: 128Mi
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: single-gpu

@@ -219,12 +219,14 @@ func (d *AllocatableDevice) PartGetDevice(config *Config) resourceapi.Device {
 	case GpuDeviceType:
 		dev := d.Gpu.PartGetDevice()
 		applyConsumableShares(&dev, config)
+		applyNodeAllocatableOverheads(&dev, config, overheadClassGpu)
 		return dev
 	case MigStaticDeviceType:
 		panic("PartGetDevice() called for MigStaticDeviceType")
 	case MigDynamicDeviceType:
 		dev := d.MigDynamic.PartGetDevice()
 		applyConsumableShares(&dev, config)
+		applyNodeAllocatableOverheads(&dev, config, overheadClassMig)
 		return dev
 	case VfioDeviceType:
 		panic("not yet implemented")

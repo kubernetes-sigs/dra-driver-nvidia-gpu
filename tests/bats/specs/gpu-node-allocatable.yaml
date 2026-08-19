@@ -1,0 +1,37 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: rct-node-allocatable-gpu
+  labels:
+    env: batssuite
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-node-allocatable-0
+  labels:
+    env: batssuite
+spec:
+  restartPolicy: Never
+  containers:
+  - name: ctr
+    image: ubuntu:24.04
+    command: ["bash", "-c"]
+    args: ["nvidia-smi -L; trap 'exit 0' TERM; sleep 9999 & wait"]
+    resources:
+      requests:
+        memory: 128Mi
+      limits:
+        memory: 128Mi
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: rct-node-allocatable-gpu

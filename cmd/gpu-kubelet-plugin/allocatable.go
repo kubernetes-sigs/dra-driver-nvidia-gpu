@@ -101,16 +101,20 @@ func (d *AllocatableDevice) GetDevice(config *Config) resourceapi.Device {
 	case GpuDeviceType:
 		dev := d.Gpu.GetDevice()
 		applyConsumableShares(&dev, config)
+		applyNodeAllocatableOverheads(&dev, config, overheadClassGpu)
 		return dev
 	case MigStaticDeviceType:
 		dev := d.MigStatic.GetDevice()
 		applyConsumableShares(&dev, config)
+		applyNodeAllocatableOverheads(&dev, config, overheadClassMig)
 		return dev
 	case MigDynamicDeviceType:
 		panic("GetDevice() must currently not be called for MigDynamicDeviceType")
 	case VfioDeviceType:
 		// VFIO passthrough devices do not support consumable shares.
-		return d.Vfio.GetDevice()
+		dev := d.Vfio.GetDevice()
+		applyNodeAllocatableOverheads(&dev, config, overheadClassVfio)
+		return dev
 	default:
 		panic("unexpected type for AllocatableDevice")
 	}

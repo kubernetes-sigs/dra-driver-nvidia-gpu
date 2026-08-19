@@ -103,6 +103,14 @@ const (
 	// via --consumable-shares. Note: MPS sharing is not supported when consumable
 	// shares is enabled.
 	ConsumableShares featuregate.Feature = "ConsumableShares"
+
+	// NodeAllocatableResources enables publishing node-allocatable overhead
+	// (KEP-5517) for full-GPU devices in ResourceSlices. Overhead values are
+	// configured via the --node-allocatable-*-overhead-per-* flags of the GPU
+	// kubelet plugin. The cluster must have the Kubernetes feature gate
+	// DRANodeAllocatableResources enabled for the API server to accept the
+	// published field.
+	NodeAllocatableResources featuregate.Feature = "NodeAllocatableResources"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -199,6 +207,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		},
 	},
 	ConsumableShares: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 5),
+		},
+	},
+	NodeAllocatableResources: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
