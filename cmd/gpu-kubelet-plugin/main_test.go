@@ -100,3 +100,62 @@ func TestValidateCLIFlagsConsumableShares(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCLIFlagsSeamlessUpgrades(t *testing.T) {
+	tests := []struct {
+		name        string
+		featureGate bool
+		podUID      string
+		expectErr   bool
+	}{
+		{
+			name:        "feature gate enabled with pod UID succeeds",
+			featureGate: true,
+			podUID:      "08a5f01c-b566-45ea-abb9-6522b1bcbc22",
+			expectErr:   false,
+		},
+		{
+			name:        "feature gate enabled without pod UID fails",
+			featureGate: true,
+			podUID:      "",
+			expectErr:   true,
+		},
+		{
+			name:        "feature gate disabled without pod UID succeeds",
+			featureGate: false,
+			podUID:      "",
+			expectErr:   false,
+		},
+		{
+			name:        "feature gate disabled with pod UID succeeds",
+			featureGate: false,
+			podUID:      "08a5f01c-b566-45ea-abb9-6522b1bcbc22",
+			expectErr:   false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+				string(featuregates.SeamlessUpgrades): tc.featureGate,
+			}))
+			t.Cleanup(func() {
+				require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+					string(featuregates.SeamlessUpgrades): false,
+				}))
+			})
+
+			flags := &Flags{
+				consumableShares: "disabled",
+				podUID:           tc.podUID,
+			}
+
+			err := validateCLIFlags(flags)
+			if tc.expectErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}

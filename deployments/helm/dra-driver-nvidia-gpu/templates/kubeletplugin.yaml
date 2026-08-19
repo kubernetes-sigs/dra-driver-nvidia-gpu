@@ -162,6 +162,13 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        # POD_UID is used to derive unique socket names so that two plugin
+        # instances can run concurrently during a rolling update (only acted
+        # upon with the SeamlessUpgrades feature gate enabled).
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
         {{- if .Values.nvidiaCDIHookPath }}
         - name: NVIDIA_CDI_HOOK_PATH
           value: "{{ .Values.nvidiaCDIHookPath }}"
@@ -287,6 +294,13 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        # POD_UID is used to derive unique socket names so that two plugin
+        # instances can run concurrently during a rolling update (only acted
+        # upon with the SeamlessUpgrades feature gate enabled).
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
         - name: SERVICE_ACCOUNT_NAME
           valueFrom:
             fieldRef:

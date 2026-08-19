@@ -195,6 +195,7 @@ tests-mock-nvml: runner-image
 		tests/bats/test_gpu_extres.bats \
 		tests/bats/test_gpu_stress.bats \
 		tests/bats/test_gpu_updowngrade.bats \
+		tests/bats/test_gpu_seamless_upgrades.bats \
 		tests/bats/test_cd_imex_chan_inject.bats \
 		tests/bats/test_cd_misc.bats \
 		tests/bats/test_cd_logging.bats \
@@ -236,6 +237,7 @@ tests-gpu: runner-image
 		tests/bats/test_gpu_dynmig.bats \
 		tests/bats/test_gpu_mig.bats \
 		tests/bats/test_gpu_updowngrade.bats \
+		tests/bats/test_gpu_seamless_upgrades.bats \
 		tests/bats/test_gpu_stress.bats)
 
 # Run a subset covering mainly the CD plugin
@@ -260,6 +262,7 @@ tests: runner-image
 		tests/bats/test_gpu_dynmig.bats \
 		tests/bats/test_gpu_mig.bats \
 		tests/bats/test_gpu_updowngrade.bats \
+		tests/bats/test_gpu_seamless_upgrades.bats \
 		tests/bats/test_cd_imex_chan_inject.bats \
 		tests/bats/test_cd_mnnvl_workload.bats \
 		tests/bats/test_cd_misc.bats \

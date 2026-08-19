@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -45,7 +47,11 @@ import (
 // never valid in that mode (see applyComputeDomainDaemonConfig).
 func computeDomainPublishedDevices(allocatable AllocatableDevices, hostManaged bool) []resourceapi.Device {
 	var devices []resourceapi.Device
-	for _, device := range allocatable {
+	// Iterate in a stable (sorted) order so that the published device order is
+	// deterministic across plugin processes (see the gpu plugin's
+	// publishResources for the rationale).
+	for _, name := range slices.Sorted(maps.Keys(allocatable)) {
+		device := allocatable[name]
 		if device.Type() == ComputeDomainChannelType && device.Channel.ID != 0 {
 			continue
 		}
@@ -101,9 +107,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		pulock: flock.NewFlock(puLockPath),
 	}
 
-	helper, err := kubeletplugin.Start(
-		ctx,
-		driver,
+	opts := []kubeletplugin.Option{
 		kubeletplugin.KubeClient(driver.client),
 		kubeletplugin.NodeName(config.flags.nodeName),
 		kubeletplugin.DriverName(DriverName),
@@ -116,7 +120,16 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		kubeletplugin.Serialize(false),
 		kubeletplugin.RegistrarDirectoryPath(config.flags.kubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
-	)
+	}
+	// With the SeamlessUpgrades feature gate enabled, derive unique (pod
+	// UID-suffixed) socket names so that an old and a new plugin instance can
+	// serve concurrently during a DaemonSet rolling update. Cross-instance
+	// serialization of prepare/unprepare is provided by the node-global
+	// file-based pu.lock; kubeletplugin.Serialize stays disabled.
+	if podUID := config.RollingUpdatePodUID(); podUID != "" {
+		opts = append(opts, kubeletplugin.RollingUpdate(types.UID(podUID)))
+	}
+	helper, err := kubeletplugin.Start(ctx, driver, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -159,20 +172,26 @@ func (d *driver) Shutdown() error {
 		return nil
 	}
 
+	var errs []error
 	if err := d.state.computeDomainManager.Stop(); err != nil {
-		return fmt.Errorf("error stopping ComputeDomainManager: %w", err)
+		errs = append(errs, fmt.Errorf("error stopping ComputeDomainManager: %w", err))
 	}
 
 	if err := d.state.checkpointCleanupManager.Stop(); err != nil {
-		return fmt.Errorf("error stopping CheckpointCleanupManager: %w", err)
+		errs = append(errs, fmt.Errorf("error stopping CheckpointCleanupManager: %w", err))
 	}
 
 	if d.healthcheck != nil {
 		d.healthcheck.Stop()
 	}
 
+	// Always stop the plugin helper, even if earlier shutdown steps failed: it
+	// removes this instance's registration and DRA sockets. With rolling
+	// updates enabled, socket names are unique per pod, and a socket leaked
+	// here can never be cleaned up by a later instance.
 	d.pluginhelper.Stop()
-	return nil
+
+	return errors.Join(errs...)
 }
 
 func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceapi.ResourceClaim) (map[types.UID]kubeletplugin.PrepareResult, error) {

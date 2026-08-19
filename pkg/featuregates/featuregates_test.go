@@ -522,6 +522,32 @@ func TestValidateFeatureGates(t *testing.T) {
 			expectError: false,
 			description: "should be valid when both FabricManagerPartitioning and PassthroughSupport are enabled",
 		},
+		{
+			name:         "SeamlessUpgrades enabled with NVMLDeviceHealthCheck",
+			fgMap:        map[featuregate.Feature]bool{SeamlessUpgrades: true, NVMLDeviceHealthCheck: true},
+			expectError:  true,
+			errorMessage: "feature gate SeamlessUpgrades is currently mutually exclusive with NVMLDeviceHealthCheck",
+			description:  "should fail when both SeamlessUpgrades and NVMLDeviceHealthCheck are enabled",
+		},
+		{
+			name:         "SeamlessUpgrades enabled with PassthroughSupport",
+			fgMap:        map[featuregate.Feature]bool{SeamlessUpgrades: true, PassthroughSupport: true},
+			expectError:  true,
+			errorMessage: "feature gate SeamlessUpgrades is currently mutually exclusive with PassthroughSupport",
+			description:  "should fail when both SeamlessUpgrades and PassthroughSupport are enabled",
+		},
+		{
+			name:        "Only SeamlessUpgrades enabled",
+			fgMap:       map[featuregate.Feature]bool{SeamlessUpgrades: true, NVMLDeviceHealthCheck: false, PassthroughSupport: false},
+			expectError: false,
+			description: "should be valid when only SeamlessUpgrades is enabled",
+		},
+		{
+			name:        "SeamlessUpgrades enabled with DynamicMIG",
+			fgMap:       map[featuregate.Feature]bool{SeamlessUpgrades: true, DynamicMIG: true},
+			expectError: false,
+			description: "should be valid when SeamlessUpgrades and DynamicMIG are both enabled",
+		},
 	}
 
 	for _, tt := range tests {

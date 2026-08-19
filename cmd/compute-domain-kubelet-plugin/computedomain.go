@@ -179,10 +179,21 @@ func (m *ComputeDomainManager) Stop() error {
 	m.waitGroup.Wait()
 
 	if m.config.flags.gpuCliqueLabelEnabled {
-		rmCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := m.RemoveGPUCliqueLabel(rmCtx); err != nil {
-			klog.Errorf("error removing %s node label: %v", gpuCliqueLabelKey, err)
+		if featuregates.Enabled(featuregates.SeamlessUpgrades) {
+			// During a seamless rolling update, the replacement plugin instance
+			// has typically already set the label by the time this (old)
+			// instance shuts down; removing it here would leave the node
+			// unlabeled until the next periodic refresh (up to
+			// gpuCliqueLabelRefreshInterval). Leave the label in place: on
+			// actual driver teardown it goes stale, which matches the
+			// pre-existing behavior for any non-graceful shutdown.
+			klog.Infof("SeamlessUpgrades enabled: leaving %s node label in place on shutdown", gpuCliqueLabelKey)
+		} else {
+			rmCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := m.RemoveGPUCliqueLabel(rmCtx); err != nil {
+				klog.Errorf("error removing %s node label: %v", gpuCliqueLabelKey, err)
+			}
 		}
 	}
 

@@ -280,6 +280,24 @@ kubeletPlugin:
     computeDomainHttpEndpoint: ":8081"
     metricsPath: "/metrics"
   priorityClassName: "system-node-critical"
+  # For seamless (zero-downtime) upgrades, enable the SeamlessUpgrades feature
+  # gate (featureGates.SeamlessUpgrades=true) and use a surge-based update
+  # strategy so that the new plugin instance starts before the old one stops:
+  #
+  #   updateStrategy:
+  #     type: RollingUpdate
+  #     rollingUpdate:
+  #       maxSurge: 1
+  #       maxUnavailable: 0
+  #
+  # IMPORTANT: maxUnavailable must be explicitly set to 0 together with
+  # maxSurge. Setting only maxSurge (e.g. via a single --set flag) merges with
+  # the default maxUnavailable of "100%" below, and the Kubernetes API server
+  # rejects a DaemonSet with maxSurge and a non-zero maxUnavailable.
+  #
+  # This requires a kubelet with support for multiple registrations of the
+  # same DRA driver (Kubernetes >= 1.33). See:
+  # https://pkg.go.dev/k8s.io/dynamic-resource-allocation/kubeletplugin#RollingUpdate
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:

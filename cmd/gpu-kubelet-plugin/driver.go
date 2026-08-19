@@ -75,6 +75,9 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		return nil, err
 	}
 
+	puLockPath := filepath.Join(config.DriverPluginPath(), DriverPrepUprepFlockFileName)
+	pulock := flock.NewFlock(puLockPath)
+
 	useSplitSlices := false
 
 	if featuregates.Enabled(featuregates.DynamicMIG) {
@@ -109,7 +112,27 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 			// completely prepared claims can stay; assuming that the central
 			// scheduler state is equivalent. TODO: review if this logic is correct;
 			// or if it potentially is too invasive for certain edge cases.
-			state.DestroyUnknownMIGDevices(ctx)
+			//
+			// Hold the node-global prepare/unprepare lock during the teardown:
+			// another plugin instance may be running on this node (e.g., during a
+			// rolling update with maxSurge) and must not be mid-Prepare() while we
+			// decide which incarnated MIG devices are unaccounted for -- a MIG
+			// device created after our checkpoint read would otherwise be
+			// mistaken for stale and destroyed.
+			//
+			// This cleanup has always been best-effort: if the lock cannot be
+			// acquired (e.g., another instance is stuck holding it), skip the
+			// teardown instead of failing startup -- skipping is strictly safer
+			// than tearing down MIG devices without the lock. Note that while we
+			// hold the lock, prepare/unprepare calls served by a concurrently
+			// running instance can transiently time out (10 s acquire timeout);
+			// the kubelet retries those.
+			if release, err := pulock.Acquire(ctx, flock.WithTimeout(60*time.Second)); err != nil {
+				klog.Errorf("Skipping unknown MIG device cleanup: error acquiring prep/unprep lock: %v", err)
+			} else {
+				state.DestroyUnknownMIGDevices(ctx)
+				release()
+			}
 
 			// Read Kubernetes API server version to determine which ResourceSlice
 			// model to use.
@@ -121,12 +144,10 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		}
 	}
 
-	puLockPath := filepath.Join(config.DriverPluginPath(), DriverPrepUprepFlockFileName)
-
 	driver := &driver{
 		client:                 config.clientsets.Core,
 		state:                  state,
-		pulock:                 flock.NewFlock(puLockPath),
+		pulock:                 pulock,
 		useSplitResourceSlices: useSplitSlices,
 	}
 
@@ -137,6 +158,14 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		kubeletplugin.Serialize(false),
 		kubeletplugin.RegistrarDirectoryPath(config.flags.kubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
+	}
+	// With the SeamlessUpgrades feature gate enabled, derive unique (pod
+	// UID-suffixed) socket names so that an old and a new plugin instance can
+	// serve concurrently during a DaemonSet rolling update. Cross-instance
+	// serialization of prepare/unprepare is provided by the node-global
+	// file-based pu.lock (see above); kubeletplugin.Serialize stays disabled.
+	if podUID := config.RollingUpdatePodUID(); podUID != "" {
+		opts = append(opts, kubeletplugin.RollingUpdate(types.UID(podUID)))
 	}
 	// KEP-5304: Enable Device Metadata support for the kubelet plugin implementation.
 	// See: https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api
@@ -337,11 +366,17 @@ func (d *driver) Shutdown() error {
 
 	d.wg.Wait()
 
-	if err := d.state.checkpointCleanupManager.Stop(); err != nil {
-		return fmt.Errorf("error stopping CheckpointCleanupManager: %w", err)
-	}
+	cleanupErr := d.state.checkpointCleanupManager.Stop()
 
+	// Always stop the plugin helper, even if earlier shutdown steps failed: it
+	// removes this instance's registration and DRA sockets. With rolling
+	// updates enabled, socket names are unique per pod, and a socket leaked
+	// here can never be cleaned up by a later instance.
 	d.pluginhelper.Stop()
+
+	if cleanupErr != nil {
+		return fmt.Errorf("error stopping CheckpointCleanupManager: %w", cleanupErr)
+	}
 	return nil
 }
 
@@ -485,10 +520,17 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 		return nil
 	}
 
-	// Enumerate the set of GPU, MIG and VFIO devices and publish them
+	// Enumerate the set of GPU, MIG and VFIO devices and publish them.
+	// Iterate in a stable (sorted) order: the published device order must be
+	// deterministic across plugin processes, otherwise every (re)start -- and,
+	// during a rolling update, every one of the two concurrently running
+	// instances -- rewrites the ResourceSlice with the same devices in a
+	// different order, causing needless API churn.
 	var resourceSlice resourceslice.Slice
-	for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
-		for _, device := range devices {
+	for _, pciBusID := range slices.Sorted(maps.Keys(d.state.perGPUAllocatable.allocatablesMap)) {
+		devices := d.state.perGPUAllocatable.allocatablesMap[pciBusID]
+		for _, devname := range slices.Sorted(maps.Keys(devices)) {
+			device := devices[devname]
 			klog.V(4).Infof("About to announce device %s", device.GetDevice(config).Name)
 			resourceSlice.Devices = append(resourceSlice.Devices, device.GetDevice(config))
 		}
@@ -535,8 +577,10 @@ func (d *driver) deviceHealthEvents(ctx context.Context, nodeName string) {
 			}
 
 			var resourceSlice resourceslice.Slice
-			for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
-				for _, dev := range devices {
+			for _, pciBusID := range slices.Sorted(maps.Keys(d.state.perGPUAllocatable.allocatablesMap)) {
+				devices := d.state.perGPUAllocatable.allocatablesMap[pciBusID]
+				for _, devname := range slices.Sorted(maps.Keys(devices)) {
+					dev := devices[devname]
 					d := dev.GetDevice(d.state.config)
 
 					taints := dev.Taints()

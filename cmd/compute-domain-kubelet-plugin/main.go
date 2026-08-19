@@ -65,6 +65,7 @@ type Flags struct {
 	nvidiaCDIHookPath             string
 	kubeletRegistrarDirectoryPath string
 	kubeletPluginsDirectoryPath   string
+	podUID                        string
 	healthcheckPort               int
 	klogVerbosity                 int
 	gpuCliqueLabelEnabled         bool
@@ -81,6 +82,16 @@ type Config struct {
 
 func (c Config) DriverPluginPath() string {
 	return filepath.Join(c.flags.kubeletPluginsDirectoryPath, DriverName)
+}
+
+// RollingUpdatePodUID returns the pod UID to use for deriving unique
+// (rolling-update-compatible) socket names, or the empty string when seamless
+// upgrades are disabled.
+func (c Config) RollingUpdatePodUID() string {
+	if featuregates.Enabled(featuregates.SeamlessUpgrades) {
+		return c.flags.podUID
+	}
+	return ""
 }
 
 func main() {
@@ -165,6 +176,12 @@ func newApp() *cli.App {
 			Destination: &flags.kubeletPluginsDirectoryPath,
 			EnvVars:     []string{"KUBELET_PLUGINS_DIRECTORY_PATH"},
 		},
+		&cli.StringFlag{
+			Name:        "pod-uid",
+			Usage:       "The UID of this plugin pod. Used to derive unique socket names for seamless upgrades (SeamlessUpgrades feature gate).",
+			Destination: &flags.podUID,
+			EnvVars:     []string{"POD_UID"},
+		},
 		&cli.IntFlag{
 			Name:        "healthcheck-port",
 			Usage:       "Port to start a gRPC healthcheck service. When positive, a literal port number. When zero, a random port is allocated. When negative, the healthcheck service is disabled.",
@@ -229,6 +246,10 @@ func newApp() *cli.App {
 			// Validate feature gate dependencies
 			if err := featuregates.ValidateFeatureGates(); err != nil {
 				return fmt.Errorf("feature gate validation failed: %w", err)
+			}
+
+			if featuregates.Enabled(featuregates.SeamlessUpgrades) && flags.podUID == "" {
+				return fmt.Errorf("feature gate %s requires the pod UID to be set via --pod-uid / POD_UID", featuregates.SeamlessUpgrades)
 			}
 
 			imexConfig := imex.Config{Mode: imex.Mode(flags.imexMode), Isolation: imex.Isolation(flags.imexIsolation)}
@@ -350,7 +371,10 @@ func (c Config) setNvidiaCDIHookPath() error {
 		return fmt.Errorf("error reading nvidia-cdi-hook: %w", err)
 	}
 
-	if err := os.WriteFile(targetPath, input, 0755); err != nil {
+	// Write atomically: the target path is in a shared, node-global directory
+	// and another plugin instance (e.g. during a rolling update) may
+	// concurrently execute or rewrite the binary.
+	if err := common.AtomicWriteFile(targetPath, input, 0755); err != nil {
 		return fmt.Errorf("error copying nvidia-cdi-hook: %w", err)
 	}
 

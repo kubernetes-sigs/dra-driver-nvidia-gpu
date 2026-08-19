@@ -103,6 +103,15 @@ const (
 	// via --consumable-shares. Note: MPS sharing is not supported when consumable
 	// shares is enabled.
 	ConsumableShares featuregate.Feature = "ConsumableShares"
+
+	// SeamlessUpgrades enables rolling-update support in the kubelet plugins:
+	// each plugin instance derives unique (pod UID-suffixed) registration and
+	// DRA socket names so that an old and a new plugin instance can run
+	// concurrently on a node during a DaemonSet rolling update with maxSurge
+	// (no time window without a registered driver). Requires the pod UID to be
+	// passed via --pod-uid / POD_UID (downward API) and a kubelet with support
+	// for multiple registrations of the same driver (Kubernetes >= 1.33).
+	SeamlessUpgrades featuregate.Feature = "SeamlessUpgrades"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -205,6 +214,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(0, 5),
 		},
 	},
+	SeamlessUpgrades: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 5),
+		},
+	},
 }
 
 var (
@@ -273,6 +289,21 @@ func ValidateFeatureGates() error {
 
 	if Enabled(DeviceMetadata) && !Enabled(PassthroughSupport) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", DeviceMetadata, PassthroughSupport)
+	}
+
+	// SeamlessUpgrades allows two plugin instances to run (and hence publish
+	// ResourceSlices) concurrently during a rolling update. That is only safe
+	// when both instances derive identical slice content. NVMLDeviceHealthCheck
+	// (device taints) and PassthroughSupport (sibling-device removal on
+	// prepare/unprepare) publish from instance-local in-memory state that is
+	// not shared via the checkpoint, so the two publishers would overwrite
+	// each other's slices for the duration of the overlap.
+	if Enabled(SeamlessUpgrades) && Enabled(NVMLDeviceHealthCheck) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", SeamlessUpgrades, NVMLDeviceHealthCheck)
+	}
+
+	if Enabled(SeamlessUpgrades) && Enabled(PassthroughSupport) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", SeamlessUpgrades, PassthroughSupport)
 	}
 
 	return nil

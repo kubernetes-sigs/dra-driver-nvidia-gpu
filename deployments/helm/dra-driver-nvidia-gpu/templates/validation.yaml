@@ -128,3 +128,20 @@
 {{- $error = printf "%s\nPlease ensure your cluster supports Dynamic Resource Allocation (DRA) with one of these API versions." $error }}
 {{- fail $error }}
 {{- end }}
+
+{{- with .Values.kubeletPlugin.updateStrategy }}
+{{- with .rollingUpdate }}
+{{- $maxSurge := "0" }}
+{{- if hasKey . "maxSurge" }}{{- $maxSurge = toString .maxSurge }}{{- end }}
+{{- $maxUnavailable := "100%" }}
+{{- if hasKey . "maxUnavailable" }}{{- $maxUnavailable = toString .maxUnavailable }}{{- end }}
+{{- if and (ne $maxSurge "0") (and (ne $maxUnavailable "0") (ne $maxUnavailable "0%")) }}
+{{- $error := "" }}
+{{- $error = printf "%s\nInvalid kubeletPlugin.updateStrategy: maxSurge is set to %s but maxUnavailable is %s." $error $maxSurge $maxUnavailable }}
+{{- $error = printf "%s\nThe Kubernetes API server rejects a DaemonSet with maxSurge and a non-zero maxUnavailable." $error }}
+{{- $error = printf "%s\nSet kubeletPlugin.updateStrategy.rollingUpdate.maxUnavailable=0 together with maxSurge" $error }}
+{{- $error = printf "%s\n(the chart default for maxUnavailable is \"100%%\", which Helm merges with a partial override)." $error }}
+{{- fail $error }}
+{{- end }}
+{{- end }}
+{{- end }}
