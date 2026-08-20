@@ -487,6 +487,36 @@ func expiredPrepareAbortedClaimEntries(cp *Checkpoint, now time.Time, ttl time.D
 	return expired
 }
 
+// validateConfigs normalizes and validates every config on the claim and returns
+// them keyed as configResultsMap keys them. prepareDevices applies nothing until
+// this returns, so one bad config cannot land after a good one has taken effect.
+func validateConfigs(configResultsMap map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult) (map[runtime.Object]configapi.Interface, error) {
+	validated := make(map[runtime.Object]configapi.Interface, len(configResultsMap))
+	for c := range configResultsMap {
+		var config configapi.Interface
+		switch castConfig := c.(type) {
+		case *configapi.ComputeDomainChannelConfig:
+			config = castConfig
+		case *configapi.ComputeDomainDaemonConfig:
+			config = castConfig
+		default:
+			return nil, permanentError{fmt.Errorf("runtime object is not a recognized configuration")}
+		}
+
+		// These failures are deterministic, so spending the prepare deadline on
+		// retries cannot help.
+		if err := config.Normalize(); err != nil {
+			return nil, permanentError{fmt.Errorf("error normalizing config: %w", err)}
+		}
+		if err := config.Validate(); err != nil {
+			return nil, permanentError{fmt.Errorf("error validating config: %w", err)}
+		}
+
+		validated[c] = config
+	}
+	return validated, nil
+}
+
 func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
 	// Generate a mapping of each OpaqueDeviceConfigs to the Device.Results it
 	// applies to. Strict-decode: data is provided by user and may be completely
@@ -496,39 +526,17 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		return nil, fmt.Errorf("error generating configResultsMap: %w", err)
 	}
 
-	// Normalize, validate, and apply all configs associated with devices that
-	// need to be prepared. Track device group configs generated from applying the
-	// config to the set of device allocation results.
+	validatedConfigs, err := validateConfigs(configResultsMap)
+	if err != nil {
+		return nil, err
+	}
+
 	preparedDeviceGroupConfigState := make(map[runtime.Object]*DeviceConfigState)
 	for c, results := range configResultsMap {
-		// Cast the opaque config to a configapi.Interface type
-		var config configapi.Interface
-		switch castConfig := c.(type) {
-		case *configapi.ComputeDomainChannelConfig:
-			config = castConfig
-		case *configapi.ComputeDomainDaemonConfig:
-			config = castConfig
-		default:
-			return nil, fmt.Errorf("runtime object is not a recognized configuration")
-		}
-
-		// Normalize the config to set any implied defaults.
-		if err := config.Normalize(); err != nil {
-			return nil, fmt.Errorf("error normalizing config: %w", err)
-		}
-
-		// Validate the config to ensure its integrity.
-		if err := config.Validate(); err != nil {
-			return nil, fmt.Errorf("error validating config: %w", err)
-		}
-
-		// Apply the config to the list of results associated with it.
-		configState, err := s.applyConfig(ctx, config, claim, results)
+		configState, err := s.applyConfig(ctx, validatedConfigs[c], claim, results)
 		if err != nil {
 			return nil, fmt.Errorf("error applying config: %w", err)
 		}
-
-		// Capture the prepared device group config in the map.
 		preparedDeviceGroupConfigState[c] = configState
 	}
 

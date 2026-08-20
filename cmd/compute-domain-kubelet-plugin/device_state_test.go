@@ -256,6 +256,72 @@ func TestUnprepareClearsAClaimCheckpointedBeforeItsConfigWasRejected(t *testing.
 	require.NotNil(t, pc.AbortedAt)
 }
 
+func TestPrepareDevicesReturnsPermanentErrorForInvalidConfig(t *testing.T) {
+	// An invalid config can never become valid on a retry, so prepareDevices must
+	// return a permanent error rather than one the driver retries for the deadline.
+	state := testDeviceState()
+	claim := &resourceapi.ResourceClaim{
+		Status: claimStatus(
+			[]resourceapi.DeviceRequestAllocationResult{
+				allocationResult("daemon-request", DriverName, "daemon-0", nil),
+			},
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"daemon-request"}, daemonConfig("../x")),
+		),
+	}
+
+	_, err := state.prepareDevices(context.Background(), claim)
+	require.Error(t, err)
+	require.True(t, isPermanentError(err), "an invalid config must be a permanent error, got %v", err)
+}
+
+// validateConfigs is the whole of the first pass, so a claim carrying one good
+// and one bad config has to come back with nothing for prepareDevices to apply,
+// whichever order the map hands them over in.
+func TestValidateConfigsReturnsNothingWhenAnyConfigIsInvalid(t *testing.T) {
+	good := daemonConfig("d3b07384-d9a7-4e2b-8f1a-2c1e6b5a9f00")
+	bad := channelConfig("../x")
+
+	validated, err := validateConfigs(map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult{
+		good: nil,
+		bad:  nil,
+	})
+
+	require.Error(t, err)
+	require.True(t, isPermanentError(err), "an invalid config cannot become valid on a retry, got %v", err)
+	require.Nil(t, validated, "returning the configs it did accept would let the caller apply them")
+}
+
+// The first pass is only worth anything if prepareDevices still runs it before
+// it applies anything, so keep a case on the caller as well: with a good and a
+// bad config, the error has to be the deterministic one from validation rather
+// than whatever applying the good one first would have produced.
+func TestPrepareDevicesRejectsAMixedClaimBeforeApplying(t *testing.T) {
+	state := testDeviceState()
+	state.config = &Config{flags: &Flags{nodeName: "test-node"}}
+	state.computeDomainManager = &ComputeDomainManager{configFilesRoot: t.TempDir()}
+	claim := &resourceapi.ResourceClaim{
+		Status: claimStatus(
+			[]resourceapi.DeviceRequestAllocationResult{
+				allocationResult("daemon-request", DriverName, "daemon-0", nil),
+				allocationResult("channel-request", DriverName, "channel-0", nil),
+			},
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"daemon-request"}, daemonConfig("d3b07384-d9a7-4e2b-8f1a-2c1e6b5a9f00")),
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"channel-request"}, channelConfig("../x")),
+		),
+	}
+
+	// Map order decides which config a single-pass caller would reach first, so
+	// repeat: the error has to come from validation every time, never from
+	// applying the good one.
+	for i := 0; i < 10; i++ {
+		_, err := state.prepareDevices(context.Background(), claim)
+
+		require.Error(t, err)
+		require.True(t, isPermanentError(err), "applying before validating would surface an apply error instead, got %v", err)
+		require.Contains(t, err.Error(), "error validating config")
+	}
+}
+
 func TestRequestedNonAdminDevices(t *testing.T) {
 	state := &DeviceState{}
 	claim := claimWithResults(
