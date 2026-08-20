@@ -30,6 +30,7 @@ import (
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	"k8s.io/utils/ptr"
+	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -212,6 +213,47 @@ func TestGetConfigResultsMap(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot apply ComputeDomainDaemonConfig")
 	})
+}
+
+// A ResourceClaim can be authored directly and the chart ships the validating
+// webhook off by default, so a hand-written compute-domain config reaches the
+// plugin. Prepare checkpoints the claim before it validates that config, so the
+// entry it leaves behind is one Unprepare has to be able to clear.
+func TestUnprepareClearsAClaimCheckpointedBeforeItsConfigWasRejected(t *testing.T) {
+	claim := &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim-uid", Namespace: "default", UID: types.UID("claim-uid")},
+		Status: claimStatus(
+			[]resourceapi.DeviceRequestAllocationResult{
+				allocationResult("daemon-request", DriverName, "daemon-0", nil),
+			},
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"daemon-request"}, daemonConfig("../x")),
+		),
+	}
+
+	cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(t.TempDir()), cdiapi.WithAutoRefresh(false))
+	require.NoError(t, err)
+
+	state := testDeviceState()
+	state.checkpointManager = &fakeCheckpointManager{checkpoint: checkpointWithClaims(map[string]PreparedClaim{})}
+	state.computeDomainManager = &ComputeDomainManager{configFilesRoot: t.TempDir()}
+	state.cdi = &CDIHandler{cache: cache, vendor: cdiVendor, claimClass: cdiClaimClass}
+	state.config = &Config{flags: &Flags{nodeName: "test-node"}}
+
+	// Prepare rejects the config, but only after checkpointing the claim.
+	_, err = state.Prepare(context.Background(), claim)
+	require.Error(t, err)
+	require.Equal(t, ClaimCheckpointStatePrepareStarted,
+		requireFakeCheckpointManager(t, state).checkpoint.V2.PreparedClaims["claim-uid"].CheckpointState)
+
+	claimRef := kubeletplugin.NamespacedObject{
+		NamespacedName: types.NamespacedName{Namespace: "default", Name: "claim-uid"},
+		UID:            types.UID("claim-uid"),
+	}
+	require.NoError(t, state.Unprepare(context.Background(), claimRef))
+
+	pc := requireFakeCheckpointManager(t, state).checkpoint.V2.PreparedClaims["claim-uid"]
+	require.Equal(t, ClaimCheckpointStatePrepareAborted, pc.CheckpointState)
+	require.NotNil(t, pc.AbortedAt)
 }
 
 func TestRequestedNonAdminDevices(t *testing.T) {

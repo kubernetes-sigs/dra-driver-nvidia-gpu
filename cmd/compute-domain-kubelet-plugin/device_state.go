@@ -602,10 +602,13 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, cs *resourceapi.Reso
 				return fmt.Errorf("error removing Node label for ComputeDomain: %w", err)
 			}
 		case *configapi.ComputeDomainDaemonConfig:
-			// If a daemon type, unprepare the new ComputeDomain daemon.
+			// An old checkpoint can hold a DomainID this now rejects. Failing here
+			// would strand the claim, and cleaning up would mean deleting whatever
+			// the unvalidated path resolves to, so skip it.
 			computeDomainDaemonSettings, err := s.computeDomainManager.NewSettings(config.DomainID)
 			if err != nil {
-				return fmt.Errorf("error creating ComputeDomain daemon settings: %w", err)
+				klog.Warningf("skipping ComputeDomain daemon unprepare: %v", err)
+				continue
 			}
 			if err := computeDomainDaemonSettings.Unprepare(ctx); err != nil {
 				return fmt.Errorf("error unpreparing ComputeDomain daemon settings: %w", err)
