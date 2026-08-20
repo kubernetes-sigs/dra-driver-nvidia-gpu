@@ -217,6 +217,14 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		return nil, fmt.Errorf("unable to prepare claim %v: %w", claimUID, err)
 	}
 
+	// Decode and validate before checkpointing, so that a claim rejected on its
+	// own contents never leaves an entry behind. Unprepare would have to decode
+	// that entry to clean it up, which is exactly what failed here.
+	plan, err := s.buildPreparePlan(claim)
+	if err != nil {
+		return nil, fmt.Errorf("prepare preflight failed: %w", err)
+	}
+
 	err = s.updateCheckpoint(func(checkpoint *Checkpoint) {
 		checkpoint.V2.PreparedClaims[claimUID] = PreparedClaim{
 			CheckpointState: ClaimCheckpointStatePrepareStarted,
@@ -230,7 +238,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	}
 	klog.V(6).Infof("checkpoint updated for claim %v", claimUID)
 
-	preparedDevices, err := s.prepareDevices(ctx, claim)
+	preparedDevices, err := s.applyPreparePlan(ctx, claim, plan)
 	if err != nil {
 		return nil, fmt.Errorf("prepare devices failed: %w", err)
 	}
@@ -517,19 +525,33 @@ func validateConfigs(configResultsMap map[runtime.Object][]*resourceapi.DeviceRe
 	return validated, nil
 }
 
-func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
-	// Generate a mapping of each OpaqueDeviceConfigs to the Device.Results it
-	// applies to. Strict-decode: data is provided by user and may be completely
-	// unvalidated so far (in absence of validating webhook).
+// preparePlan is everything Prepare can work out about a claim without touching
+// anything outside this process.
+type preparePlan struct {
+	configResultsMap map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult
+	validatedConfigs map[runtime.Object]configapi.Interface
+}
+
+// buildPreparePlan decodes and validates the claim's configs. It writes nothing
+// and touches no device, so a claim it rejects leaves no trace for Unprepare to
+// have to undo. Decoding is strict because the config is claim-authored and may
+// not have passed a validating webhook.
+func (s *DeviceState) buildPreparePlan(claim *resourceapi.ResourceClaim) (*preparePlan, error) {
 	configResultsMap, err := s.getConfigResultsMap(&claim.Status, configapi.StrictDecoder)
 	if err != nil {
-		return nil, fmt.Errorf("error generating configResultsMap: %w", err)
+		return nil, permanentError{fmt.Errorf("error generating configResultsMap: %w", err)}
 	}
 
 	validatedConfigs, err := validateConfigs(configResultsMap)
 	if err != nil {
 		return nil, err
 	}
+
+	return &preparePlan{configResultsMap: configResultsMap, validatedConfigs: validatedConfigs}, nil
+}
+
+func (s *DeviceState) applyPreparePlan(ctx context.Context, claim *resourceapi.ResourceClaim, plan *preparePlan) (PreparedDevices, error) {
+	configResultsMap, validatedConfigs := plan.configResultsMap, plan.validatedConfigs
 
 	preparedDeviceGroupConfigState := make(map[runtime.Object]*DeviceConfigState)
 	for c, results := range configResultsMap {
