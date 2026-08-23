@@ -13,9 +13,9 @@ require (
 	github.com/onsi/gomega v1.41.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/prometheus/client_golang v1.24.1
-	github.com/sirupsen/logrus v1.9.4
+	github.com/sirupsen/logrus v1.10.1
 	github.com/spf13/pflag v1.0.10
-	github.com/stretchr/testify v1.11.1
+	github.com/stretchr/testify v1.12.0
 	github.com/urfave/cli/v2 v2.27.7
 	golang.org/x/time v0.15.0
 	google.golang.org/grpc v1.83.0
