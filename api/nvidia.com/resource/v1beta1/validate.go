@@ -66,6 +66,9 @@ func (t TimeSliceInterval) Validate() error {
 
 // Validate ensures that TimeSlicingConfig has a valid set of values.
 func (c *TimeSlicingConfig) Validate() error {
+	if c == nil || c.Interval == nil {
+		return fmt.Errorf("no time-slice interval set")
+	}
 	return c.Interval.Validate()
 }
 
