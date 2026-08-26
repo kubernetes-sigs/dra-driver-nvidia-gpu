@@ -273,7 +273,7 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 				}
 
 				// When migEnabled is true, parentdev is intentionally NOT added
-				// to thisGPUAllocatable — the full GPU is not allocatable on
+				// to thisGPUAllocatable, the full GPU is not allocatable on
 				// Ampere when MIG cannot be toggled without a GPU reset. The
 				// per-GPU shared CounterSet that MIG partitions reference by
 				// name is still emitted by the ResourceSlice generators in
@@ -675,7 +675,7 @@ func (l deviceLib) enumerateGpuVfioDevices(perGPUAllocatable *PerGPUAllocatableD
 			vfioDeviceInfo.parent = parent.Gpu
 		} else {
 			// Its likely that the parent is nil because the GPU is prepared in passthrough mode.
-			klog.Warningf("Skipping association with parent GPU device for VFIO device: %s", pci.Address)
+			klog.V(4).Infof("Skipping association with parent GPU device for VFIO device: %s", pci.Address)
 		}
 
 		allocatableDevice := &AllocatableDevice{
@@ -1115,7 +1115,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	// enabled" -- for the unlikely case that we end up in this state (MIG mode
 	// was disabled out-of-band?), this should be treated as deletion success.
 	if gires == nvml.ERROR_NOT_SUPPORTED {
-		klog.Infof("Delete %s: GetGpuInstanceById yielded ERROR_NOT_SUPPORTED: MIG disabled, treat as success", migStr)
+		klog.V(6).Infof("Delete %s: GetGpuInstanceById yielded ERROR_NOT_SUPPORTED: MIG disabled, treat as success", migStr)
 		return nil
 	}
 
@@ -1127,7 +1127,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	if gires == nvml.ERROR_NOT_FOUND {
 		// In this case assume that no compute instances exist (as of the GI>CI
 		// hierarchy) and proceed with attempt-to-disable-MIG-mode
-		klog.Infof("Delete %s: GI was not found skip CI cleanup", migStr)
+		klog.V(6).Infof("Delete %s: GI was not found skip CI cleanup", migStr)
 		if err := l.maybeDisableMigMode(parentUUID, parentNvmlDev); err != nil {
 			return fmt.Errorf("failed to disable MIG mode for %s (maybeDisableMigMode): %w", parentUUID, err)
 		}
@@ -1162,7 +1162,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	// A previous, partial cleanup may actually have already deleted that. Seen
 	// in practice. Ignore, and proceed with deleting GPU instance below.
 	if cires == nvml.ERROR_NOT_FOUND {
-		klog.Infof("Delete %s: CI not found, ignore", migStr)
+		klog.V(6).Infof("Delete %s: CI not found, ignore", migStr)
 	} else {
 		ret := ci.Destroy()
 		if ret != nvml.SUCCESS {
@@ -1209,9 +1209,9 @@ func (l deviceLib) maybeDisableMigMode(uuid string, nvmldev nvml.Device) error {
 		return nil
 	}
 
-	// On Ampere/A100, SetMigMode sets a pending mode that requires a GPU reset to activate — leave MIG enabled.
+	// On Ampere/A100, SetMigMode sets a pending mode that requires a GPU reset to activate, leave MIG enabled.
 	if !supportsMIGModeToggle(nvmldev) {
-		klog.Infof("GPU %s (%s): skipping MIG mode disable (architecture does not support reset-less MIG toggling)",
+		klog.V(6).Infof("GPU %s (%s): skipping MIG mode disable (architecture does not support reset-less MIG toggling)",
 			gpu.String(), gpu.architecture)
 		return nil
 	}
@@ -1331,7 +1331,7 @@ func (l deviceLib) FindMigDevBySpec(ms *MigSpecTuple) (*MigLiveTuple, error) {
 	for i := range count {
 		migHandle, ret := parent.GetMigDeviceHandleByIndex(i)
 		if ret != nvml.SUCCESS {
-			klog.Infof("GetMigDeviceHandleByIndex ret not success")
+			klog.V(7).Infof("GetMigDeviceHandleByIndex ret not success")
 			// Slot empty or invalid: treat as device does not currently exist.
 			continue
 		}
@@ -1392,11 +1392,11 @@ func (l deviceLib) FindMigDevBySpec(ms *MigSpecTuple) (*MigLiveTuple, error) {
 			MigUUID:     uuid,
 		}
 
-		klog.Infof("FindMigDevBySpec result: %+v", mlt)
+		klog.V(4).Infof("FindMigDevBySpec result: %+v", mlt)
 		return &mlt, nil
 	}
 
-	klog.Infof("Iterated through all potential MIG devs -- no candidate found")
+	klog.V(4).Infof("Iterated through all potential MIG devs -- no candidate found")
 	return nil, nil
 }
 
@@ -1474,7 +1474,7 @@ func (l deviceLib) enableGPUPersistenceMode(pciAddress string) error {
 		return fmt.Errorf("error getting persistence mode: %w", ret)
 	}
 	if mode == nvml.FEATURE_ENABLED {
-		klog.Infof("Persistence mode is already enabled for GPU PCI device %s", pciAddress)
+		klog.V(4).Infof("Persistence mode is already enabled for GPU PCI device %s", pciAddress)
 		return nil
 	}
 
@@ -1519,10 +1519,10 @@ func isDynamicMIGCapable(gpuInfo *GpuInfo, dev nvdev.Device) (bool, error) {
 	}
 
 	// In a vGPU guest the MIG mode and partition size are fixed by the vGPU
-	// profile assigned to the VM — a guest cannot dynamically repartition a
+	// profile assigned to the VM, a guest cannot dynamically repartition a
 	// vGPU. Skip DynamicMIG.
 	if vMode == nvml.GPU_VIRTUALIZATION_MODE_VGPU {
-		klog.Warningf("GPU %s: vGPU guest detected — skipping DynamicMIG", gpuInfo.String())
+		klog.Warningf("GPU %s: vGPU guest detected, skipping DynamicMIG", gpuInfo.String())
 		return false, nil
 	}
 

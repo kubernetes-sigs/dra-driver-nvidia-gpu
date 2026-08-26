@@ -344,7 +344,7 @@ func (m *ComputeDomainManager) isCurrentNodeReadyInClique(ctx context.Context, c
 
 	clique, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.flags.namespace).Get(ctx, cliqueName, metav1.GetOptions{})
 	if err != nil {
-		klog.Errorf("error getting ComputeDomainClique %s: %v", cliqueName, err)
+		klog.V(1).Infof("error getting ComputeDomainClique %s: %v", cliqueName, err)
 		return false
 	}
 
@@ -580,7 +580,7 @@ func (m *ComputeDomainManager) periodicCleanup(ctx context.Context) {
 					continue
 				}
 
-				klog.V(6).Infof("Stale directory found for ComputeDomain '%s', running cleanup", uid)
+				klog.V(1).Infof("Stale directory found for ComputeDomain '%s', running cleanup", uid)
 
 				if err := os.RemoveAll(path); err != nil {
 					klog.Errorf("error removing artifacts directory for ComputeDomain '%s': %v", uid, err)
