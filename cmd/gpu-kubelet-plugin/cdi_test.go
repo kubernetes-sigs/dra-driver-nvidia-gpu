@@ -313,7 +313,7 @@ func TestCreateClaimSpecFileRejectsMismatchedGPUDeviceMinor(t *testing.T) {
 		}},
 	}}
 
-	err := handler.CreateClaimSpecFile("claim", preparedDevices)
+	err := handler.CreateClaimSpecFile("claim", preparedDevices, nil)
 	require.ErrorContains(t, err, "expected device node /dev/nvidia0")
 	require.Equal(t, 2, fake.deviceSpecCalls)
 }
