@@ -19,6 +19,7 @@ package fabricmanager
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"k8s.io/klog/v2"
 )
@@ -40,6 +41,10 @@ const (
 type Manager struct {
 	client         Client
 	partitionsByID map[int]Partition
+	// moduleIDByPCI maps a normalized PCI bus id to the gpuModuleID FM reports
+	// for the GPU at that address. FM reports both for every partition member,
+	// which makes it an NVML-independent source for a GPU's module ID.
+	moduleIDByPCI map[string]int
 }
 
 // Open builds a Manager for the caller to subsequently activate and deactivate
@@ -53,6 +58,7 @@ func Open(client Client) (*Manager, error) {
 	m := &Manager{
 		client:         client,
 		partitionsByID: make(map[int]Partition),
+		moduleIDByPCI:  make(map[string]int),
 	}
 
 	if err := client.Init(); err != nil {
@@ -118,6 +124,7 @@ func (m *Manager) Close() error {
 // members).
 func (m *Manager) recordsPartitions(parts []Partition) error {
 	byID := make(map[int]Partition, len(parts))
+	moduleIDByPCI := make(map[string]int)
 
 	for _, p := range parts {
 		if _, dup := byID[p.ID]; dup {
@@ -133,11 +140,72 @@ func (m *Manager) recordsPartitions(parts []Partition) error {
 					p.ID, g.PhysicalID)
 			}
 			seen[g.PhysicalID] = struct{}{}
+
+			// Index PCI bus id -> module id. The same GPU appears in every
+			// partition it is a member of, so repeats are expected; only a
+			// genuine disagreement is a problem, and silently keeping either
+			// value would let us later activate a partition built from the
+			// wrong GPU.
+			pci := NormalizePCIBusID(g.PCIBusID)
+			if pci == "" {
+				continue
+			}
+			if existing, ok := moduleIDByPCI[pci]; ok && existing != g.PhysicalID {
+				return fmt.Errorf(
+					"fabricmanager: PCI bus id %q maps to two gpuModuleIDs (%d and %d)",
+					pci, existing, g.PhysicalID)
+			}
+			moduleIDByPCI[pci] = g.PhysicalID
 		}
 		byID[p.ID] = p
 	}
 	m.partitionsByID = byID
+	m.moduleIDByPCI = moduleIDByPCI
 	return nil
+}
+
+// ModuleIDByPCIBusID returns the gpuModuleID FM reports for the GPU at the
+// given PCI bus id, or false when FM did not report a GPU at that address.
+//
+// This is the NVML-independent path to a module ID. It matters because NVML can
+// only enumerate GPUs bound to the `nvidia` kernel driver, so a GPU that is
+// currently bound to a vfio-pci variant for passthrough has no module ID from
+// NVML -- while FM, which talks to the NVSwitches rather than the GPUs, still
+// reports it.
+func (m *Manager) ModuleIDByPCIBusID(pciBusID string) (int, bool) {
+	id, ok := m.moduleIDByPCI[NormalizePCIBusID(pciBusID)]
+	return id, ok
+}
+
+// ActivePartitions re-queries FM and returns the partitions it currently
+// reports as active. Unlike GetPartition this does not serve the topology
+// recorded at Open time, because activation state changes underneath us.
+func (m *Manager) ActivePartitions() ([]Partition, error) {
+	partitions, err := m.client.GetSupportedFabricPartitions()
+	if err != nil {
+		return nil, fmt.Errorf("fabricmanager: fmGetSupportedFabricPartitions: %w", err)
+	}
+	var active []Partition
+	for _, p := range partitions {
+		if p.IsActive {
+			active = append(active, p)
+		}
+	}
+	return active, nil
+}
+
+// NormalizePCIBusID renders a PCI bus id in the lower-case, 4-digit-domain form
+// used by sysfs ("0000:0f:00.0"). FM reports the same address with an 8-digit
+// domain and upper-case hex ("00000000:0F:00.0"), so the two cannot be compared
+// directly. Anything shorter than a full BDF is returned lower-cased but
+// otherwise untouched, so a malformed value cannot silently match.
+func NormalizePCIBusID(pciBusID string) string {
+	pci := strings.ToLower(strings.TrimSpace(pciBusID))
+	const bdfLen = len("0000:00:00.0")
+	if len(pci) > bdfLen {
+		return pci[len(pci)-bdfLen:]
+	}
+	return pci
 }
 
 // GetPartition returns the FM partition info for the given partitionId, or

@@ -221,6 +221,15 @@ func (vm *VfioPciManager) Unconfigure(ctx context.Context, info *VfioDeviceInfo)
 	return nil
 }
 
+// RebindToNvidiaByPCIBusID returns a GPU to the nvidia driver knowing only its
+// PCI bus id. Teardown normally goes through Unconfigure with the
+// VfioDeviceInfo built during discovery, but startup reconciliation runs before
+// discovery and has nothing but the address: NVML cannot see a vfio-bound GPU,
+// so there is no discovered device to hand over.
+func (vm *VfioPciManager) RebindToNvidiaByPCIBusID(ctx context.Context, pciAddress string) error {
+	return vm.Unconfigure(ctx, &VfioDeviceInfo{PciBusID: pciAddress})
+}
+
 // Module names in the modules.alias file will only ever contain underscore
 // characters and not dashes -- this aligns with how the linux kernel
 // stores module names internally. This can sometimes differ from the name of the

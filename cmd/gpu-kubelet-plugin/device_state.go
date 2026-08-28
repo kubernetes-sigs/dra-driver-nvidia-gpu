@@ -134,12 +134,56 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
 	}
 
+	hostDriverRoot := config.flags.hostDriverRoot
+
+	// The managers below, the checkpoint and the boot ID are all set up before
+	// device discovery because reclaiming GPUs stranded on a vfio driver has to
+	// happen first: NVML cannot enumerate a vfio-bound GPU, so discovery would
+	// otherwise produce a VFIO device with no parent GpuInfo, no module ID and no
+	// partitionN attributes. See reconcileStrandedPassthroughGPUs.
+	var vfioPciManager *VfioPciManager
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		vfioPciManager, err = NewVfioPciManager(string(containerDriverRoot), string(hostDriverRoot), nvdevlib, true /* nvidiaEnabled */)
+		if err != nil {
+			return nil, fmt.Errorf("unable to create vfio pci manager: %w", err)
+		}
+	}
+
+	fmManager, err := newFabricManager(nvdevlib, containerDriverRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	checkpointManager, err := checkpointmanager.NewCheckpointManager(config.DriverPluginPath())
+	if err != nil {
+		return nil, fmt.Errorf("unable to create checkpoint manager: %w", err)
+	}
+
+	cpLockPath := filepath.Join(config.DriverPluginPath(), "cp.lock")
+
+	currentBootID, err := bootid.GetCurrentBootID()
+	if err != nil {
+		return nil, fmt.Errorf("read node boot id: %w", err)
+	}
+
+	state := &DeviceState{
+		config:            config,
+		nvdevlib:          nvdevlib,
+		vfioPciManager:    vfioPciManager,
+		fmManager:         fmManager,
+		checkpointManager: checkpointManager,
+		cplock:            flock.NewFlock(cpLockPath),
+	}
+
+	if err := state.reconcileStrandedPassthroughGPUs(ctx, currentBootID); err != nil {
+		return nil, fmt.Errorf("reconciling stranded passthrough GPUs: %w", err)
+	}
+
 	perGPUAllocatable, err := nvdevlib.enumerateAllPossibleDevices()
 	if err != nil {
 		return nil, fmt.Errorf("error enumerating all possible devices: %w", err)
 	}
-
-	hostDriverRoot := config.flags.hostDriverRoot
+	state.perGPUAllocatable = perGPUAllocatable
 
 	// Let nvcdi logs see the light of day (emit to standard streams) when we've
 	// been configured with verbosity level 7 or higher.
@@ -194,38 +238,9 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		mpsManager = NewMpsManager(config, nvdevlib, hostDriverRoot, MpsControlDaemonTemplatePath)
 	}
 
-	var vfioPciManager *VfioPciManager
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		vfioPciManager, err = NewVfioPciManager(string(containerDriverRoot), string(hostDriverRoot), nvdevlib, true /* nvidiaEnabled */)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create vfio pci manager: %w", err)
-		}
-	}
-
-	fmManager, err := newFabricManager(nvdevlib, containerDriverRoot)
-	if err != nil {
-		return nil, err
-	}
-
-	checkpointManager, err := checkpointmanager.NewCheckpointManager(config.DriverPluginPath())
-	if err != nil {
-		return nil, fmt.Errorf("unable to create checkpoint manager: %w", err)
-	}
-
-	cpLockPath := filepath.Join(config.DriverPluginPath(), "cp.lock")
-
-	state := &DeviceState{
-		cdi:               cdi,
-		tsManager:         tsManager,
-		mpsManager:        mpsManager,
-		vfioPciManager:    vfioPciManager,
-		perGPUAllocatable: perGPUAllocatable,
-		config:            config,
-		nvdevlib:          nvdevlib,
-		checkpointManager: checkpointManager,
-		fmManager:         fmManager,
-		cplock:            flock.NewFlock(cpLockPath),
-	}
+	state.cdi = cdi
+	state.tsManager = tsManager
+	state.mpsManager = mpsManager
 	state.checkpointCleanupManager = NewCheckpointCleanupManager(state, config.clientsets.Resource)
 
 	// Attach Fabric Manager partition mappings to every discovered GPU. The
@@ -243,11 +258,6 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	checkpoints, err := state.checkpointManager.ListCheckpoints()
 	if err != nil {
 		return nil, fmt.Errorf("unable to list checkpoints: %w", err)
-	}
-
-	currentBootID, err := bootid.GetCurrentBootID()
-	if err != nil {
-		return nil, fmt.Errorf("read node boot id: %w", err)
 	}
 
 	for _, c := range checkpoints {
@@ -1495,10 +1505,20 @@ func (s *DeviceState) attachFabricManagerPartitions(gpu *GpuInfo) error {
 		return nil
 	}
 	if gpu.gpuModuleID == 0 {
-		klog.Warningf("GPU %s has no gpuModuleID; skipping Fabric Manager partition attributes. "+
-			"This happens when the GPU was bound to vfio-pci before discovery (e.g. an active passthrough claim across a plugin restart).",
-			gpu.CanonicalName())
-		return nil
+		// NVML did not give us a module ID. FM reports a module ID and a PCI bus
+		// id for every GPU it knows about, so ask FM instead of giving up: a GPU
+		// without partitionN attributes cannot be selected by a claim that
+		// constrains on them, which silently removes it from the pool.
+		moduleID, ok := s.fmManager.ModuleIDByPCIBusID(gpu.pciBusID)
+		if !ok {
+			klog.Warningf("GPU %s (%s) has no gpuModuleID from NVML and Fabric Manager reports no GPU at that PCI address; "+
+				"skipping Fabric Manager partition attributes",
+				gpu.CanonicalName(), gpu.pciBusID)
+			return nil
+		}
+		klog.Infof("GPU %s (%s) has no gpuModuleID from NVML; resolved module ID %d from Fabric Manager",
+			gpu.CanonicalName(), gpu.pciBusID, moduleID)
+		gpu.gpuModuleID = moduleID
 	}
 	bySize, err := s.fmManager.GetPartitionsBySizeByModuleID(gpu.gpuModuleID)
 	if err != nil {
