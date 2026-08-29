@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
@@ -672,4 +673,181 @@ func TestIsAdminAccessIgnoresOtherDrivers(t *testing.T) {
 	})
 
 	require.True(t, isAdminAccess(results))
+}
+
+func TestRequestedNonAdminDevices(t *testing.T) {
+	state := &DeviceState{}
+
+	claim := &resourceapi.ResourceClaim{
+		Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{
+					Results: []resourceapi.DeviceRequestAllocationResult{
+						{Driver: DriverName, Device: "gpu-0"},
+						{Driver: DriverName, Device: "gpu-admin", AdminAccess: ptr.To(true)},
+						{Driver: DriverName, Device: "gpu-explicit-nonadmin", AdminAccess: ptr.To(false)},
+						{Driver: "other.driver.com", Device: "gpu-other"},
+					},
+				},
+			},
+		},
+	}
+
+	got := state.requestedNonAdminDevices(claim)
+
+	require.Equal(t, map[string]struct{}{
+		"gpu-0":                 {},
+		"gpu-explicit-nonadmin": {},
+	}, got)
+}
+
+func TestGetPreparedMigDevice(t *testing.T) {
+	migDev := &PreparedMigDevice{
+		Concrete: &MigLiveTuple{MigUUID: "MIG-2222"},
+		Device:   &CheckpointedDevice{DeviceName: "mig-0"},
+	}
+	checkpoint := &Checkpoint{
+		V2: &CheckpointV2{
+			PreparedClaims: PreparedClaimsByUID{
+				"claim-completed": {
+					CheckpointState: ClaimCheckpointStatePrepareCompleted,
+					PreparedDevices: PreparedDevices{
+						{Devices: PreparedDeviceList{{Mig: migDev}}},
+					},
+				},
+				"claim-pending": {
+					CheckpointState: "Prepared", // not PrepareCompleted -> skipped
+					PreparedDevices: PreparedDevices{
+						{Devices: PreparedDeviceList{{Mig: &PreparedMigDevice{
+							Concrete: &MigLiveTuple{MigUUID: "MIG-PENDING"},
+							Device:   &CheckpointedDevice{DeviceName: "mig-pending"},
+						}}}},
+					},
+				},
+			},
+		},
+	}
+
+	state := &DeviceState{}
+
+	require.Same(t, migDev, state.getPreparedMigDevice(checkpoint, "mig-0"))
+	require.Nil(t, state.getPreparedMigDevice(checkpoint, "mig-unknown"))
+	// Device belongs to a non-completed claim, so it must not be returned.
+	require.Nil(t, state.getPreparedMigDevice(checkpoint, "mig-pending"))
+	require.Nil(t, state.getPreparedMigDevice(nil, "mig-0"))
+	require.Nil(t, state.getPreparedMigDevice(&Checkpoint{}, "mig-0"))
+}
+
+func TestPreparedClaimDeviceHasAdminAccess(t *testing.T) {
+	claim := &PreparedClaim{
+		Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{
+					Results: []resourceapi.DeviceRequestAllocationResult{
+						{Driver: DriverName, Device: "gpu-admin", AdminAccess: ptr.To(true)},
+						{Driver: DriverName, Device: "gpu-plain"},
+						{Driver: "other.driver.com", Device: "gpu-other", AdminAccess: ptr.To(true)},
+					},
+				},
+			},
+		},
+	}
+
+	require.True(t, preparedClaimDeviceHasAdminAccess(claim, "gpu-admin"))
+	require.False(t, preparedClaimDeviceHasAdminAccess(claim, "gpu-plain"))
+	// Admin access on another driver's result must not count for this driver.
+	require.False(t, preparedClaimDeviceHasAdminAccess(claim, "gpu-other"))
+	require.False(t, preparedClaimDeviceHasAdminAccess(claim, "gpu-missing"))
+	require.False(t, preparedClaimDeviceHasAdminAccess(nil, "gpu-admin"))
+	require.False(t, preparedClaimDeviceHasAdminAccess(&PreparedClaim{}, "gpu-admin"))
+}
+
+func TestGpuInfosFromPreparedClaim(t *testing.T) {
+	gpuInfo := &GpuInfo{UUID: "GPU-A"}
+	vfioParent := &GpuInfo{UUID: "GPU-B"}
+
+	state := &DeviceState{
+		perGPUAllocatable: &PerGPUAllocatableDevices{
+			allocatablesMap: map[PCIBusID]AllocatableDevices{
+				"0000:00:00.0": {
+					"gpu-0":  &AllocatableDevice{Gpu: gpuInfo},
+					"vfio-0": &AllocatableDevice{Vfio: &VfioDeviceInfo{parent: vfioParent}},
+					"mig-0":  &AllocatableDevice{MigStatic: &MigDeviceInfo{}},
+				},
+			},
+		},
+	}
+
+	results := []resourceapi.DeviceRequestAllocationResult{
+		{Driver: DriverName, Device: "gpu-0"},
+		{Driver: DriverName, Device: "vfio-0"},
+		{Driver: DriverName, Device: "mig-0"},         // MIG -> unsupported for fabric partition, skipped
+		{Driver: DriverName, Device: "ghost"},         // not allocatable, skipped
+		{Driver: "other.driver.com", Device: "gpu-0"}, // other driver, skipped
+	}
+
+	got := state.gpuInfosFromPreparedClaim(results)
+
+	require.Equal(t, []*GpuInfo{gpuInfo, vfioParent}, got)
+}
+
+func TestMatchesDeviceType(t *testing.T) {
+	gpu := &AllocatableDevice{Gpu: &GpuInfo{}}
+	mig := &AllocatableDevice{MigStatic: &MigDeviceInfo{}}
+	vfio := &AllocatableDevice{Vfio: &VfioDeviceInfo{}}
+
+	require.True(t, matchesDeviceType(&configapi.GpuConfig{}, gpu))
+	require.False(t, matchesDeviceType(&configapi.GpuConfig{}, mig))
+
+	require.True(t, matchesDeviceType(&configapi.MigDeviceConfig{}, mig))
+	require.False(t, matchesDeviceType(&configapi.MigDeviceConfig{}, gpu))
+
+	require.True(t, matchesDeviceType(&configapi.VfioDeviceConfig{}, vfio))
+	require.False(t, matchesDeviceType(&configapi.VfioDeviceConfig{}, gpu))
+
+	// Unrecognized config type never matches.
+	require.False(t, matchesDeviceType(&resourceapi.ResourceClaim{}, gpu))
+}
+
+func TestValidateDeviceConfigType(t *testing.T) {
+	gpu := &AllocatableDevice{Gpu: &GpuInfo{}}
+	mig := &AllocatableDevice{MigStatic: &MigDeviceInfo{}}
+	vfio := &AllocatableDevice{Vfio: &VfioDeviceInfo{}}
+	result := &resourceapi.DeviceRequestAllocationResult{}
+
+	tests := []struct {
+		name    string
+		config  runtime.Object
+		dev     *AllocatableDevice
+		wantErr bool
+	}{
+		{name: "gpu config on gpu", config: &configapi.GpuConfig{}, dev: gpu},
+		{name: "gpu config on mig", config: &configapi.GpuConfig{}, dev: mig, wantErr: true},
+		{name: "mig config on mig", config: &configapi.MigDeviceConfig{}, dev: mig},
+		{name: "mig config on gpu", config: &configapi.MigDeviceConfig{}, dev: gpu, wantErr: true},
+		{name: "vfio config on vfio", config: &configapi.VfioDeviceConfig{}, dev: vfio},
+		{name: "vfio config on gpu", config: &configapi.VfioDeviceConfig{}, dev: gpu, wantErr: true},
+		// Unknown config types are not type-checked here.
+		{name: "unknown config type", config: &resourceapi.ResourceClaim{}, dev: gpu},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateDeviceConfigType(tc.config, tc.dev, result)
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestNormalizeAndValidateConfig(t *testing.T) {
+	cfg, err := normalizeAndValidateConfig(configapi.DefaultGpuConfig())
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	_, err = normalizeAndValidateConfig(&resourceapi.ResourceClaim{})
+	require.Error(t, err)
 }
