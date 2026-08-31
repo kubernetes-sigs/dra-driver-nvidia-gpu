@@ -124,6 +124,12 @@ no action is required.
   mode is off, the driver falls back to full-GPU allocation and advertises no
   MIG partitions. Hopper and later architectures enable MIG mode on demand.
 - Dynamic MIG is not supported on vGPU guests.
+- NVIDIA DCGM Exporter cannot attribute MIG metrics to pods on dynamic MIG nodes.
+  With `KUBERNETES_ENABLE_DRA=true`, the exporter identifies pods by the MIG
+  instance UUID, but dynamic MIG advertises partitions that do not exist yet, so
+  their `ResourceSlice` entries have no `uuid` attribute and the UUID created
+  during pod preparation is never published.
+  The exporter drops those mappings and reports MIG metrics without pod labels.
 
 ## Examples
 
