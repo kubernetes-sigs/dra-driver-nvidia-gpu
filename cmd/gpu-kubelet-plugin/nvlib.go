@@ -1115,7 +1115,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	// enabled" -- for the unlikely case that we end up in this state (MIG mode
 	// was disabled out-of-band?), this should be treated as deletion success.
 	if gires == nvml.ERROR_NOT_SUPPORTED {
-		klog.V(6).Infof("Delete %s: GetGpuInstanceById yielded ERROR_NOT_SUPPORTED: MIG disabled, treat as success", migStr)
+		klog.Infof("Delete %s: GetGpuInstanceById yielded ERROR_NOT_SUPPORTED: MIG disabled, treat as success", migStr)
 		return nil
 	}
 
@@ -1127,7 +1127,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	if gires == nvml.ERROR_NOT_FOUND {
 		// In this case assume that no compute instances exist (as of the GI>CI
 		// hierarchy) and proceed with attempt-to-disable-MIG-mode
-		klog.V(6).Infof("Delete %s: GI was not found skip CI cleanup", migStr)
+		klog.Infof("Delete %s: GI was not found skip CI cleanup", migStr)
 		if err := l.maybeDisableMigMode(parentUUID, parentNvmlDev); err != nil {
 			return fmt.Errorf("failed to disable MIG mode for %s (maybeDisableMigMode): %w", parentUUID, err)
 		}
