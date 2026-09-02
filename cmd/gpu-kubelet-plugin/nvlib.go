@@ -51,6 +51,8 @@ type deviceLib struct {
 	hostRoot          string
 	sysfsRoot         string
 	nvidiaSMIPath     string
+	// vfioEnabled combines the feature gate with node-local IOMMU availability.
+	vfioEnabled       bool
 	gpuInfosByUUID    map[string]*GpuInfo
 	gpuUUIDbyPCIBusID map[PCIBusID]string
 	devhandleByUUID   map[string]nvml.Device
@@ -193,7 +195,7 @@ func (l deviceLib) enumerateAllPossibleDevices() (*PerGPUAllocatableDevices, err
 		return nil, fmt.Errorf("error enumerating allocatable devices: %w", err)
 	}
 
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if l.vfioEnabled {
 		// Discover passthrough devices and insert them into the
 		// `perGPUAllocatable` devices map
 		err = l.enumerateGpuVfioDevices(perGPUAllocatable)
@@ -309,7 +311,7 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 			return fmt.Errorf("error discovering MIG devices for GPU %q: %w", gpuInfo.CanonicalName(), err)
 		}
 
-		if featuregates.Enabled(featuregates.PassthroughSupport) {
+		if l.vfioEnabled {
 			// Only if no MIG devices are found, allow VFIO devices.
 			klog.Infof("PassthroughSupport enabled, and %d MIG devices found", len(migdevs))
 			gpuInfo.vfioEnabled = len(migdevs) == 0

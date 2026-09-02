@@ -18,6 +18,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -29,6 +31,86 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/fabricmanager"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
+
+func TestNewVfioPciManagerForNode(t *testing.T) {
+	t.Run("IOMMU unavailable disables passthrough", func(t *testing.T) {
+		nvdevlib := &deviceLib{hostRoot: t.TempDir()}
+
+		manager, err := newVfioPciManagerForNode("", "", nvdevlib)
+
+		require.NoError(t, err)
+		require.Nil(t, manager)
+		require.False(t, nvdevlib.vfioEnabled)
+	})
+
+	t.Run("IOMMU available enables passthrough", func(t *testing.T) {
+		hostRoot := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(hostRoot, kernelIommuGroupPath, "0"), 0o755))
+		nvdevlib := &deviceLib{hostRoot: hostRoot}
+
+		manager, err := newVfioPciManagerForNode("", "", nvdevlib)
+
+		require.NoError(t, err)
+		require.NotNil(t, manager)
+		require.True(t, nvdevlib.vfioEnabled)
+	})
+
+	t.Run("unexpected IOMMU check error remains fatal", func(t *testing.T) {
+		hostRoot := t.TempDir()
+		iommuGroupsPath := filepath.Join(hostRoot, kernelIommuGroupPath)
+		require.NoError(t, os.MkdirAll(filepath.Dir(iommuGroupsPath), 0o755))
+		require.NoError(t, os.WriteFile(iommuGroupsPath, nil, 0o644))
+		nvdevlib := &deviceLib{hostRoot: hostRoot}
+
+		manager, err := newVfioPciManagerForNode("", "", nvdevlib)
+
+		require.Error(t, err)
+		require.Nil(t, manager)
+		require.False(t, nvdevlib.vfioEnabled)
+	})
+}
+
+func TestIommuUnavailableDoesNotAdvertiseVfio(t *testing.T) {
+	nvdevlib := &deviceLib{hostRoot: t.TempDir()}
+	vfioPciManager, err := newVfioPciManagerForNode("", "", nvdevlib)
+	require.NoError(t, err)
+	require.Nil(t, vfioPciManager)
+
+	gpu := &AllocatableDevice{Gpu: &GpuInfo{
+		UUID:                  "GPU-0000",
+		minor:                 0,
+		productName:           "NVIDIA Test GPU",
+		brand:                 "Test",
+		architecture:          "Test",
+		cudaComputeCapability: "8.0",
+		driverVersion:         "550.0",
+		cudaDriverVersion:     "12.0",
+		pciBusID:              "0000:00:00.0",
+		vfioEnabled:           nvdevlib.vfioEnabled,
+	}}
+	perGPU := &PerGPUAllocatableDevices{
+		allocatablesMap: map[PCIBusID]AllocatableDevices{
+			gpu.Gpu.pciBusID: {gpu.CanonicalName(): gpu},
+		},
+	}
+	state := &DeviceState{
+		vfioPciManager:    vfioPciManager,
+		perGPUAllocatable: perGPU,
+		nvdevlib:          nvdevlib,
+	}
+
+	require.NoError(t, state.discoverSiblingAllocatables(gpu))
+	require.Same(t, gpu, perGPU.GetAllocatableDevice(gpu.CanonicalName()))
+	require.Empty(t, perGPU.GetAllDevices().GetVfioDevices())
+
+	resources := (&driver{state: state}).generateLegacyDriverResources("test-node", nil)
+	var devices []resourceapi.Device
+	for _, slice := range resources.Pools["test-node"].Slices {
+		devices = append(devices, slice.Devices...)
+	}
+	require.Len(t, devices, 1)
+	require.Equal(t, GpuDeviceType, *devices[0].Attributes["type"].StringValue)
+}
 
 func TestValidateNoOverlappingPreparedDevices(t *testing.T) {
 	perGPU := &PerGPUAllocatableDevices{

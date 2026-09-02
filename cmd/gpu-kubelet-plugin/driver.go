@@ -509,7 +509,15 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 		return nil
 	}
 
-	// Enumerate the set of GPU, MIG and VFIO devices and publish them
+	resources := d.generateLegacyDriverResources(config.flags.nodeName, config)
+	if err := d.pluginhelper.PublishResources(ctx, resources); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (d *driver) generateLegacyDriverResources(nodeName string, config *Config) resourceslice.DriverResources {
 	var resourceSlice resourceslice.Slice
 	for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
 		for _, device := range devices {
@@ -518,18 +526,11 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 		}
 	}
 
-	resources := resourceslice.DriverResources{
+	return resourceslice.DriverResources{
 		Pools: map[string]resourceslice.Pool{
-			config.flags.nodeName: {Slices: []resourceslice.Slice{resourceSlice}},
+			nodeName: {Slices: []resourceslice.Slice{resourceSlice}},
 		},
 	}
-
-	if err := d.pluginhelper.PublishResources(ctx, resources); err != nil {
-		return err
-	}
-
-	return nil
-
 }
 
 func (d *driver) deviceHealthEvents(ctx context.Context) {

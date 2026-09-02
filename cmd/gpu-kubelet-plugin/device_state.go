@@ -124,6 +124,19 @@ func newFabricManager(nvdevlib *deviceLib, driver *root.Driver) (*fabricmanager.
 	return fmManager, nil
 }
 
+func newVfioPciManagerForNode(containerDriverRoot, hostDriverRoot string, nvdevlib *deviceLib) (*VfioPciManager, error) {
+	vfioPciManager, err := NewVfioPciManager(containerDriverRoot, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
+	if errors.Is(err, errIommuUnavailable) {
+		klog.Warningf("PassthroughSupport enabled but IOMMU is unavailable; VFIO devices will not be advertised")
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("unable to create vfio pci manager: %w", err)
+	}
+	nvdevlib.vfioEnabled = true
+	return vfioPciManager, nil
+}
+
 func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	driver := root.New(root.WithDriverRoot(config.flags.containerDriverRoot))
 	devRoot := driver.DevRoot
@@ -134,12 +147,19 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
 	}
 
+	hostDriverRoot := config.flags.hostDriverRoot
+
+	var vfioPciManager *VfioPciManager
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		vfioPciManager, err = newVfioPciManagerForNode(driver.Root, hostDriverRoot, nvdevlib)
+		if err != nil {
+			return nil, err
+		}
+	}
 	perGPUAllocatable, err := nvdevlib.enumerateAllPossibleDevices()
 	if err != nil {
 		return nil, fmt.Errorf("error enumerating all possible devices: %w", err)
 	}
-
-	hostDriverRoot := config.flags.hostDriverRoot
 
 	// Let nvcdi logs see the light of day (emit to standard streams) when we've
 	// been configured with verbosity level 7 or higher.
@@ -160,7 +180,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		WithLogger(cdilogger),
 	}
 	var vfioCDIHandler *vfioCDIHandler
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if nvdevlib.vfioEnabled {
 		vfioCDIHandler, err = NewVfioCDIHandler(nvdevlib)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create vfio CDI handler: %w", err)
@@ -192,14 +212,6 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	var mpsManager *MpsManager
 	if featuregates.Enabled(featuregates.MPSSupport) {
 		mpsManager = NewMpsManager(config, nvdevlib, hostDriverRoot, MpsControlDaemonTemplatePath)
-	}
-
-	var vfioPciManager *VfioPciManager
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		vfioPciManager, err = NewVfioPciManager(driver.Root, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create vfio pci manager: %w", err)
-		}
 	}
 
 	fmManager, err := newFabricManager(nvdevlib, driver)
@@ -1240,7 +1252,7 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) error {
 	switch device.Type() {
 	case GpuDeviceType:
-		if !device.Gpu.vfioEnabled {
+		if s.vfioPciManager == nil || !device.Gpu.vfioEnabled {
 			return nil
 		}
 		vfioAllocatable, err := s.nvdevlib.discoverVfioDevice(device.Gpu)
