@@ -518,6 +518,7 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 }
 
 func (d *driver) generateLegacyDriverResources(nodeName string, config *Config) resourceslice.DriverResources {
+	// Enumerate the set of GPU, MIG and VFIO devices and publish them
 	var resourceSlice resourceslice.Slice
 	for _, devices := range d.state.perGPUAllocatable.allocatablesMap {
 		for _, device := range devices {

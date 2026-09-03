@@ -33,17 +33,17 @@ import (
 )
 
 func TestNewVfioPciManagerForNode(t *testing.T) {
-	t.Run("IOMMU unavailable disables passthrough", func(t *testing.T) {
+	t.Run("IOMMU unavailable is reported without changing VFIO state", func(t *testing.T) {
 		nvdevlib := &deviceLib{hostRoot: t.TempDir()}
 
 		manager, err := newVfioPciManagerForNode("", "", nvdevlib)
 
-		require.NoError(t, err)
+		require.ErrorIs(t, err, errIommuUnavailable)
 		require.Nil(t, manager)
 		require.False(t, nvdevlib.vfioEnabled)
 	})
 
-	t.Run("IOMMU available enables passthrough", func(t *testing.T) {
+	t.Run("IOMMU available returns a manager without changing VFIO state", func(t *testing.T) {
 		hostRoot := t.TempDir()
 		require.NoError(t, os.MkdirAll(filepath.Join(hostRoot, kernelIommuGroupPath, "0"), 0o755))
 		nvdevlib := &deviceLib{hostRoot: hostRoot}
@@ -52,7 +52,7 @@ func TestNewVfioPciManagerForNode(t *testing.T) {
 
 		require.NoError(t, err)
 		require.NotNil(t, manager)
-		require.True(t, nvdevlib.vfioEnabled)
+		require.False(t, nvdevlib.vfioEnabled)
 	})
 
 	t.Run("unexpected IOMMU check error remains fatal", func(t *testing.T) {
@@ -70,11 +70,43 @@ func TestNewVfioPciManagerForNode(t *testing.T) {
 	})
 }
 
+func TestNewVfioCDIHandlerForNode(t *testing.T) {
+	t.Run("VFIO disabled skips handler initialization", func(t *testing.T) {
+		hostRoot := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(hostRoot, "dev"), nil, 0o644))
+		nvdevlib := &deviceLib{hostRoot: hostRoot, vfioEnabled: false}
+
+		handler, err := newVfioCDIHandlerForNode(nvdevlib)
+
+		require.NoError(t, err)
+		require.Nil(t, handler)
+	})
+
+	t.Run("VFIO enabled initializes handler", func(t *testing.T) {
+		nvdevlib := &deviceLib{hostRoot: t.TempDir(), vfioEnabled: true}
+
+		handler, err := newVfioCDIHandlerForNode(nvdevlib)
+
+		require.NoError(t, err)
+		require.NotNil(t, handler)
+	})
+}
+
+func TestApplyVfioDeviceConfigUnavailable(t *testing.T) {
+	state := &DeviceState{nvdevlib: &deviceLib{vfioEnabled: false}}
+
+	configState, err := state.applyVfioDeviceConfig(context.Background(), configapi.DefaultVfioDeviceConfig(), nil, nil)
+
+	require.ErrorContains(t, err, "VFIO is unavailable on this node")
+	require.Nil(t, configState)
+}
+
 func TestIommuUnavailableDoesNotAdvertiseVfio(t *testing.T) {
 	nvdevlib := &deviceLib{hostRoot: t.TempDir()}
 	vfioPciManager, err := newVfioPciManagerForNode("", "", nvdevlib)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, errIommuUnavailable)
 	require.Nil(t, vfioPciManager)
+	require.False(t, nvdevlib.vfioEnabled)
 
 	gpu := &AllocatableDevice{Gpu: &GpuInfo{
 		UUID:                  "GPU-0000",
