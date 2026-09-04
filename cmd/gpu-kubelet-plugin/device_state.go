@@ -1184,7 +1184,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 			}
 		}
 		// Reset when time-slicing was applied at prepare (true), or when the
-		// checkpoint predates timeSliceApplied (nil — legacy implicit time-slicing).
+		// checkpoint predates timeSliceApplied (nil, legacy implicit time-slicing).
 		if featuregates.Enabled(featuregates.TimeSlicingSettings) &&
 			ptr.Deref(group.ConfigState.TimeSliceApplied, true) {
 			var gpuUUIDsToReset []string
@@ -1435,7 +1435,7 @@ func (s *DeviceState) gpuInfosFromPreparedClaim(results []resourceapi.DeviceRequ
 		}
 		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
 		if device == nil {
-			klog.V(6).Infof("allocatable not found for device %q", r.Device)
+			klog.Warningf("allocatable not found for device %q", r.Device)
 			continue
 		}
 		switch device.Type() {

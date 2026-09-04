@@ -240,7 +240,7 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 					m.sendHealthEventForAllDevices(HealthEventGPULost)
 					continue
 				}
-				klog.V(6).Infof("Error waiting for NVML event: %v. Retrying...", ret)
+				klog.V(1).Infof("Error waiting for NVML event: %v. Retrying...", ret)
 				continue
 			}
 
