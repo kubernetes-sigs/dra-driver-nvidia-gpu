@@ -9,7 +9,7 @@ require (
 	github.com/NVIDIA/go-nvml v0.13.3-1
 	github.com/NVIDIA/nvidia-container-toolkit v1.20.0
 	github.com/google/uuid v1.6.0
-	github.com/onsi/ginkgo/v2 v2.32.0
+	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.43.0
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/prometheus/client_golang v1.24.1
