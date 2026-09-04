@@ -18,6 +18,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -29,6 +31,118 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/fabricmanager"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
+
+func TestNewVfioPciManagerForNode(t *testing.T) {
+	t.Run("IOMMU unavailable is reported without changing VFIO state", func(t *testing.T) {
+		nvdevlib := &deviceLib{hostRoot: t.TempDir()}
+
+		manager, err := newVfioPciManagerForNode("", "", nvdevlib)
+
+		require.ErrorIs(t, err, errIommuUnavailable)
+		require.Nil(t, manager)
+		require.False(t, nvdevlib.vfioEnabled)
+	})
+
+	t.Run("IOMMU available returns a manager without changing VFIO state", func(t *testing.T) {
+		hostRoot := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(hostRoot, kernelIommuGroupPath, "0"), 0o755))
+		nvdevlib := &deviceLib{hostRoot: hostRoot}
+
+		manager, err := newVfioPciManagerForNode("", "", nvdevlib)
+
+		require.NoError(t, err)
+		require.NotNil(t, manager)
+		require.False(t, nvdevlib.vfioEnabled)
+	})
+
+	t.Run("unexpected IOMMU check error remains fatal", func(t *testing.T) {
+		hostRoot := t.TempDir()
+		iommuGroupsPath := filepath.Join(hostRoot, kernelIommuGroupPath)
+		require.NoError(t, os.MkdirAll(filepath.Dir(iommuGroupsPath), 0o755))
+		require.NoError(t, os.WriteFile(iommuGroupsPath, nil, 0o644))
+		nvdevlib := &deviceLib{hostRoot: hostRoot}
+
+		manager, err := newVfioPciManagerForNode("", "", nvdevlib)
+
+		require.Error(t, err)
+		require.Nil(t, manager)
+		require.False(t, nvdevlib.vfioEnabled)
+	})
+}
+
+func TestNewVfioCDIHandlerForNode(t *testing.T) {
+	t.Run("VFIO disabled skips handler initialization", func(t *testing.T) {
+		hostRoot := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(hostRoot, "dev"), nil, 0o644))
+		nvdevlib := &deviceLib{hostRoot: hostRoot, vfioEnabled: false}
+
+		handler, err := newVfioCDIHandlerForNode(nvdevlib)
+
+		require.NoError(t, err)
+		require.Nil(t, handler)
+	})
+
+	t.Run("VFIO enabled initializes handler", func(t *testing.T) {
+		nvdevlib := &deviceLib{hostRoot: t.TempDir(), vfioEnabled: true}
+
+		handler, err := newVfioCDIHandlerForNode(nvdevlib)
+
+		require.NoError(t, err)
+		require.NotNil(t, handler)
+	})
+}
+
+func TestApplyVfioDeviceConfigUnavailable(t *testing.T) {
+	state := &DeviceState{nvdevlib: &deviceLib{vfioEnabled: false}}
+
+	configState, err := state.applyVfioDeviceConfig(context.Background(), configapi.DefaultVfioDeviceConfig(), nil, nil)
+
+	require.ErrorContains(t, err, "VFIO is unavailable on this node")
+	require.Nil(t, configState)
+}
+
+func TestIommuUnavailableDoesNotAdvertiseVfio(t *testing.T) {
+	nvdevlib := &deviceLib{hostRoot: t.TempDir()}
+	vfioPciManager, err := newVfioPciManagerForNode("", "", nvdevlib)
+	require.ErrorIs(t, err, errIommuUnavailable)
+	require.Nil(t, vfioPciManager)
+	require.False(t, nvdevlib.vfioEnabled)
+
+	gpu := &AllocatableDevice{Gpu: &GpuInfo{
+		UUID:                  "GPU-0000",
+		minor:                 0,
+		productName:           "NVIDIA Test GPU",
+		brand:                 "Test",
+		architecture:          "Test",
+		cudaComputeCapability: "8.0",
+		driverVersion:         "550.0",
+		cudaDriverVersion:     "12.0",
+		pciBusID:              "0000:00:00.0",
+		vfioEnabled:           nvdevlib.vfioEnabled,
+	}}
+	perGPU := &PerGPUAllocatableDevices{
+		allocatablesMap: map[PCIBusID]AllocatableDevices{
+			gpu.Gpu.pciBusID: {gpu.CanonicalName(): gpu},
+		},
+	}
+	state := &DeviceState{
+		vfioPciManager:    vfioPciManager,
+		perGPUAllocatable: perGPU,
+		nvdevlib:          nvdevlib,
+	}
+
+	require.NoError(t, state.discoverSiblingAllocatables(gpu))
+	require.Same(t, gpu, perGPU.GetAllocatableDevice(gpu.CanonicalName()))
+	require.Empty(t, perGPU.GetAllDevices().GetVfioDevices())
+
+	resources := (&driver{state: state}).generateLegacyDriverResources("test-node", nil)
+	var devices []resourceapi.Device
+	for _, slice := range resources.Pools["test-node"].Slices {
+		devices = append(devices, slice.Devices...)
+	}
+	require.Len(t, devices, 1)
+	require.Equal(t, GpuDeviceType, *devices[0].Attributes["type"].StringValue)
+}
 
 func TestValidateNoOverlappingPreparedDevices(t *testing.T) {
 	perGPU := &PerGPUAllocatableDevices{

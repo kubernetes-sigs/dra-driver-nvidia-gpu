@@ -124,6 +124,21 @@ func newFabricManager(nvdevlib *deviceLib, driver *root.Driver) (*fabricmanager.
 	return fmManager, nil
 }
 
+func newVfioPciManagerForNode(containerDriverRoot, hostDriverRoot string, nvdevlib *deviceLib) (*VfioPciManager, error) {
+	vfioPciManager, err := NewVfioPciManager(containerDriverRoot, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create vfio pci manager: %w", err)
+	}
+	return vfioPciManager, nil
+}
+
+func newVfioCDIHandlerForNode(nvdevlib *deviceLib) (*vfioCDIHandler, error) {
+	if !nvdevlib.vfioEnabled {
+		return nil, nil
+	}
+	return NewVfioCDIHandler(nvdevlib)
+}
+
 func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	driver := root.New(root.WithDriverRoot(config.flags.containerDriverRoot))
 	devRoot := driver.DevRoot
@@ -134,12 +149,23 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
 	}
 
+	hostDriverRoot := config.flags.hostDriverRoot
+
+	var vfioPciManager *VfioPciManager
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		vfioPciManager, err = newVfioPciManagerForNode(driver.Root, hostDriverRoot, nvdevlib)
+		if errors.Is(err, errIommuUnavailable) {
+			klog.Warningf("PassthroughSupport enabled but IOMMU is unavailable; VFIO devices will not be advertised")
+			vfioPciManager = nil
+		} else if err != nil {
+			return nil, err
+		}
+	}
+	nvdevlib.vfioEnabled = vfioPciManager != nil
 	perGPUAllocatable, err := nvdevlib.enumerateAllPossibleDevices()
 	if err != nil {
 		return nil, fmt.Errorf("error enumerating all possible devices: %w", err)
 	}
-
-	hostDriverRoot := config.flags.hostDriverRoot
 
 	// Let nvcdi logs see the light of day (emit to standard streams) when we've
 	// been configured with verbosity level 7 or higher.
@@ -159,12 +185,11 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		WithCDIRoot(config.flags.cdiRoot),
 		WithLogger(cdilogger),
 	}
-	var vfioCDIHandler *vfioCDIHandler
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		vfioCDIHandler, err = NewVfioCDIHandler(nvdevlib)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create vfio CDI handler: %w", err)
-		}
+	vfioCDIHandler, err := newVfioCDIHandlerForNode(nvdevlib)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create vfio CDI handler: %w", err)
+	}
+	if vfioCDIHandler != nil {
 		cdiOptions = append(cdiOptions, WithVfioCDIHandler(vfioCDIHandler))
 	}
 	cdi, err := NewCDIHandler(cdiOptions...)
@@ -192,14 +217,6 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	var mpsManager *MpsManager
 	if featuregates.Enabled(featuregates.MPSSupport) {
 		mpsManager = NewMpsManager(config, nvdevlib, hostDriverRoot, MpsControlDaemonTemplatePath)
-	}
-
-	var vfioPciManager *VfioPciManager
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		vfioPciManager, err = NewVfioPciManager(driver.Root, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create vfio pci manager: %w", err)
-		}
 	}
 
 	fmManager, err := newFabricManager(nvdevlib, driver)
@@ -366,7 +383,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	}
 
 	// TODO: Remove this once partitionable device support is introduced for vfio devices.
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if s.nvdevlib.vfioEnabled {
 		for _, device := range preparedDevices.GetDevices() {
 			allocatableDevice := s.perGPUAllocatable.GetAllocatableDevice(device.DeviceName)
 			if allocatableDevice == nil {
@@ -531,7 +548,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 	}
 
 	// TODO: Remove this once partitionable device support is introduced for vfio devices.
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if s.nvdevlib.vfioEnabled {
 		for _, device := range pc.PreparedDevices.GetDevices() {
 			allocatableDevice := s.perGPUAllocatable.GetAllocatableDevice(device.DeviceName)
 			if allocatableDevice == nil {
@@ -641,8 +658,8 @@ func (s *DeviceState) unpreparePartiallyPreparedClaim(ctx context.Context, cuid 
 		}
 	}
 
-	// Attempt rollback of VFIO devices if PassthroughSupport is enabled.
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	// Attempt rollback of VFIO devices if passthrough is available on this node.
+	if s.nvdevlib.vfioEnabled {
 		vfioDevices := allocDevsForClaim.GetVfioDevices()
 		if len(vfioDevices) > 0 {
 			klog.V(2).Infof("unprepare: VFIO rollback for partially prepared claim %s (devices: %d)", PreparedClaimToString(&pc, cuid), len(vfioDevices))
@@ -974,7 +991,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		return nil, err
 	}
 
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if s.nvdevlib.vfioEnabled {
 		vfioGroups := 0
 		for c := range configResultsMap {
 			if _, ok := c.(*configapi.VfioDeviceConfig); ok {
@@ -1135,7 +1152,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 	var taintRemoved bool
 	for _, group := range devices {
 		// Unconfigure the vfio-pci devices.
-		if featuregates.Enabled(featuregates.PassthroughSupport) {
+		if s.nvdevlib.vfioEnabled {
 			err := s.unprepareVfioDevices(ctx, group.Devices.VfioDevices())
 			if err != nil {
 				return false, fmt.Errorf("error unpreparing VFIO devices: %w", err)
@@ -1240,7 +1257,7 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) error {
 	switch device.Type() {
 	case GpuDeviceType:
-		if !device.Gpu.vfioEnabled {
+		if !s.nvdevlib.vfioEnabled || !device.Gpu.vfioEnabled {
 			return nil
 		}
 		vfioAllocatable, err := s.nvdevlib.discoverVfioDevice(device.Gpu)
@@ -1367,6 +1384,10 @@ func (s *DeviceState) applySharingConfig(ctx context.Context, config configapi.S
 }
 
 func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configapi.VfioDeviceConfig, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult) (*DeviceConfigState, error) {
+	if !s.nvdevlib.vfioEnabled {
+		return nil, errors.New("VFIO is unavailable on this node")
+	}
+
 	configState := DeviceConfigState{
 		Config: config,
 	}

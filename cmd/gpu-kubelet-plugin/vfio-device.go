@@ -50,6 +50,8 @@ const (
 	driverChangeTimeout = 15 * time.Second
 )
 
+var errIommuUnavailable = errors.New("IOMMU is not enabled in the kernel")
+
 type VfioPciManager struct {
 	sync.Mutex
 	containerDriverRoot string
@@ -66,7 +68,7 @@ func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib 
 		return nil, fmt.Errorf("error checking if IOMMU is enabled: %w", err)
 	}
 	if !iommuEnabled {
-		return nil, fmt.Errorf("IOMMU is not enabled in the kernel")
+		return nil, errIommuUnavailable
 	}
 
 	vm := &VfioPciManager{
