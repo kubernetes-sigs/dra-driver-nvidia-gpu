@@ -116,6 +116,9 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		kubeletplugin.Serialize(false),
 		kubeletplugin.RegistrarDirectoryPath(config.flags.kubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
+		// This plugin does not report device health (KEP-4680), so don't
+		// advertise the DRAResourceHealth service to the kubelet.
+		kubeletplugin.HealthService(false),
 	)
 	if err != nil {
 		return nil, err
