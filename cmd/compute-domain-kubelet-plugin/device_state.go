@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
+	"k8s.io/dynamic-resource-allocation/resourceclaim"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	cperrors "k8s.io/kubernetes/pkg/kubelet/checkpointmanager/errors"
@@ -846,7 +847,7 @@ func (s *DeviceState) getConfigResultsMap(rcs *resourceapi.ResourceClaimStatus, 
 			return nil, fmt.Errorf("requested device is not allocatable: %v", result.Device)
 		}
 		for _, c := range slices.Backward(configs) {
-			if slices.Contains(c.Requests, result.Request) {
+			if configMatchesRequest(c.Requests, result.Request) {
 				if _, ok := c.Config.(*configapi.ComputeDomainChannelConfig); ok && device.Type() != ComputeDomainChannelType {
 					return nil, fmt.Errorf("cannot apply ComputeDomainChannelConfig to request: %v", result.Request)
 				}
@@ -869,6 +870,28 @@ func (s *DeviceState) getConfigResultsMap(rcs *resourceapi.ResourceClaimStatus, 
 		}
 	}
 	return configResultsMap, nil
+}
+
+// configMatchesRequest reports whether a config scoped to the given request
+// names applies to the request reference in an allocation result. For
+// prioritized list allocations (KEP-4816 firstAvailable), the scheduler
+// records the result's request as "<request>/<subrequest>", so a config may
+// reference either the full subrequest reference or just the parent request.
+// This mirrors the matching used by
+// [k8s.io/dynamic-resource-allocation/resourceclaim.ConfigForResult].
+//
+// Matching carries no specificity ranking: getConfigResultsMap applies the
+// last matching config in its precedence-ordered list, so a parent-scoped
+// config with higher precedence shadows a subrequest-scoped one and vice
+// versa. A matched config is still subject to per-device-type validation, so
+// a type-specific config scoped to a parent request whose subrequests span
+// device types fails preparation rather than silently falling back to the
+// default config; scope such configs to the exact subrequest instead.
+func configMatchesRequest(requests []string, requestRef string) bool {
+	if slices.Contains(requests, requestRef) {
+		return true
+	}
+	return slices.Contains(requests, resourceclaim.BaseRequestRef(requestRef))
 }
 
 // assertImexChannelNotAllocated() consults the absolute, node-local source of

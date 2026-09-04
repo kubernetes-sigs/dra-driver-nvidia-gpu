@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Namespace }}
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: gpu-device
+  namespace: {{ .Namespace }}
+spec:
+  devices:
+    requests:
+    - name: gpu
+      firstAvailable:
+      - name: dual
+        deviceClassName: gpu.nvidia.com
+        count: 2
+      - name: single
+        deviceClassName: gpu.nvidia.com
+    config:
+    - requests: ["gpu"]
+      opaque:
+        driver: gpu.nvidia.com
+        parameters:
+          apiVersion: resource.nvidia.com/v1beta1
+          kind: GpuConfig
+          sharing:
+            strategy: TimeSlicing
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-test
+  namespace: {{ .Namespace }}
+spec:
+  replicas: {{ .Replicas }}
+  selector:
+    matchLabels:
+      app: gpu-test
+  template:
+    metadata:
+      labels:
+        app: gpu-test
+    spec:
+      resourceClaims:
+      - name: gpu-device
+        resourceClaimName: gpu-device
+      containers:
+      - name: gpu-container
+        image: nvcr.io/nvidia/cuda:12.2.0-base-ubuntu22.04
+        command: ["bash","-c"]
+        args: ["nvidia-smi -L && echo GPU_OK && sleep 3600"]
+        resources:
+          claims:
+          - name: gpu-device
+            request: gpu
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"

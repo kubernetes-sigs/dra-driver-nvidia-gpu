@@ -18,11 +18,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
@@ -672,4 +674,202 @@ func TestIsAdminAccessIgnoresOtherDrivers(t *testing.T) {
 	})
 
 	require.True(t, isAdminAccess(results))
+}
+
+func TestGetConfigResultsMap(t *testing.T) {
+	state := &DeviceState{
+		perGPUAllocatable: &PerGPUAllocatableDevices{
+			allocatablesMap: map[PCIBusID]AllocatableDevices{
+				"0000:00:00.0": {
+					"gpu-0": &AllocatableDevice{Gpu: &GpuInfo{minor: 0}},
+					"gpu-1": &AllocatableDevice{Gpu: &GpuInfo{minor: 1}},
+				},
+			},
+		},
+	}
+
+	t.Run("config scoped to plain request applies to its result", func(t *testing.T) {
+		allocation := gpuAllocation(
+			[]resourceapi.DeviceRequestAllocationResult{
+				gpuAllocationResult("gpu", "gpu-0"),
+			},
+			gpuOpaqueConfig(t, []string{"gpu"}, timeSlicedGpuConfig()),
+		)
+
+		got, err := state.getConfigResultsMap(allocation)
+
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"gpu-0"}, devicesForConfig(got, isTimeSlicedGpuConfig))
+	})
+
+	t.Run("config scoped to parent request applies to subrequest result", func(t *testing.T) {
+		allocation := gpuAllocation(
+			[]resourceapi.DeviceRequestAllocationResult{
+				gpuAllocationResult("gpu/subreq", "gpu-0"),
+			},
+			gpuOpaqueConfig(t, []string{"gpu"}, timeSlicedGpuConfig()),
+		)
+
+		got, err := state.getConfigResultsMap(allocation)
+
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"gpu-0"}, devicesForConfig(got, isTimeSlicedGpuConfig))
+	})
+
+	t.Run("config scoped to exact subrequest applies only to that subrequest", func(t *testing.T) {
+		allocation := gpuAllocation(
+			[]resourceapi.DeviceRequestAllocationResult{
+				gpuAllocationResult("gpu/subreq-0", "gpu-0"),
+				gpuAllocationResult("gpu/subreq-1", "gpu-1"),
+			},
+			gpuOpaqueConfig(t, []string{"gpu/subreq-0"}, timeSlicedGpuConfig()),
+		)
+
+		got, err := state.getConfigResultsMap(allocation)
+
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"gpu-0"}, devicesForConfig(got, isTimeSlicedGpuConfig))
+		require.ElementsMatch(t, []string{"gpu-1"}, devicesForConfig(got, isDefaultGpuConfig))
+	})
+
+	t.Run("config scoped to unrelated request does not apply to subrequest result", func(t *testing.T) {
+		allocation := gpuAllocation(
+			[]resourceapi.DeviceRequestAllocationResult{
+				gpuAllocationResult("gpu/subreq", "gpu-0"),
+			},
+			gpuOpaqueConfig(t, []string{"other"}, timeSlicedGpuConfig()),
+		)
+
+		got, err := state.getConfigResultsMap(allocation)
+
+		require.NoError(t, err)
+		require.Empty(t, devicesForConfig(got, isTimeSlicedGpuConfig))
+		require.ElementsMatch(t, []string{"gpu-0"}, devicesForConfig(got, isDefaultGpuConfig))
+	})
+
+	// Matching carries no specificity ranking: the last matching config in
+	// precedence order wins, whether it names the parent request or the full
+	// subrequest reference.
+	t.Run("subrequest-scoped config listed later shadows parent-scoped config", func(t *testing.T) {
+		allocation := gpuAllocation(
+			[]resourceapi.DeviceRequestAllocationResult{
+				gpuAllocationResult("gpu/subreq", "gpu-0"),
+			},
+			gpuOpaqueConfig(t, []string{"gpu"}, timeSlicedGpuConfig()),
+			gpuOpaqueConfig(t, []string{"gpu/subreq"}, mpsGpuConfig()),
+		)
+
+		got, err := state.getConfigResultsMap(allocation)
+
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"gpu-0"}, devicesForConfig(got, isMpsGpuConfig))
+		require.Empty(t, devicesForConfig(got, isTimeSlicedGpuConfig))
+	})
+
+	t.Run("parent-scoped config listed later shadows subrequest-scoped config", func(t *testing.T) {
+		allocation := gpuAllocation(
+			[]resourceapi.DeviceRequestAllocationResult{
+				gpuAllocationResult("gpu/subreq", "gpu-0"),
+			},
+			gpuOpaqueConfig(t, []string{"gpu/subreq"}, mpsGpuConfig()),
+			gpuOpaqueConfig(t, []string{"gpu"}, timeSlicedGpuConfig()),
+		)
+
+		got, err := state.getConfigResultsMap(allocation)
+
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"gpu-0"}, devicesForConfig(got, isTimeSlicedGpuConfig))
+		require.Empty(t, devicesForConfig(got, isMpsGpuConfig))
+	})
+
+	t.Run("device type validation enforced for parent-scoped config on subrequest result", func(t *testing.T) {
+		allocation := gpuAllocation(
+			[]resourceapi.DeviceRequestAllocationResult{
+				gpuAllocationResult("gpu/subreq", "gpu-0"),
+			},
+			gpuOpaqueConfig(t, []string{"gpu"}, configapi.DefaultMigDeviceConfig()),
+		)
+
+		_, err := state.getConfigResultsMap(allocation)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "cannot apply MigDeviceConfig")
+	})
+}
+
+func timeSlicedGpuConfig() *configapi.GpuConfig {
+	config := configapi.DefaultGpuConfig()
+	config.Sharing = &configapi.GpuSharing{Strategy: configapi.TimeSlicingStrategy}
+	return config
+}
+
+func mpsGpuConfig() *configapi.GpuConfig {
+	config := configapi.DefaultGpuConfig()
+	config.Sharing = &configapi.GpuSharing{Strategy: configapi.MpsStrategy}
+	return config
+}
+
+func isMpsGpuConfig(obj runtime.Object) bool {
+	config, ok := obj.(*configapi.GpuConfig)
+	return ok && config.Sharing != nil && config.Sharing.Strategy == configapi.MpsStrategy
+}
+
+func isTimeSlicedGpuConfig(obj runtime.Object) bool {
+	config, ok := obj.(*configapi.GpuConfig)
+	return ok && config.Sharing != nil && config.Sharing.Strategy == configapi.TimeSlicingStrategy
+}
+
+func isDefaultGpuConfig(obj runtime.Object) bool {
+	config, ok := obj.(*configapi.GpuConfig)
+	return ok && config.Sharing == nil
+}
+
+func gpuAllocation(results []resourceapi.DeviceRequestAllocationResult, configs ...resourceapi.DeviceAllocationConfiguration) *resourceapi.AllocationResult {
+	return &resourceapi.AllocationResult{
+		Devices: resourceapi.DeviceAllocationResult{
+			Results: results,
+			Config:  configs,
+		},
+	}
+}
+
+func gpuAllocationResult(request, device string) resourceapi.DeviceRequestAllocationResult {
+	return resourceapi.DeviceRequestAllocationResult{
+		Request: request,
+		Driver:  DriverName,
+		Pool:    "pool",
+		Device:  device,
+	}
+}
+
+func gpuOpaqueConfig(t *testing.T, requests []string, obj runtime.Object) resourceapi.DeviceAllocationConfiguration {
+	t.Helper()
+	raw, err := json.Marshal(obj)
+	require.NoError(t, err)
+
+	return resourceapi.DeviceAllocationConfiguration{
+		Source:   resourceapi.AllocationConfigSourceClaim,
+		Requests: requests,
+		DeviceConfiguration: resourceapi.DeviceConfiguration{
+			Opaque: &resourceapi.OpaqueDeviceConfiguration{
+				Driver: DriverName,
+				Parameters: runtime.RawExtension{
+					Raw: raw,
+				},
+			},
+		},
+	}
+}
+
+func devicesForConfig(got map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult, match func(runtime.Object) bool) []string {
+	var devices []string
+	for config, results := range got {
+		if !match(config) {
+			continue
+		}
+		for _, result := range results {
+			devices = append(devices, result.Device)
+		}
+	}
+	return devices
 }

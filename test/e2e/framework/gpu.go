@@ -81,8 +81,21 @@ func StripSemverLeadingZeros(v string) string {
 	}
 }
 
-// LowerKebab lowercases and converts '-' to ' ', converting an NFD label
-// value like "Tesla-T4" to the form CEL's lowerAscii() productName returns.
-func LowerKebab(s string) string {
-	return strings.ToLower(strings.ReplaceAll(s, "-", " "))
+// ProductNamePattern converts a ResourceSlice productName (e.g. "Tesla T4",
+// "NVIDIA A100-SXM4-40GB") into a regex fragment that matches the value CEL's
+// lowerAscii() returns for the same attribute. Letters, digits, spaces and
+// hyphens are kept verbatim (none are RE2 metacharacters outside a class);
+// any other rune becomes a single-character wildcard so no escaping is
+// needed inside the CEL string literal.
+func ProductNamePattern(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == ' ', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('.')
+		}
+	}
+	return b.String()
 }

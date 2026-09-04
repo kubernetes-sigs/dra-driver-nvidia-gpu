@@ -36,6 +36,7 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
+	"k8s.io/dynamic-resource-allocation/resourceclaim"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	cperrors "k8s.io/kubernetes/pkg/kubelet/checkpointmanager/errors"
@@ -1717,7 +1718,7 @@ func (s *DeviceState) getConfigResultsMap(allocation *resourceapi.AllocationResu
 			return nil, fmt.Errorf("allocatable not found for device %q", result.Device)
 		}
 		for _, c := range slices.Backward(configs) {
-			if slices.Contains(c.Requests, result.Request) {
+			if configMatchesRequest(c.Requests, result.Request) {
 				if err := validateDeviceConfigType(c.Config, device, &result); err != nil {
 					return nil, err
 				}
@@ -1763,6 +1764,28 @@ func getDeviceConfigsWithDefaults(rawConfigs []resourceapi.DeviceAllocationConfi
 	}
 
 	return append(defaults, configs...), nil
+}
+
+// configMatchesRequest reports whether a config scoped to the given request
+// names applies to the request reference in an allocation result. For
+// prioritized list allocations (KEP-4816 firstAvailable), the scheduler
+// records the result's request as "<request>/<subrequest>", so a config may
+// reference either the full subrequest reference or just the parent request.
+// This mirrors the matching used by
+// [k8s.io/dynamic-resource-allocation/resourceclaim.ConfigForResult].
+//
+// Matching carries no specificity ranking: getConfigResultsMap applies the
+// last matching config in its precedence-ordered list, so a parent-scoped
+// config with higher precedence shadows a subrequest-scoped one and vice
+// versa. A matched config is still subject to per-device-type validation, so
+// a type-specific config scoped to a parent request whose subrequests span
+// device types fails preparation rather than silently falling back to the
+// default config; scope such configs to the exact subrequest instead.
+func configMatchesRequest(requests []string, requestRef string) bool {
+	if slices.Contains(requests, requestRef) {
+		return true
+	}
+	return slices.Contains(requests, resourceclaim.BaseRequestRef(requestRef))
 }
 
 func validateDeviceConfigType(c runtime.Object, dev *AllocatableDevice, result *resourceapi.DeviceRequestAllocationResult) error {

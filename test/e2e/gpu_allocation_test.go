@@ -50,7 +50,7 @@ var _ = Describe("GPU Allocation", func() {
 	It("[cel/productName] schedules a pod via product-name regex selector", func(ctx SpecContext) {
 		yaml, err := framework.Render("product-type", map[string]any{
 			"Namespace":      ns,
-			"ProductPattern": framework.LowerKebab(gpu.ProductName),
+			"ProductPattern": framework.ProductNamePattern(gpu.ProductName),
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(framework.ApplyYAML(ctx, yaml)).To(Succeed())
@@ -125,6 +125,35 @@ var _ = Describe("GPU Allocation", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rc.Status.Allocation).NotTo(BeNil())
 		Expect(len(rc.Status.ReservedFor)).To(BeEquivalentTo(replicas))
+	})
+
+	It("[prioritized-list] applies request-scoped config to firstAvailable subrequest allocation", func(ctx SpecContext) {
+		const replicas = 2
+		yaml, err := framework.Render("prioritized-list-config", map[string]any{
+			"Namespace": ns,
+			"Replicas":  replicas,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(framework.ApplyYAML(ctx, yaml)).To(Succeed())
+
+		// Smoke test of the prepare path for a prioritized-list allocation
+		// whose TimeSlicing config is scoped to the parent request "gpu". Pod
+		// readiness proves NodePrepareResources succeeded on the "gpu/dual"
+		// or "gpu/single" subrequest result; it does not by itself prove the
+		// config was applied (a non-matching config silently falls back to
+		// the default GpuConfig). Config-matching semantics are pinned by
+		// TestGetConfigResultsMap in cmd/gpu-kubelet-plugin.
+		got, err := framework.WaitForPodsReady(ctx, cs, ns, "app=gpu-test", replicas, 5*time.Minute)
+		Expect(err).NotTo(HaveOccurred(), "only %d/%d pods Ready", got, replicas)
+
+		rc, err := cs.ResourceV1().ResourceClaims(ns).Get(ctx, "gpu-device", metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rc.Status.Allocation).NotTo(BeNil())
+		Expect(rc.Status.Allocation.Devices.Results).NotTo(BeEmpty())
+		for _, r := range rc.Status.Allocation.Devices.Results {
+			Expect(r.Request).To(HavePrefix("gpu/"),
+				"expected a prioritized-list subrequest reference, got %q", r.Request)
+		}
 	})
 
 	It("[negative] pod stays Pending when no device matches (h300)", func(ctx SpecContext) {
@@ -248,4 +277,3 @@ func verifyClaimsShareSameDevice(ctx context.Context, ns string) {
 		}
 	}
 }
-

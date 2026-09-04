@@ -198,6 +198,104 @@ func TestGetConfigResultsMap(t *testing.T) {
 		assert.Contains(t, err.Error(), "requested device is not allocatable")
 	})
 
+	t.Run("config scoped to parent request applies to subrequest result", func(t *testing.T) {
+		state := testDeviceState()
+		status := claimStatus(
+			[]resourceapi.DeviceRequestAllocationResult{
+				allocationResult("channel-request/sub-0", DriverName, "channel-0", nil),
+			},
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"channel-request"}, channelConfig("claim-domain")),
+		)
+
+		got, err := state.getConfigResultsMap(&status, configapi.StrictDecoder)
+
+		require.NoError(t, err)
+		assertConfigResultDevices(t, got, ComputeDomainChannelType, "claim-domain", []string{"channel-0"})
+	})
+
+	t.Run("config scoped to exact subrequest applies only to that subrequest", func(t *testing.T) {
+		state := testDeviceState()
+		status := claimStatus(
+			[]resourceapi.DeviceRequestAllocationResult{
+				allocationResult("channel-request/sub-0", DriverName, "channel-0", nil),
+			},
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"channel-request/sub-0"}, channelConfig("sub-domain")),
+		)
+
+		got, err := state.getConfigResultsMap(&status, configapi.StrictDecoder)
+
+		require.NoError(t, err)
+		assertConfigResultDevices(t, got, ComputeDomainChannelType, "sub-domain", []string{"channel-0"})
+	})
+
+	t.Run("config scoped to different subrequest falls back to default", func(t *testing.T) {
+		state := testDeviceState()
+		status := claimStatus(
+			[]resourceapi.DeviceRequestAllocationResult{
+				allocationResult("channel-request/sub-1", DriverName, "channel-0", nil),
+			},
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"channel-request/sub-0"}, channelConfig("sub-domain")),
+		)
+
+		got, err := state.getConfigResultsMap(&status, configapi.StrictDecoder)
+
+		require.NoError(t, err)
+		assertNoConfigResult(t, got, ComputeDomainChannelType, "sub-domain")
+		assertConfigResultDevices(t, got, ComputeDomainChannelType, "", []string{"channel-0"})
+	})
+
+	// Matching carries no specificity ranking: the last matching config in
+	// precedence order wins, whether it names the parent request or the full
+	// subrequest reference.
+	t.Run("subrequest-scoped config listed later shadows parent-scoped config", func(t *testing.T) {
+		state := testDeviceState()
+		status := claimStatus(
+			[]resourceapi.DeviceRequestAllocationResult{
+				allocationResult("channel-request/sub-0", DriverName, "channel-0", nil),
+			},
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"channel-request"}, channelConfig("parent-domain")),
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"channel-request/sub-0"}, channelConfig("sub-domain")),
+		)
+
+		got, err := state.getConfigResultsMap(&status, configapi.StrictDecoder)
+
+		require.NoError(t, err)
+		assertConfigResultDevices(t, got, ComputeDomainChannelType, "sub-domain", []string{"channel-0"})
+		assertNoConfigResult(t, got, ComputeDomainChannelType, "parent-domain")
+	})
+
+	t.Run("parent-scoped config listed later shadows subrequest-scoped config", func(t *testing.T) {
+		state := testDeviceState()
+		status := claimStatus(
+			[]resourceapi.DeviceRequestAllocationResult{
+				allocationResult("channel-request/sub-0", DriverName, "channel-0", nil),
+			},
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"channel-request/sub-0"}, channelConfig("sub-domain")),
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"channel-request"}, channelConfig("parent-domain")),
+		)
+
+		got, err := state.getConfigResultsMap(&status, configapi.StrictDecoder)
+
+		require.NoError(t, err)
+		assertConfigResultDevices(t, got, ComputeDomainChannelType, "parent-domain", []string{"channel-0"})
+		assertNoConfigResult(t, got, ComputeDomainChannelType, "sub-domain")
+	})
+
+	t.Run("rejects parent-scoped config with mismatched device type on subrequest result", func(t *testing.T) {
+		state := testDeviceState()
+		status := claimStatus(
+			[]resourceapi.DeviceRequestAllocationResult{
+				allocationResult("channel-request/sub-0", DriverName, "channel-0", nil),
+			},
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"channel-request"}, daemonConfig("daemon-domain")),
+		)
+
+		_, err := state.getConfigResultsMap(&status, configapi.StrictDecoder)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot apply ComputeDomainDaemonConfig")
+	})
+
 	t.Run("rejects request config with mismatched device type", func(t *testing.T) {
 		state := testDeviceState()
 		status := claimStatus(
