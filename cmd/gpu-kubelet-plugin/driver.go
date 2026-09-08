@@ -146,6 +146,9 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 			drametadatav1alpha1.SchemeGroupVersion,
 		}))
 	}
+	// This plugin does not report device health (KEP-4680), so don't
+	// advertise the DRAResourceHealth service to the kubelet.
+	opts = append(opts, kubeletplugin.HealthService(false))
 	helper, err := kubeletplugin.Start(ctx, driver, opts...)
 	if err != nil {
 		return nil, err
