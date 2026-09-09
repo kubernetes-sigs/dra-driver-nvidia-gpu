@@ -73,13 +73,6 @@ func TestCheckIommuEnabled(t *testing.T) {
 	}
 }
 
-func TestNewVfioPciManagerIommuUnavailable(t *testing.T) {
-	manager, err := NewVfioPciManager("", "", &deviceLib{hostRoot: t.TempDir()}, true)
-
-	require.Nil(t, manager)
-	require.ErrorIs(t, err, errIommuUnavailable)
-}
-
 func TestGetDriver(t *testing.T) {
 	t.Run("returns empty driver", func(t *testing.T) {
 		pciDevicesPath := t.TempDir()
