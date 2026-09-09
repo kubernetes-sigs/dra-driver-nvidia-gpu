@@ -217,7 +217,7 @@ func (m *ComputeDomainStatusManager) syncCD(ctx context.Context, cd *nvapi.Compu
 		newNodes = slices.Concat(fabricNodes, nonFabricNodes)
 	} else {
 		// Feature gate disabled: filter stale fabric nodes + rebuild non-fabric nodes
-		fabricNodes = m.getNonStaleFabricNodes(cd.Status.Nodes, fabricPods)
+		fabricNodes = m.getNonStaleFabricNodes(ctx, string(cd.UID), cd.Status.Nodes, fabricPods)
 		nonFabricNodes = m.buildNodesFromPods(nonFabricPods)
 		newNodes = slices.Concat(fabricNodes, nonFabricNodes)
 	}
@@ -284,7 +284,21 @@ func (m *ComputeDomainStatusManager) buildNodesFromPods(pods []*corev1.Pod) []*n
 	return nodes
 }
 
-// cleanupClique removes stale daemon entries from a single clique.
+func podMatchesDaemon(pod *corev1.Pod, nodeName, daemonIP string) bool {
+	if pod.Spec.NodeName != nodeName {
+		return false
+	}
+	if daemonIP != "" && pod.Status.PodIP != "" && pod.Status.PodIP != daemonIP {
+		return false
+	}
+	return true
+}
+
+// cleanupClique removes stale daemon entries from a single clique. A daemon is only removed
+// after a live, quorum-consistent read against the API server confirms its pod is actually gone
+// (see listLivePodsForNode) rather than trusting the cached pod list's absence alone, so a momentary lag
+// between the clique informer and the pod informer can't be mistaken for a genuinely gone node,
+// while a real deletion is still acted on immediately.
 func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *nvapi.ComputeDomainClique, pods []*corev1.Pod) {
 	// Build set of node names that have running daemon pods
 	runningNodes := make(map[string]struct{})
@@ -359,29 +373,70 @@ func podMatchesClique(pod *corev1.Pod, clique *nvapi.ComputeDomainClique) bool {
 // It filters the existing nodes list to only keep those with a corresponding pod in the pods list.
 // getNonStaleFabricNodes returns fabric-attached nodes from existingNodes that still have running pods.
 // Non-fabric nodes are filtered out (they'll be rebuilt from nonFabricPods).
-func (m *ComputeDomainStatusManager) getNonStaleFabricNodes(existingNodes []*nvapi.ComputeDomainNode, fabricPods []*corev1.Pod) []*nvapi.ComputeDomainNode {
-	// Build set of fabric pod IPs
-	fabricPodIPs := make(map[string]struct{})
-	for _, pod := range fabricPods {
-		if pod.Status.PodIP != "" {
-			fabricPodIPs[pod.Status.PodIP] = struct{}{}
-		}
-	}
-
-	// Keep only fabric nodes (CliqueID != "") that still have pods
+func (m *ComputeDomainStatusManager) getNonStaleFabricNodes(ctx context.Context, cdUID string, existingNodes []*nvapi.ComputeDomainNode, fabricPods []*corev1.Pod) []*nvapi.ComputeDomainNode {
+	// Keep only fabric nodes (CliqueID != "") that still have a matching pod.
 	var result []*nvapi.ComputeDomainNode
 	for _, node := range existingNodes {
 		// Skip non-fabric nodes (they're rebuilt fresh)
 		if node.CliqueID == "" {
 			continue
 		}
-		// Keep fabric node if its pod still exists
-		if _, exists := fabricPodIPs[node.IPAddress]; exists {
-			result = append(result, node)
+
+		// Keep fabric node if its pod is visible in the cached pod list.
+		matched := false
+		for _, pod := range fabricPods {
+			if podMatchesDaemon(pod, node.Name, node.IPAddress) {
+				matched = true
+				break
+			}
 		}
+		if matched {
+			result = append(result, node)
+			continue
+		}
+
+		// Not in the cache: don't trust that alone. Confirm live before
+		// removing.
+		livePods, err := m.listLivePodsForNode(ctx, cdUID, node.Name)
+		if err != nil {
+			klog.Errorf("CDStatusSync: error confirming pod liveness for node %q: %v", node.Name, err)
+			// Fail safe: don't remove on an unconfirmed cache miss.
+			result = append(result, node)
+			continue
+		}
+
+		liveMatched := false
+		for i := range livePods {
+			if podMatchesDaemon(&livePods[i], node.Name, node.IPAddress) {
+				liveMatched = true
+				break
+			}
+		}
+		if liveMatched {
+			result = append(result, node)
+			continue
+		}
+
+		klog.Infof("CDStatusSync: pruning stale fabric node %q", node.Name)
 	}
 
 	return result
+}
+
+// listLivePodsForNode does a live read straight against the API server for daemon pods
+// belonging to ComputeDomain cdUID and scheduled on nodeName. It's used as a confirmation
+// fallback only when a node isn't found in the faster, but potentially lagging, informer-cached
+// pod list so getNonStaleFabricNodes and cleanupClique never prune a node based solely on a cache
+// that hasn't caught up yet.
+func (m *ComputeDomainStatusManager) listLivePodsForNode(ctx context.Context, cdUID, nodeName string) ([]corev1.Pod, error) {
+	pods, err := m.config.clientsets.Core.CoreV1().Pods(m.config.driverNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s=%s", computeDomainLabelKey, cdUID),
+		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return pods.Items, nil
 }
 
 // nodesEqual checks if two slices of ComputeDomainNode are equal.
