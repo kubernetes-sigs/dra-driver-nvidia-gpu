@@ -499,3 +499,109 @@ func TestGetCommonEditsCached(t *testing.T) {
 		})
 	}
 }
+
+func TestGetDeviceSpecsByUUIDCachedBehavior(t *testing.T) {
+	tests := map[string]struct {
+		deviceSpecs        map[string][]cdispec.Device
+		deviceSpecsErrs    map[string]error
+		cachedValues       map[string]any
+		requestUUIDs       []string
+		wantUnderlyingCall map[string]int
+		wantErr            string
+		checkResults       func(*testing.T, [][]cdispec.Device)
+	}{
+		"entries are cached independently by UUID": {
+			deviceSpecs: map[string][]cdispec.Device{
+				"GPU-1": {
+					{Name: "gpu-1", ContainerEdits: *containerEdits("/dev/nvidia1").ContainerEdits},
+				},
+				"GPU-2": {
+					{Name: "gpu-2", ContainerEdits: *containerEdits("/dev/nvidia2").ContainerEdits},
+				},
+			},
+			requestUUIDs: []string{
+				"GPU-1",
+				"GPU-2",
+				"GPU-1",
+				"GPU-2",
+			},
+			wantUnderlyingCall: map[string]int{
+				"GPU-1": 1,
+				"GPU-2": 1,
+			},
+			checkResults: func(t *testing.T, results [][]cdispec.Device) {
+				require.Len(t, results, 4)
+				assert.Equal(t, "gpu-1", results[0][0].Name)
+				assert.Equal(t, "gpu-2", results[1][0].Name)
+				assert.Equal(t, "gpu-1", results[2][0].Name)
+				assert.Equal(t, "gpu-2", results[3][0].Name)
+			},
+		},
+		"underlying errors are not cached": {
+			deviceSpecs: map[string][]cdispec.Device{},
+			deviceSpecsErrs: map[string]error{
+				"GPU-123": errors.New("mock error"),
+			},
+			requestUUIDs: []string{"GPU-123", "GPU-123"},
+			wantUnderlyingCall: map[string]int{
+				"GPU-123": 2,
+			},
+			wantErr: "mock error",
+		},
+		"invalid cached value returns an error": {
+			deviceSpecs: map[string][]cdispec.Device{},
+			cachedValues: map[string]any{
+				"GPU-123": "invalid value",
+			},
+			requestUUIDs:       []string{"GPU-123"},
+			wantUnderlyingCall: map[string]int{},
+			wantErr:            "expected []cdispec.Device",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			deviceSpecsCalls := map[string]int{}
+			fakeNVCDIClaim := &fakeNVCDI{
+				getDeviceSpecs: func(ids ...string) ([]cdispec.Device, error) {
+					uuid := ids[0]
+					deviceSpecsCalls[uuid]++
+					return tc.deviceSpecs[uuid], tc.deviceSpecsErrs[uuid]
+				},
+			}
+			handler := &CDIHandler{
+				nvcdiClaim: fakeNVCDIClaim,
+				specCache:  utilcache.NewExpiring(),
+			}
+
+			for uuid, value := range tc.cachedValues {
+				handler.specCache.Set(uuid, value, 5*time.Minute)
+			}
+
+			var results [][]cdispec.Device
+			for _, uuid := range tc.requestUUIDs {
+				got, err := handler.GetDeviceSpecsByUUIDCached(uuid)
+
+				if tc.wantErr != "" {
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), tc.wantErr)
+					continue
+				}
+
+				require.NoError(t, err)
+
+				results = append(results, got)
+			}
+
+			assert.Equal(
+				t,
+				tc.wantUnderlyingCall,
+				deviceSpecsCalls,
+			)
+
+			if tc.checkResults != nil {
+				tc.checkResults(t, results)
+			}
+		})
+	}
+}
