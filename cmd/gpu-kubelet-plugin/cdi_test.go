@@ -17,10 +17,13 @@ limitations under the License.
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	nvcdspec "github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi/spec"
@@ -438,4 +441,61 @@ func TestGetDevNodesForMigDeviceReadsAltProcDriverPath(t *testing.T) {
 		{Path: "/dev/nvidia-caps/nvidia-cap35", Type: "c", FileMode: ptr.To(os.FileMode(292)), Major: 236, Minor: 35},
 		{Path: "/dev/nvidia-caps/nvidia-cap36", Type: "c", FileMode: ptr.To(os.FileMode(292)), Major: 236, Minor: 36},
 	}, nodes)
+}
+
+func TestGetCommonEditsCached(t *testing.T) {
+	tests := map[string]struct {
+		commonEditsErr     error
+		cachedValue        any
+		callCount          int
+		wantUnderlyingCall int
+		wantErr            string
+	}{
+		"underlying errors are not cached": {
+			commonEditsErr:     errors.New("mock error"),
+			callCount:          2,
+			wantUnderlyingCall: 2,
+			wantErr:            "mock error",
+		},
+		"invalid cached value returns an error": {
+			cachedValue:        "invalid value",
+			callCount:          1,
+			wantUnderlyingCall: 0,
+			wantErr:            "expected *cdiapi.ContainerEdits",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			fakeNVCDIClaim := &fakeNVCDI{
+				getCommonEdits: func() (*cdiapi.ContainerEdits, error) {
+					return nil, tc.commonEditsErr
+				},
+			}
+			handler := &CDIHandler{
+				nvcdiClaim: fakeNVCDIClaim,
+				specCache:  utilcache.NewExpiring(),
+			}
+
+			if tc.cachedValue != nil {
+				handler.specCache.Set(
+					"commonEdits",
+					tc.cachedValue,
+					5*time.Minute,
+				)
+			}
+
+			for range tc.callCount {
+				got, err := handler.GetCommonEditsCached()
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.Nil(t, got)
+			}
+
+			assert.Equal(
+				t,
+				tc.wantUnderlyingCall,
+				fakeNVCDIClaim.commonEditCalls,
+			)
+		})
+	}
 }
