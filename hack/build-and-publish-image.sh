@@ -38,6 +38,9 @@ if [[ -z ${GIT_COMMIT:-} ]]; then
 fi
 echo "Using GIT_COMMIT=${GIT_COMMIT}"
 
+IMG_PROVENANCE="${IMG_PROVENANCE:-false}"
+IMG_SBOM="${IMG_SBOM:-false}"
+
 export CI=true
 export DOCKER_CLI_EXPERIMENTAL=enabled
 
@@ -52,4 +55,6 @@ make -f deployments/container/Makefile build \
 	PUSH_ON_BUILD=true \
 	REGISTRY="${IMG_PREFIX}" \
 	VERSION="${IMG_TAG}" \
-	GIT_COMMIT="${GIT_COMMIT}"
+	GIT_COMMIT="${GIT_COMMIT}" \
+	PROVENANCE="${IMG_PROVENANCE}" \
+	SBOM="${IMG_SBOM}"
