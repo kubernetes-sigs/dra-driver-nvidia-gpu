@@ -270,3 +270,43 @@ func TestGetDeviceSpecsByUUIDCached(t *testing.T) {
 	}
 }
 
+func TestWarmupDevSpecCache(t *testing.T) {
+	fakeNVCDIClaim := &fakeNVCDI{
+		deviceSpecsCalls: map[string]int{},
+		deviceSpecs: map[string][]cdispec.Device{
+			"GPU-1": {{Name: "gpu-1"}},
+			"GPU-2": {{Name: "gpu-2"}},
+		},
+		deviceSpecsErrs: map[string]error{
+			"GPU-error": errors.New("mock error"),
+		},
+	}
+	handler := &CDIHandler{
+		nvcdiClaim: fakeNVCDIClaim,
+		specCache:  utilcache.NewExpiring(),
+	}
+
+	handler.WarmupDevSpecCache([]string{
+		"GPU-1",
+		"GPU-error",
+		"GPU-2",
+		"GPU-1",
+	})
+
+	for uuid, wantName := range map[string]string{
+		"GPU-1": "gpu-1",
+		"GPU-2": "gpu-2",
+	} {
+		got, err := handler.GetDeviceSpecsByUUIDCached(uuid)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, wantName, got[0].Name)
+	}
+
+	assert.Equal(t, map[string]int{
+		"GPU-1":     1,
+		"GPU-2":     1,
+		"GPU-error": 1,
+	}, fakeNVCDIClaim.deviceSpecsCalls)
+}
+
