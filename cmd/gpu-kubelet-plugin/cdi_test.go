@@ -310,3 +310,108 @@ func TestWarmupDevSpecCache(t *testing.T) {
 	}, fakeNVCDIClaim.deviceSpecsCalls)
 }
 
+func TestCreateClaimSpecFile(t *testing.T) {
+	const (
+		claimUID = "claim-123"
+		uuid     = "GPU-123"
+	)
+
+	tests := map[string]struct {
+		commonEditsErr      error
+		deviceSpecsErrs     map[string]error
+		wantErr             string
+		wantCommonEditCalls int
+		wantDeviceSpecCalls map[string]int
+	}{
+		"regular GPU": {
+			wantCommonEditCalls: 1,
+			wantDeviceSpecCalls: map[string]int{uuid: 1},
+		},
+		"common edits error": {
+			commonEditsErr:      errors.New("mock common edits error"),
+			wantErr:             "failed to get common CDI spec edits: mock common edits error",
+			wantCommonEditCalls: 1,
+			wantDeviceSpecCalls: map[string]int{},
+		},
+		"device spec error": {
+			deviceSpecsErrs: map[string]error{
+				uuid: errors.New("mock device spec error"),
+			},
+			wantErr:             "unable to get device spec for claim-123-gpu-0: mock device spec error",
+			wantCommonEditCalls: 1,
+			wantDeviceSpecCalls: map[string]int{uuid: 1},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			fakeNVCDIClaim := &fakeNVCDI{
+				commonEdits: &cdiapi.ContainerEdits{
+					ContainerEdits: &cdispec.ContainerEdits{
+						Env: []string{"COMMON=value"},
+					},
+				},
+				commonEditsErr:   tc.commonEditsErr,
+				deviceSpecsCalls: map[string]int{},
+				deviceSpecs: map[string][]cdispec.Device{
+					uuid: {
+						{
+							ContainerEdits: cdispec.ContainerEdits{
+								Env: []string{"DEVICE=value"},
+							},
+						},
+					},
+				},
+				deviceSpecsErrs: tc.deviceSpecsErrs,
+			}
+			cdiRoot := t.TempDir()
+			handler := &CDIHandler{
+				nvcdiClaim: fakeNVCDIClaim,
+				specCache:  utilcache.NewExpiring(),
+				cdiRoot:    cdiRoot,
+			}
+			preparedDevices := PreparedDevices{
+				{
+					Devices: PreparedDeviceList{
+						{
+							Gpu: &PreparedGpu{
+								Info: &GpuInfo{UUID: uuid},
+								Device: &CheckpointedDevice{
+									DeviceName: "gpu-0",
+								},
+							},
+						},
+					},
+					ConfigState: DeviceConfigState{
+						containerEdits: &cdiapi.ContainerEdits{
+							ContainerEdits: &cdispec.ContainerEdits{
+								Env: []string{"GROUP=value"},
+							},
+						},
+					},
+				},
+			}
+			specName := cdiapi.GenerateTransientSpecName(cdiVendor, cdiClaimClass, claimUID)
+			specPath := filepath.Join(cdiRoot, specName+".yaml")
+
+			err := handler.CreateClaimSpecFile(claimUID, preparedDevices)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				require.NoFileExists(t, specPath)
+			} else {
+				require.NoError(t, err)
+
+				generated, err := cdiapi.ReadSpec(specPath, 0)
+				require.NoError(t, err)
+				assert.Equal(t, cdiVendor+"/"+cdiClaimClass, generated.Kind)
+				assert.Equal(t, []string{"COMMON=value"}, generated.ContainerEdits.Env)
+				require.Len(t, generated.Devices, 1)
+				assert.Equal(t, "claim-123-gpu-0", generated.Devices[0].Name)
+				assert.Equal(t, []string{"DEVICE=value", "GROUP=value"}, generated.Devices[0].ContainerEdits.Env)
+			}
+
+			assert.Equal(t, tc.wantCommonEditCalls, fakeNVCDIClaim.commonEditsCalls)
+			assert.Equal(t, tc.wantDeviceSpecCalls, fakeNVCDIClaim.deviceSpecsCalls)
+		})
+	}
+}
