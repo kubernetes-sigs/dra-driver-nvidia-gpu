@@ -20,6 +20,9 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create"]
 ---
 apiVersion: v1
 kind: ServiceAccount
