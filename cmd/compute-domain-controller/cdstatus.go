@@ -296,7 +296,7 @@ func podMatchesDaemon(pod *corev1.Pod, nodeName, daemonIP string) bool {
 
 // cleanupClique removes stale daemon entries from a single clique. A daemon is only removed
 // after a live, quorum-consistent read against the API server confirms its pod is actually gone
-// (see listLivePodsForNode) rather than trusting the cached pod list's absence alone, so a momentary lag
+// (see listLivePodsForCD) rather than trusting the cached pod list's absence alone, so a momentary lag
 // between the clique informer and the pod informer can't be mistaken for a genuinely gone node,
 // while a real deletion is still acted on immediately.
 func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *nvapi.ComputeDomainClique, pods []*corev1.Pod) {
@@ -374,6 +374,20 @@ func podMatchesClique(pod *corev1.Pod, clique *nvapi.ComputeDomainClique) bool {
 // getNonStaleFabricNodes returns fabric-attached nodes from existingNodes that still have running pods.
 // Non-fabric nodes are filtered out (they'll be rebuilt from nonFabricPods).
 func (m *ComputeDomainStatusManager) getNonStaleFabricNodes(ctx context.Context, cdUID string, existingNodes []*nvapi.ComputeDomainNode, fabricPods []*corev1.Pod) []*nvapi.ComputeDomainNode {
+	// Lazily fetched at most once per call, and reused for every node below that
+	// misses the cached pod list, so a ComputeDomain with several missing nodes
+	// doesn't turn into several separate API calls.
+	var livePods []corev1.Pod
+	var liveErr error
+	liveFetched := false
+	fetchLivePods := func() ([]corev1.Pod, error) {
+		if !liveFetched {
+			livePods, liveErr = m.listLivePodsForCD(ctx, cdUID)
+			liveFetched = true
+		}
+		return livePods, liveErr
+	}
+
 	// Keep only fabric nodes (CliqueID != "") that still have a matching pod.
 	var result []*nvapi.ComputeDomainNode
 	for _, node := range existingNodes {
@@ -397,7 +411,7 @@ func (m *ComputeDomainStatusManager) getNonStaleFabricNodes(ctx context.Context,
 
 		// Not in the cache: don't trust that alone. Confirm live before
 		// removing.
-		livePods, err := m.listLivePodsForNode(ctx, cdUID, node.Name)
+		live, err := fetchLivePods()
 		if err != nil {
 			klog.Errorf("CDStatusSync: error confirming pod liveness for node %q: %v", node.Name, err)
 			// Fail safe: don't remove on an unconfirmed cache miss.
@@ -406,8 +420,8 @@ func (m *ComputeDomainStatusManager) getNonStaleFabricNodes(ctx context.Context,
 		}
 
 		liveMatched := false
-		for i := range livePods {
-			if podMatchesDaemon(&livePods[i], node.Name, node.IPAddress) {
+		for i := range live {
+			if podMatchesDaemon(&live[i], node.Name, node.IPAddress) {
 				liveMatched = true
 				break
 			}
@@ -423,15 +437,14 @@ func (m *ComputeDomainStatusManager) getNonStaleFabricNodes(ctx context.Context,
 	return result
 }
 
-// listLivePodsForNode does a live read straight against the API server for daemon pods
-// belonging to ComputeDomain cdUID and scheduled on nodeName. It's used as a confirmation
-// fallback only when a node isn't found in the faster, but potentially lagging, informer-cached
-// pod list so getNonStaleFabricNodes and cleanupClique never prune a node based solely on a cache
+// listLivePodsForCD does a single live, quorum-consistent read straight against the API server
+// for all daemon pods belonging to ComputeDomain cdUID. It's used as a confirmation fallback only
+// when at least one node isn't found in the faster, but potentially lagging, informer-cached pod
+// list, so getNonStaleFabricNodes and cleanupClique never prune a node based solely on a cache
 // that hasn't caught up yet.
-func (m *ComputeDomainStatusManager) listLivePodsForNode(ctx context.Context, cdUID, nodeName string) ([]corev1.Pod, error) {
+func (m *ComputeDomainStatusManager) listLivePodsForCD(ctx context.Context, cdUID string) ([]corev1.Pod, error) {
 	pods, err := m.config.clientsets.Core.CoreV1().Pods(m.config.driverNamespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("%s=%s", computeDomainLabelKey, cdUID),
-		FieldSelector: fmt.Sprintf("spec.nodeName=%s", nodeName),
 	})
 	if err != nil {
 		return nil, err
