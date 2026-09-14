@@ -60,7 +60,7 @@ type VfioPciManager struct {
 	inflightDriverSwitches map[string]struct{}
 }
 
-func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib *deviceLib, nvidiaEnabled bool) (*VfioPciManager, error) {
+func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib *deviceLib, nvidiaEnabled bool) *VfioPciManager {
 	vm := &VfioPciManager{
 		containerDriverRoot:    containerDriverRoot,
 		hostDriverRoot:         hostDriverRoot,
@@ -69,7 +69,7 @@ func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib 
 		inflightDriverSwitches: make(map[string]struct{}),
 	}
 
-	return vm, nil
+	return vm
 }
 
 // Configure binds the GPU to the vfio-pci driver.

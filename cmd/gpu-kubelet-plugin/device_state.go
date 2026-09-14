@@ -198,10 +198,7 @@ func newDeviceState(ctx context.Context, config *Config, driver *root.Driver, nv
 
 	var vfioPciManager *VfioPciManager
 	if featuregates.Enabled(featuregates.PassthroughSupport) && nvdevlib.IsVfioEnabled() {
-		vfioPciManager, err = NewVfioPciManager(driver.Root, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create vfio pci manager: %w", err)
-		}
+		vfioPciManager = NewVfioPciManager(driver.Root, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
 	}
 
 	fmManager, err := newFabricManager(nvdevlib, driver)

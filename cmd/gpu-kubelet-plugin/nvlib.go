@@ -51,7 +51,7 @@ type deviceLib struct {
 	hostRoot          string
 	sysfsRoot         string
 	nvidiaSMIPath     string
-	// vfioEnabled records node-local IOMMU capability, independent of feature gates.
+	// vfioEnabled records node-local IOMMU capability.
 	vfioEnabled       bool
 	gpuInfosByUUID    map[string]*GpuInfo
 	gpuUUIDbyPCIBusID map[PCIBusID]string
@@ -59,9 +59,13 @@ type deviceLib struct {
 }
 
 func newDeviceLib(driver *root.Driver, hostRoot string) (*deviceLib, error) {
-	vfioEnabled, err := checkIommuEnabled(hostRoot)
-	if err != nil {
-		return nil, fmt.Errorf("error checking if IOMMU is enabled: %w", err)
+	vfioEnabled := false
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		var err error
+		vfioEnabled, err = checkIommuEnabled(hostRoot)
+		if err != nil {
+			return nil, fmt.Errorf("error checking if IOMMU is enabled: %w", err)
+		}
 	}
 
 	driverLibraryPath, err := driver.DriverLibraryPath()

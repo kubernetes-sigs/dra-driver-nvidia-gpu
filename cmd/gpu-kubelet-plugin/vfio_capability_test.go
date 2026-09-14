@@ -63,7 +63,7 @@ func TestNewDeviceLibVfioCapability(t *testing.T) {
 					require.NoError(t, os.WriteFile(filepath.Join(hostRoot, name), nil, 0o644))
 				}
 				lib, err := newDeviceLib(root.New(root.WithDriverRoot(hostRoot)), hostRoot)
-				if mode == "read error" {
+				if gate && mode == "read error" {
 					require.ErrorContains(t, err, "error checking if IOMMU is enabled")
 					var pathErr *os.PathError
 					require.ErrorAs(t, err, &pathErr)
@@ -71,7 +71,7 @@ func TestNewDeviceLibVfioCapability(t *testing.T) {
 					return
 				}
 				require.NoError(t, err)
-				require.Equal(t, mode == "populated", lib.IsVfioEnabled())
+				require.Equal(t, gate && mode == "populated", lib.IsVfioEnabled())
 			})
 		}
 	}
