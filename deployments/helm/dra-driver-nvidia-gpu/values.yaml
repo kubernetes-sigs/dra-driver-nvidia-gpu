@@ -116,6 +116,7 @@ resources:
 #   LoggingBetaOptions: true           # Kubernetes logging beta features
 #   NVMLDeviceHealthCheck: false       # GPU Health Checking using NVML
 #   HostManagedIMEXDaemon: false       # Gate allowing resources.computeDomains.imex.mode=hostManaged
+#   NodeLocalFabricIPC: false          # Run node-local IMEX and expose its channel without an MNNVL clique
 #   DRAListTypeAttributes: false       # Publish list-valued DRA device attributes
 #   ConsumableShares: false            # Publish consumable capacity and multi-allocation support for devices
 featureGates: {}
