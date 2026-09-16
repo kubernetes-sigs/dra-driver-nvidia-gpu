@@ -25,6 +25,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
@@ -287,6 +289,9 @@ func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *
 	// Build set of node names that have running daemon pods
 	runningNodes := make(map[string]struct{})
 	for _, pod := range pods {
+		if !podMatchesClique(pod, clique) {
+			continue
+		}
 		if pod.Spec.NodeName != "" {
 			runningNodes[pod.Spec.NodeName] = struct{}{}
 		}
@@ -294,13 +299,33 @@ func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *
 
 	var updatedDaemons []*nvapi.ComputeDomainDaemonInfo
 	var removedNodes []string
+	var livePods *corev1.PodList
 
 	for _, daemon := range clique.Daemons {
 		if _, exists := runningNodes[daemon.NodeName]; exists {
 			updatedDaemons = append(updatedDaemons, daemon)
-		} else {
-			removedNodes = append(removedNodes, daemon.NodeName)
+			continue
 		}
+
+		// Independent pod and clique watches can disagree during registration.
+		// Confirm removals against current pods, retaining membership on errors.
+		if livePods == nil {
+			var err error
+			livePods, err = m.config.clientsets.Core.CoreV1().Pods(clique.Namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: labels.Set{computeDomainLabelKey: clique.Labels[computeDomainLabelKey]}.String(),
+			})
+			if err != nil {
+				klog.Errorf("CliqueCleanup: error confirming daemon pods for clique %s/%s: %v", clique.Namespace, clique.Name, err)
+				return
+			}
+		}
+		if slices.ContainsFunc(livePods.Items, func(pod corev1.Pod) bool {
+			return pod.Spec.NodeName == daemon.NodeName && podMatchesClique(&pod, clique)
+		}) {
+			updatedDaemons = append(updatedDaemons, daemon)
+			continue
+		}
+		removedNodes = append(removedNodes, daemon.NodeName)
 	}
 
 	// Nothing to clean up
@@ -320,6 +345,14 @@ func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *
 	}
 
 	klog.Infof("CliqueCleanup: successfully removed %d stale daemon entries from clique %s/%s", len(removedNodes), clique.Namespace, clique.Name)
+}
+
+func podMatchesClique(pod *corev1.Pod, clique *nvapi.ComputeDomainClique) bool {
+	if pod.Labels[computeDomainLabelKey] != clique.Labels[computeDomainLabelKey] {
+		return false
+	}
+	cliqueID, exists := pod.Labels[computeDomainCliqueLabelKey]
+	return !exists || cliqueID == clique.Labels[computeDomainCliqueLabelKey]
 }
 
 // filterStaleNodes removes nodes from CD status if their pod no longer exists.
