@@ -48,9 +48,12 @@ func (c *GpuConfig) Normalize() error {
 	}
 
 	if featuregates.Enabled(featuregates.TimeSlicingSettings) {
-		if c.Sharing.Strategy == TimeSlicingStrategy && c.Sharing.TimeSlicingConfig == nil {
-			c.Sharing.TimeSlicingConfig = &TimeSlicingConfig{
-				Interval: ptr.To(DefaultTimeSlice),
+		if c.Sharing.Strategy == TimeSlicingStrategy {
+			if c.Sharing.TimeSlicingConfig == nil {
+				c.Sharing.TimeSlicingConfig = &TimeSlicingConfig{}
+			}
+			if c.Sharing.TimeSlicingConfig.Interval == nil {
+				c.Sharing.TimeSlicingConfig.Interval = ptr.To(DefaultTimeSlice)
 			}
 		}
 	}
