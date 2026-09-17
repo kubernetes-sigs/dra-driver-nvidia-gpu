@@ -19,6 +19,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -755,6 +757,65 @@ func TestApplyComputeDomainChannelConfigHostManagedRequiresHostIMEXReady(t *test
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "host nvidia-imex daemon readiness check failed")
 	assert.False(t, isPermanentError(err), "an unready host daemon must be retried, not treated as permanently broken")
+}
+
+// TestApplyComputeDomainChannelConfigHostManagedCliqueIDRace guards against a
+// race between periodicGPUCliqueIDRefresh's locked setCliqueID() writes and
+// applyComputeDomainChannelConfigHostManaged's read of the clique ID. Run
+// with -race.
+func TestApplyComputeDomainChannelConfigHostManagedCliqueIDRace(t *testing.T) {
+	cd := &configapi.ComputeDomain{
+		ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "cd-uid"},
+	}
+	factory := nvinformers.NewSharedInformerFactory(nvfake.NewSimpleClientset(), 0)
+	informer := factory.Resource().V1beta1().ComputeDomains().Informer()
+	require.NoError(t, informer.AddIndexers(cache.Indexers{"computeDomainUID": uidIndexer[*configapi.ComputeDomain]}))
+	require.NoError(t, informer.GetIndexer().Add(cd))
+
+	state := &DeviceState{
+		config:               hostManagedConfig(),
+		checkpointManager:    &fakeCheckpointManager{checkpoint: checkpointWithClaims(nil)},
+		computeDomainManager: &ComputeDomainManager{informer: informer},
+		nvdevlib:             &deviceLib{devRoot: t.TempDir()},
+		allocatable: AllocatableDevices{
+			"channel-0": &AllocatableDevice{Channel: &ComputeDomainChannelInfo{ID: 0}},
+		},
+	}
+
+	config := channelConfig("cd-uid")
+	result := allocationResult("request", DriverName, "channel-0", nil)
+	claim := claimWithResults("claim-uid", result)
+
+	stop := make(chan struct{})
+	var writerWG, readerWG sync.WaitGroup
+
+	// Writer: mimics periodicGPUCliqueIDRefresh's locked cliqueID writes.
+	writerWG.Go(func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			state.computeDomainManager.setCliqueID(strconv.Itoa(i))
+		}
+	})
+
+	// Reader: mimics a concurrent NodePrepareResources call hitting the host-managed channel config path.
+	readerWG.Go(func() {
+		for range 20000 {
+			_, _ = state.applyComputeDomainChannelConfig(
+				context.Background(),
+				config,
+				claim,
+				[]*resourceapi.DeviceRequestAllocationResult{&result},
+			)
+		}
+	})
+
+	readerWG.Wait()
+	close(stop)
+	writerWG.Wait()
 }
 
 func TestUnprepareDevicesHostManagedSkipsRemoveNodeLabel(t *testing.T) {

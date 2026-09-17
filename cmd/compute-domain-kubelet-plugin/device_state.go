@@ -667,7 +667,7 @@ func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Con
 		ComputeDomain: config.DomainID,
 	}
 
-	if s.computeDomainManager.cliqueID == "" {
+	if s.computeDomainManager.CliqueID() == "" {
 		// Non-fabric node (e.g. not part of an MNNVL clique): do not inject
 		// IMEX channel device nodes, but let the claim succeed.
 		return &configState, nil
