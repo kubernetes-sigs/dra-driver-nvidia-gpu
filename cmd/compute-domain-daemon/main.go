@@ -274,7 +274,7 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	var dnsNameManager *DNSNameManager
 	if featuregates.Enabled(featuregates.IMEXDaemonsWithDNSNames) {
 		// Prepare DNS name manager
-		dnsNameManager = NewDNSNameManager(flags.cliqueID, flags.maxNodesPerIMEXDomain, imexDaemonNodesConfigPath)
+		dnsNameManager = NewDNSNameManager(flags.cliqueID, flags.maxNodesPerIMEXDomain, imexDaemonNodesConfigPath, flags.computeDomainUUID)
 
 		// Create static nodes config file with DNS names
 		if err := dnsNameManager.WriteNodesConfig(); err != nil {

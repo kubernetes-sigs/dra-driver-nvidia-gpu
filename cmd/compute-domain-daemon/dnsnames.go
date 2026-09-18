@@ -19,6 +19,7 @@ package main
 import (
 	"cmp"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 	"strings"
 	"sync"
 
+	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/klog/v2"
 
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
@@ -34,7 +36,6 @@ import (
 const (
 	hostsFilePath = "/etc/hosts"
 	dnsNamePrefix = "compute-domain-daemon-"
-	dnsNameFormat = dnsNamePrefix + "%04d"
 )
 
 // IPToDNSNameMap holds a map of IP Addresses to DNS names.
@@ -47,16 +48,33 @@ type DNSNameManager struct {
 	cliqueID              string
 	maxNodesPerIMEXDomain int
 	nodesConfigPath       string
+	domainHash            string
 }
 
 // NewDNSNameManager creates a new DNS name manager.
-func NewDNSNameManager(cliqueID string, maxNodesPerIMEXDomain int, nodesConfigPath string) *DNSNameManager {
+func NewDNSNameManager(cliqueID string, maxNodesPerIMEXDomain int, nodesConfigPath string, cdUID string) *DNSNameManager {
 	return &DNSNameManager{
 		ipToDNSName:           make(IPToDNSNameMap),
 		cliqueID:              cliqueID,
 		maxNodesPerIMEXDomain: maxNodesPerIMEXDomain,
 		nodesConfigPath:       nodesConfigPath,
+		domainHash:            computeDomainHash(cdUID),
 	}
+}
+
+// computeDomainHash returns a short, deterministic, DNS-label-safe hash of a
+// ComputeDomain UID, used to fold ComputeDomain identity into generated DNS
+// names without depending on the UID's own format or length.
+func computeDomainHash(cdUID string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(cdUID))
+	return rand.SafeEncodeString(fmt.Sprint(h.Sum32()))
+}
+
+// dnsNameFormat returns this manager's per-domain DNS name format string,
+// e.g. "compute-domain-daemon-bcs2h4gtp8-%04d".
+func (m *DNSNameManager) dnsNameFormat() string {
+	return dnsNamePrefix + m.domainHash + "-%04d"
 }
 
 // UpdateDNSNameMappings updates the /etc/hosts file with any new IP to DNS name
@@ -137,7 +155,7 @@ func (m *DNSNameManager) constructDNSName(daemon *nvapi.ComputeDomainDaemonInfo)
 	if daemon.Index >= m.maxNodesPerIMEXDomain {
 		return "", fmt.Errorf("daemon %s has invalid index %d, must be less than %d", daemon.NodeName, daemon.Index, m.maxNodesPerIMEXDomain)
 	}
-	dnsName := fmt.Sprintf(dnsNameFormat, daemon.Index)
+	dnsName := fmt.Sprintf(m.dnsNameFormat(), daemon.Index)
 	return dnsName, nil
 }
 
@@ -203,14 +221,15 @@ func (m *DNSNameManager) WriteNodesConfig() error {
 	defer f.Close()
 
 	// Write static DNS names
+	format := m.dnsNameFormat()
 	for i := 0; i < m.maxNodesPerIMEXDomain; i++ {
-		dnsName := fmt.Sprintf(dnsNameFormat, i)
+		dnsName := fmt.Sprintf(format, i)
 		if _, err := fmt.Fprintf(f, "%s\n", dnsName); err != nil {
 			return fmt.Errorf("failed to write to nodes config file: %w", err)
 		}
 	}
 
-	klog.Infof("Created static nodes config file with %d DNS names using format %s", m.maxNodesPerIMEXDomain, dnsNameFormat)
+	klog.Infof("Created static nodes config file with %d DNS names using format %s", m.maxNodesPerIMEXDomain, format)
 
 	return nil
 }
