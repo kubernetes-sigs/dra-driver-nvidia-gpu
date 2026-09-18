@@ -26,7 +26,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
@@ -214,12 +213,12 @@ func (m *ComputeDomainStatusManager) syncCD(ctx context.Context, cd *nvapi.Compu
 		// Feature gate enabled: build from cliques + non-fabric pods
 		fabricNodes = m.buildNodesFromCliques(cliques)
 		nonFabricNodes = m.buildNodesFromPods(nonFabricPods)
-		newNodes = slices.Concat(fabricNodes, nonFabricNodes)
+		newNodes = dedupeNodesByName(slices.Concat(fabricNodes, nonFabricNodes))
 	} else {
 		// Feature gate disabled: filter stale fabric nodes + rebuild non-fabric nodes
-		fabricNodes = m.getNonStaleFabricNodes(cd.Status.Nodes, fabricPods)
+		fabricNodes = m.getNonStaleFabricNodes(ctx, string(cd.UID), cd.Status.Nodes, fabricPods)
 		nonFabricNodes = m.buildNodesFromPods(nonFabricPods)
-		newNodes = slices.Concat(fabricNodes, nonFabricNodes)
+		newNodes = dedupeNodesByName(slices.Concat(fabricNodes, nonFabricNodes))
 	}
 
 	// Check if update is needed
@@ -257,6 +256,30 @@ func (m *ComputeDomainStatusManager) buildNodesFromCliques(cliques []*nvapi.Comp
 	return result
 }
 
+// dedupeNodesByName removes duplicate entries by node name, keeping the
+// first occurrence. Duplicates happen transiently when a node moves between
+// cliques: it can appear in both the old clique (not yet pruned by
+// cleanupClique, which runs concurrently and independently) and the new one
+// within the same sync pass. The API server rejects a status.nodes list
+// containing a duplicate name outright, which would otherwise fail the
+// entire ComputeDomain status update -- not just the moved node -- until
+// the stale clique is cleaned up. Which duplicate survives here doesn't
+// need to be authoritative: cleanupClique converges on the correct final
+// membership within the next sync tick regardless.
+func dedupeNodesByName(nodes []*nvapi.ComputeDomainNode) []*nvapi.ComputeDomainNode {
+	seen := make(map[string]struct{}, len(nodes))
+	result := make([]*nvapi.ComputeDomainNode, 0, len(nodes))
+	for _, node := range nodes {
+		if _, exists := seen[node.Name]; exists {
+			klog.Infof("CDStatusSync: dropping duplicate status entry for node %q (likely mid-move between cliques)", node.Name)
+			continue
+		}
+		seen[node.Name] = struct{}{}
+		result = append(result, node)
+	}
+	return result
+}
+
 // buildNodesFromPods builds ComputeDomainNode entries from non-fabric-attached pods.
 func (m *ComputeDomainStatusManager) buildNodesFromPods(pods []*corev1.Pod) []*nvapi.ComputeDomainNode {
 	var nodes []*nvapi.ComputeDomainNode
@@ -284,7 +307,21 @@ func (m *ComputeDomainStatusManager) buildNodesFromPods(pods []*corev1.Pod) []*n
 	return nodes
 }
 
-// cleanupClique removes stale daemon entries from a single clique.
+func podMatchesDaemon(pod *corev1.Pod, nodeName, daemonIP string) bool {
+	if pod.Spec.NodeName != nodeName {
+		return false
+	}
+	if daemonIP != "" && pod.Status.PodIP != "" && pod.Status.PodIP != daemonIP {
+		return false
+	}
+	return true
+}
+
+// cleanupClique removes stale daemon entries from a single clique. A daemon is only removed
+// after a live, quorum-consistent read against the API server (via listLivePodsForCD) confirms its
+// pod is actually gone, rather than trusting the cached pod list's absence alone, so a momentary lag
+// between the clique informer and the pod informer can't be mistaken for a genuinely gone node,
+// while a real deletion is still acted on immediately.
 func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *nvapi.ComputeDomainClique, pods []*corev1.Pod) {
 	// Build set of node names that have running daemon pods
 	runningNodes := make(map[string]struct{})
@@ -299,7 +336,8 @@ func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *
 
 	var updatedDaemons []*nvapi.ComputeDomainDaemonInfo
 	var removedNodes []string
-	var livePods *corev1.PodList
+	var livePods []corev1.Pod
+	liveFetched := false
 
 	for _, daemon := range clique.Daemons {
 		if _, exists := runningNodes[daemon.NodeName]; exists {
@@ -309,17 +347,16 @@ func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *
 
 		// Independent pod and clique watches can disagree during registration.
 		// Confirm removals against current pods, retaining membership on errors.
-		if livePods == nil {
+		if !liveFetched {
 			var err error
-			livePods, err = m.config.clientsets.Core.CoreV1().Pods(clique.Namespace).List(ctx, metav1.ListOptions{
-				LabelSelector: labels.Set{computeDomainLabelKey: clique.Labels[computeDomainLabelKey]}.String(),
-			})
+			livePods, err = m.listLivePodsForCD(ctx, clique.Labels[computeDomainLabelKey])
+			liveFetched = true
 			if err != nil {
 				klog.Errorf("CliqueCleanup: error confirming daemon pods for clique %s/%s: %v", clique.Namespace, clique.Name, err)
 				return
 			}
 		}
-		if slices.ContainsFunc(livePods.Items, func(pod corev1.Pod) bool {
+		if slices.ContainsFunc(livePods, func(pod corev1.Pod) bool {
 			return pod.Spec.NodeName == daemon.NodeName && podMatchesClique(&pod, clique)
 		}) {
 			updatedDaemons = append(updatedDaemons, daemon)
@@ -359,29 +396,83 @@ func podMatchesClique(pod *corev1.Pod, clique *nvapi.ComputeDomainClique) bool {
 // It filters the existing nodes list to only keep those with a corresponding pod in the pods list.
 // getNonStaleFabricNodes returns fabric-attached nodes from existingNodes that still have running pods.
 // Non-fabric nodes are filtered out (they'll be rebuilt from nonFabricPods).
-func (m *ComputeDomainStatusManager) getNonStaleFabricNodes(existingNodes []*nvapi.ComputeDomainNode, fabricPods []*corev1.Pod) []*nvapi.ComputeDomainNode {
-	// Build set of fabric pod IPs
-	fabricPodIPs := make(map[string]struct{})
-	for _, pod := range fabricPods {
-		if pod.Status.PodIP != "" {
-			fabricPodIPs[pod.Status.PodIP] = struct{}{}
+func (m *ComputeDomainStatusManager) getNonStaleFabricNodes(ctx context.Context, cdUID string, existingNodes []*nvapi.ComputeDomainNode, fabricPods []*corev1.Pod) []*nvapi.ComputeDomainNode {
+	// Lazily fetched at most once per call, and reused for every node below that
+	// misses the cached pod list, so a ComputeDomain with several missing nodes
+	// doesn't turn into several separate API calls.
+	var livePods []corev1.Pod
+	var liveErr error
+	liveFetched := false
+	fetchLivePods := func() ([]corev1.Pod, error) {
+		if !liveFetched {
+			livePods, liveErr = m.listLivePodsForCD(ctx, cdUID)
+			liveFetched = true
 		}
+		return livePods, liveErr
 	}
 
-	// Keep only fabric nodes (CliqueID != "") that still have pods
+	// Keep only fabric nodes (CliqueID != "") that still have a matching pod.
 	var result []*nvapi.ComputeDomainNode
 	for _, node := range existingNodes {
 		// Skip non-fabric nodes (they're rebuilt fresh)
 		if node.CliqueID == "" {
 			continue
 		}
-		// Keep fabric node if its pod still exists
-		if _, exists := fabricPodIPs[node.IPAddress]; exists {
-			result = append(result, node)
+
+		// Keep fabric node if its pod is visible in the cached pod list.
+		matched := false
+		for _, pod := range fabricPods {
+			if podMatchesDaemon(pod, node.Name, node.IPAddress) {
+				matched = true
+				break
+			}
 		}
+		if matched {
+			result = append(result, node)
+			continue
+		}
+
+		// Not in the cache: don't trust that alone. Confirm live before
+		// removing.
+		live, err := fetchLivePods()
+		if err != nil {
+			klog.Errorf("CDStatusSync: error confirming pod liveness for node %q: %v", node.Name, err)
+			// Fail safe: don't remove on an unconfirmed cache miss.
+			result = append(result, node)
+			continue
+		}
+
+		liveMatched := false
+		for i := range live {
+			if podMatchesDaemon(&live[i], node.Name, node.IPAddress) {
+				liveMatched = true
+				break
+			}
+		}
+		if liveMatched {
+			result = append(result, node)
+			continue
+		}
+
+		klog.Infof("CDStatusSync: pruning stale fabric node %q", node.Name)
 	}
 
 	return result
+}
+
+// listLivePodsForCD does a single live, quorum-consistent read straight against the API server
+// for all daemon pods belonging to ComputeDomain cdUID. It's used as a confirmation fallback only
+// when at least one node isn't found in the faster, but potentially lagging, informer-cached pod
+// list, so getNonStaleFabricNodes and cleanupClique never prune a node based solely on a cache
+// that hasn't caught up yet.
+func (m *ComputeDomainStatusManager) listLivePodsForCD(ctx context.Context, cdUID string) ([]corev1.Pod, error) {
+	pods, err := m.config.clientsets.Core.CoreV1().Pods(m.config.driverNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s=%s", computeDomainLabelKey, cdUID),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return pods.Items, nil
 }
 
 // nodesEqual checks if two slices of ComputeDomainNode are equal.
