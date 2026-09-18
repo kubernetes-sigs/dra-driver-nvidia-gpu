@@ -26,6 +26,11 @@ spec:
       {{- end }} 
       nodeSelector:
         {{ .ComputeDomainLabelKey }}: {{ .ComputeDomainLabelValue }}
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
       containers:
       # Run the compute domain daemon
       - name: compute-domain-daemon
