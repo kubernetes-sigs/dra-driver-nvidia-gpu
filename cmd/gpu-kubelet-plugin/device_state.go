@@ -1261,6 +1261,7 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 			return fmt.Errorf("error adding allocatable device: %w", err)
 		}
 		device.Vfio.parent = gpu.Gpu
+		s.cdi.InvalidateDeviceSpec(gpu.Gpu.UUID)
 
 		// The GPU is back on the nvidia driver: its freshly discovered parent
 		// GpuInfo already carries the gpuModuleID (resolved from NVML in
