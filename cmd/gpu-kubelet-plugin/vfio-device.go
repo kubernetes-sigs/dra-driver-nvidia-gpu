@@ -60,15 +60,7 @@ type VfioPciManager struct {
 	inflightDriverSwitches map[string]struct{}
 }
 
-func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib *deviceLib, nvidiaEnabled bool) (*VfioPciManager, error) {
-	iommuEnabled, err := checkIommuEnabled(nvlib.hostRoot)
-	if err != nil {
-		return nil, fmt.Errorf("error checking if IOMMU is enabled: %w", err)
-	}
-	if !iommuEnabled {
-		return nil, fmt.Errorf("IOMMU is not enabled in the kernel")
-	}
-
+func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib *deviceLib, nvidiaEnabled bool) *VfioPciManager {
 	vm := &VfioPciManager{
 		containerDriverRoot:    containerDriverRoot,
 		hostDriverRoot:         hostDriverRoot,
@@ -77,7 +69,7 @@ func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib 
 		inflightDriverSwitches: make(map[string]struct{}),
 	}
 
-	return vm, nil
+	return vm
 }
 
 // Configure binds the GPU to the vfio-pci driver.
