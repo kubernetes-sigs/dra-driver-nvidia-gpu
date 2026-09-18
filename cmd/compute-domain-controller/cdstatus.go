@@ -26,7 +26,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
@@ -214,12 +213,12 @@ func (m *ComputeDomainStatusManager) syncCD(ctx context.Context, cd *nvapi.Compu
 		// Feature gate enabled: build from cliques + non-fabric pods
 		fabricNodes = m.buildNodesFromCliques(cliques)
 		nonFabricNodes = m.buildNodesFromPods(nonFabricPods)
-		newNodes = slices.Concat(fabricNodes, nonFabricNodes)
+		newNodes = dedupeNodesByName(slices.Concat(fabricNodes, nonFabricNodes))
 	} else {
 		// Feature gate disabled: filter stale fabric nodes + rebuild non-fabric nodes
 		fabricNodes = m.getNonStaleFabricNodes(ctx, string(cd.UID), cd.Status.Nodes, fabricPods)
 		nonFabricNodes = m.buildNodesFromPods(nonFabricPods)
-		newNodes = slices.Concat(fabricNodes, nonFabricNodes)
+		newNodes = dedupeNodesByName(slices.Concat(fabricNodes, nonFabricNodes))
 	}
 
 	// Check if update is needed
@@ -253,6 +252,30 @@ func (m *ComputeDomainStatusManager) buildNodesFromCliques(cliques []*nvapi.Comp
 				Status:    daemon.Status,
 			})
 		}
+	}
+	return result
+}
+
+// dedupeNodesByName removes duplicate entries by node name, keeping the
+// first occurrence. Duplicates happen transiently when a node moves between
+// cliques: it can appear in both the old clique (not yet pruned by
+// cleanupClique, which runs concurrently and independently) and the new one
+// within the same sync pass. The API server rejects a status.nodes list
+// containing a duplicate name outright, which would otherwise fail the
+// entire ComputeDomain status update -- not just the moved node -- until
+// the stale clique is cleaned up. Which duplicate survives here doesn't
+// need to be authoritative: cleanupClique converges on the correct final
+// membership within the next sync tick regardless.
+func dedupeNodesByName(nodes []*nvapi.ComputeDomainNode) []*nvapi.ComputeDomainNode {
+	seen := make(map[string]struct{}, len(nodes))
+	result := make([]*nvapi.ComputeDomainNode, 0, len(nodes))
+	for _, node := range nodes {
+		if _, exists := seen[node.Name]; exists {
+			klog.Infof("CDStatusSync: dropping duplicate status entry for node %q (likely mid-move between cliques)", node.Name)
+			continue
+		}
+		seen[node.Name] = struct{}{}
+		result = append(result, node)
 	}
 	return result
 }
@@ -295,8 +318,8 @@ func podMatchesDaemon(pod *corev1.Pod, nodeName, daemonIP string) bool {
 }
 
 // cleanupClique removes stale daemon entries from a single clique. A daemon is only removed
-// after a live, quorum-consistent read against the API server confirms its pod is actually gone
-// (see listLivePodsForCD) rather than trusting the cached pod list's absence alone, so a momentary lag
+// after a live, quorum-consistent read against the API server (via listLivePodsForCD) confirms its
+// pod is actually gone, rather than trusting the cached pod list's absence alone, so a momentary lag
 // between the clique informer and the pod informer can't be mistaken for a genuinely gone node,
 // while a real deletion is still acted on immediately.
 func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *nvapi.ComputeDomainClique, pods []*corev1.Pod) {
@@ -313,7 +336,8 @@ func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *
 
 	var updatedDaemons []*nvapi.ComputeDomainDaemonInfo
 	var removedNodes []string
-	var livePods *corev1.PodList
+	var livePods []corev1.Pod
+	liveFetched := false
 
 	for _, daemon := range clique.Daemons {
 		if _, exists := runningNodes[daemon.NodeName]; exists {
@@ -323,17 +347,16 @@ func (m *ComputeDomainStatusManager) cleanupClique(ctx context.Context, clique *
 
 		// Independent pod and clique watches can disagree during registration.
 		// Confirm removals against current pods, retaining membership on errors.
-		if livePods == nil {
+		if !liveFetched {
 			var err error
-			livePods, err = m.config.clientsets.Core.CoreV1().Pods(clique.Namespace).List(ctx, metav1.ListOptions{
-				LabelSelector: labels.Set{computeDomainLabelKey: clique.Labels[computeDomainLabelKey]}.String(),
-			})
+			livePods, err = m.listLivePodsForCD(ctx, clique.Labels[computeDomainLabelKey])
+			liveFetched = true
 			if err != nil {
 				klog.Errorf("CliqueCleanup: error confirming daemon pods for clique %s/%s: %v", clique.Namespace, clique.Name, err)
 				return
 			}
 		}
-		if slices.ContainsFunc(livePods.Items, func(pod corev1.Pod) bool {
+		if slices.ContainsFunc(livePods, func(pod corev1.Pod) bool {
 			return pod.Spec.NodeName == daemon.NodeName && podMatchesClique(&pod, clique)
 		}) {
 			updatedDaemons = append(updatedDaemons, daemon)
