@@ -6,7 +6,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/NVIDIA/go-nvfm v0.1.0
 	github.com/NVIDIA/go-nvlib v0.12.0
-	github.com/NVIDIA/go-nvml v0.13.3-1
+	github.com/NVIDIA/go-nvml v0.13.4-0
 	github.com/NVIDIA/nvidia-container-toolkit v1.20.0
 	github.com/google/uuid v1.6.0
 	github.com/onsi/ginkgo/v2 v2.32.0
