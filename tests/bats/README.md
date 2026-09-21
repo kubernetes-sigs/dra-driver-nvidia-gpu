@@ -53,6 +53,37 @@ Note that `TEST_CHART_LOCAL=1` just overrides `TEST_CHART_REPO` and `TEST_CHART_
 `make image-build-and-copy-to-nodes` is just an opinionated helper that expects a certain environment.
 If that does not work for you: make sure (out-of-band) that the container images that the local chart refers to are available to all nodes in the Kubernetes cluster -- placed directly or pullable.
 
+To test a different image, provide its complete tagged reference. For an image
+preloaded into the container runtime on every node, prevent registry access with
+`TEST_IMAGE_PULL_POLICY=Never`:
+
+```console
+$ TEST_CHART_LOCAL=1 \
+    TEST_IMAGE=custom_registry:custom_tag \
+    TEST_IMAGE_PULL_POLICY=Never \
+    make -f tests/bats/Makefile tests-gpu-dynmig
+```
+
+Use `IfNotPresent` instead when the registry is reachable and the node may need
+to pull the image. The override applies to the chart under test, not to the
+last-stable chart used by upgrade and downgrade tests.
+
+For a private registry, create the pull secret in the
+`dra-driver-nvidia-gpu` namespace before starting the suite and pass its name
+with `TEST_IMAGE_PULL_SECRETS`. Multiple secret names can be separated by
+commas:
+
+```console
+$ TEST_CHART_LOCAL=1 \
+    TEST_IMAGE=custom_registry:custom_tag \
+    TEST_IMAGE_PULL_SECRETS=registry-credentials,registry-mirror-credentials \
+    make -f tests/bats/Makefile tests-gpu-dynmig
+```
+
+The secrets are added only to the chart under test, like the image and pull
+policy overrides. The BATS runner references existing Kubernetes secrets; it
+does not create or copy registry credentials.
+
 ## Test staging chart/image artifacts
 
 Example:

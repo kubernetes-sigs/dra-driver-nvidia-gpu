@@ -41,10 +41,19 @@ TEST_CRD_UPGRADE_TARGET_GIT_REF ?= "main"
 
 TEST_NVIDIA_DRIVER_ROOT ?= "/run/nvidia/driver"
 
+# Optional image override for the chart under test. TEST_IMAGE must contain a
+# repository and tag, for example registry.example.com/driver:dev. The pull
+# policy is left to the chart default unless TEST_IMAGE_PULL_POLICY is set.
+# TEST_IMAGE_PULL_SECRETS is an optional comma-separated list of image pull
+# secret names that already exist in the chart namespace.
+TEST_IMAGE ?=
+TEST_IMAGE_PULL_POLICY ?=
+TEST_IMAGE_PULL_SECRETS ?=
+
 # TODO: calculate precise, expected container image spec,
 # and test for that in test suite, for example:
 # `registry.k8s.io/dra-driver-nvidia/dra-driver-nvidia-gpu:v25.8.0-dev`
-TEST_EXPECTED_IMAGE_SPEC_SUBSTRING ?= $(VERSION)
+TEST_EXPECTED_IMAGE_SPEC_SUBSTRING ?= $(if $(strip $(TEST_IMAGE)),$(TEST_IMAGE),$(VERSION))
 
 ifneq ($(TEST_CHART_LOCAL),"false")
 TEST_CHART_REPO = "deployments/helm/dra-driver-nvidia-gpu"
@@ -109,6 +118,9 @@ DOCKER_ENVS = \
 	--env TEST_GPU_STRESS_DELAY=$(TEST_GPU_STRESS_DELAY) \
 	--env TEST_CRD_UPGRADE_TARGET_GIT_REF=$(TEST_CRD_UPGRADE_TARGET_GIT_REF) \
 	--env TEST_NVIDIA_DRIVER_ROOT=$(TEST_NVIDIA_DRIVER_ROOT) \
+	--env TEST_IMAGE=$(TEST_IMAGE) \
+	--env TEST_IMAGE_PULL_POLICY=$(TEST_IMAGE_PULL_POLICY) \
+	--env TEST_IMAGE_PULL_SECRETS=$(TEST_IMAGE_PULL_SECRETS) \
 	--env TEST_EXPECTED_IMAGE_SPEC_SUBSTRING=$(TEST_EXPECTED_IMAGE_SPEC_SUBSTRING) \
 	--env SKIP_CLEANUP=$(SKIP_CLEANUP) \
 	--env DISABLE_COMPUTE_DOMAINS=$(DISABLE_COMPUTE_DOMAINS) \
