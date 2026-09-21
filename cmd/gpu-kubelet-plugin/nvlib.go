@@ -1320,7 +1320,21 @@ func (l deviceLib) inspectMigProfilesAndPlacements(gpuInfo *GpuInfo, device nvde
 // if an NVML API call fails along the way, a nil pointer and a non-nil error is
 // returned.
 func (l deviceLib) FindMigDevBySpec(ms *MigSpecTuple) (*MigLiveTuple, error) {
-	parentUUID := l.gpuUUIDbyPCIBusID[ms.ParentPCIBusID]
+	var parentUUID string
+	parentPCIBusID := ms.ParentPCIBusID
+	// This may be unset if the mig spec was constructed from the
+	// allocated device name.
+	if ms.ParentPCIBusID == "" {
+		gpuInfo, err := l.getGpuInfoByMinor(ms.ParentMinor)
+		if err != nil {
+			return nil, err
+		}
+		parentUUID = gpuInfo.UUID
+		parentPCIBusID = gpuInfo.pciBusID
+	} else {
+		parentUUID = l.gpuUUIDbyPCIBusID[parentPCIBusID]
+	}
+
 	parent, ret := l.DeviceGetHandleByUUID(parentUUID)
 	if ret != nvml.SUCCESS {
 		return nil, fmt.Errorf("could not get device handle by UUID for %s", parentUUID)
@@ -1385,11 +1399,12 @@ func (l deviceLib) FindMigDevBySpec(ms *MigSpecTuple) (*MigLiveTuple, error) {
 		// deletion of a potentially partially prepared MIG device, it is OK if
 		// CIID and uuid are zero values.
 		mlt := MigLiveTuple{
-			ParentMinor: ms.ParentMinor,
-			ParentUUID:  parentUUID,
-			GIID:        giId,
-			CIID:        ciId,
-			MigUUID:     uuid,
+			ParentMinor:    ms.ParentMinor,
+			ParentPCIBusID: parentPCIBusID,
+			ParentUUID:     parentUUID,
+			GIID:           giId,
+			CIID:           ciId,
+			MigUUID:        uuid,
 		}
 
 		klog.Infof("FindMigDevBySpec result: %+v", mlt)
@@ -1398,6 +1413,15 @@ func (l deviceLib) FindMigDevBySpec(ms *MigSpecTuple) (*MigLiveTuple, error) {
 
 	klog.Infof("Iterated through all potential MIG devs -- no candidate found")
 	return nil, nil
+}
+
+func (l deviceLib) getGpuInfoByMinor(minor GPUMinor) (*GpuInfo, error) {
+	for _, gpuInfo := range l.gpuInfosByUUID {
+		if gpuInfo.minor == minor {
+			return gpuInfo, nil
+		}
+	}
+	return nil, fmt.Errorf("gpu info not found for minor %d", minor)
 }
 
 // Mutate map `m` in-place: insert into map if the current QualifiedName does

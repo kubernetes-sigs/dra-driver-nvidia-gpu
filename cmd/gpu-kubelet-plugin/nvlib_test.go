@@ -203,6 +203,58 @@ func TestSetMax(t *testing.T) {
 	})
 }
 
+func TestDeviceLibGetGpuInfoByMinor(t *testing.T) {
+	tests := map[string]struct {
+		gpuInfosByUUID map[string]*GpuInfo
+		minor          GPUMinor
+		expectedUUID   string
+		expectedError  string
+	}{
+		"finds the GPU with the matching minor": {
+			gpuInfosByUUID: map[string]*GpuInfo{
+				"GPU-1": {UUID: "GPU-1", minor: 1},
+				"GPU-2": {UUID: "GPU-2", minor: 2},
+			},
+			minor:        2,
+			expectedUUID: "GPU-2",
+		},
+		"finds a GPU with minor zero": {
+			gpuInfosByUUID: map[string]*GpuInfo{
+				"GPU-0": {UUID: "GPU-0", minor: 0},
+			},
+			minor:        0,
+			expectedUUID: "GPU-0",
+		},
+		"returns an error when the minor is not found": {
+			gpuInfosByUUID: map[string]*GpuInfo{
+				"GPU-1": {UUID: "GPU-1", minor: 1},
+			},
+			minor:         2,
+			expectedError: "gpu info not found for minor 2",
+		},
+		"returns an error when no GPUs are known": {
+			minor:         1,
+			expectedError: "gpu info not found for minor 1",
+		},
+	}
+
+	for description, tc := range tests {
+		t.Run(description, func(t *testing.T) {
+			l := deviceLib{gpuInfosByUUID: tc.gpuInfosByUUID}
+
+			gpuInfo, err := l.getGpuInfoByMinor(tc.minor)
+			if tc.expectedError != "" {
+				require.EqualError(t, err, tc.expectedError)
+				require.Nil(t, gpuInfo)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tc.expectedUUID, gpuInfo.UUID)
+		})
+	}
+}
+
 // fakeSMI replaces the nvidia-smi binary and the NVML library. setTimeSlice and
 // setComputeMode run these two files.
 type fakeSMI struct {
