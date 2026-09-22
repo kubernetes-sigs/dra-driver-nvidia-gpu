@@ -54,6 +54,7 @@ helm --kube-context "${CTX}" upgrade -i dra-driver-nvidia-gpu \
   --set gpuResourcesEnabledOverride=true \
   --set featureGates.ConsumableShares=true \
   --set featureGates.MPSSupport=true \
+  --set featureGates.PassthroughSupport=true \
   --set consumableShares=unlimited \
   --wait --timeout=5m
 
