@@ -33,6 +33,7 @@ setup_file () {
   # slices above and then waiting until resource slices pop up again: that seems
   # to be robust.
   wait_for_all_gpu_resource_slices 15
+  confirm_expected_mig_mode_all_nodes
 }
 
 # Executed before entering each test in this file.
@@ -53,15 +54,38 @@ bats::on_failure() {
 }
 
 
-confirm_mig_mode_disabled_all_nodes() {
-  # Confirm that MIG mode is disabled for all GPUs on all nodes.
-  run nvmm all sh -c 'nvidia-smi --query-gpu=index,mig.mode.current --format=csv'
-  refute_output --partial "Enabled"
+confirm_expected_mig_mode_all_nodes() {
+  local expected="Disabled"
+  if [ "${TEST_MIG_MODE_TOGGLE_SUPPORTED:-true}" = "false" ]; then
+    expected="Enabled"
+  fi
+
+  run nvmm all sh -c 'nvidia-smi --query-gpu=mig.mode.current --format=csv,noheader'
+  assert_success
+
+  local mode_count=0
+  while IFS= read -r line; do
+    # Ignore nvmm's per-node header.
+    [[ "$line" == "-- "* ]] && continue
+
+    assert_equal "$line" "$expected" || return 1
+    ((++mode_count))
+  done <<< "$output"
+
+  assert_not_equal "$mode_count" "0"
 }
 
 
 # bats test_tags=fastfeedback,dynmig,version-specific
 @test "DynMIG: inspect device attributes in resource slice (gpu)" {
+  if [ "${TEST_MIG_MODE_TOGGLE_SUPPORTED:-true}" = "false" ]; then
+    local gpu_count
+    gpu_count=$(kubectl get resourceslices.resource.k8s.io -o json | \
+      jq '[.items[] | select(.spec.driver == "gpu.nvidia.com") | .spec.devices[]? | select(.attributes.type.string == "gpu")] | length')
+    assert_equal "0" "$gpu_count"
+    return
+  fi
+
   local reference=(
     "architecture"
     "brand"
@@ -111,7 +135,7 @@ confirm_mig_mode_disabled_all_nodes() {
 
 # bats test_tags=fastfeedback,dynmig
 @test "DynMIG: 1 pod, 1 MIG" {
-  confirm_mig_mode_disabled_all_nodes
+  confirm_expected_mig_mode_all_nodes
   kubectl apply -f tests/bats/specs/gpu-simple-mig.yaml
   kubectl wait --for=condition=READY pods pod-mig1g --timeout=10s
   run kubectl logs pod-mig1g
@@ -128,13 +152,13 @@ confirm_mig_mode_disabled_all_nodes() {
 
   kubectl delete -f tests/bats/specs/gpu-simple-mig.yaml
   kubectl wait --for=delete pods pod-mig1g --timeout=10s
-  confirm_mig_mode_disabled_all_nodes
+  confirm_expected_mig_mode_all_nodes
 }
 
 
 # bats test_tags=fastfeedback,dynmig
 @test "DynMIG: 1 pod, 2 containers (1 MIG each)" {
-  confirm_mig_mode_disabled_all_nodes
+  confirm_expected_mig_mode_all_nodes
 
   local _specpath="tests/bats/specs/gpu-multiple-mig.yaml"
   local _podname="pod-2mig"
@@ -160,7 +184,7 @@ confirm_mig_mode_disabled_all_nodes() {
 
   kubectl delete -f  "${_specpath}"
   kubectl wait --for=delete pods "${_podname}" --timeout=10s
-  confirm_mig_mode_disabled_all_nodes
+  confirm_expected_mig_mode_all_nodes
 }
 
 
@@ -172,7 +196,7 @@ confirm_mig_mode_disabled_all_nodes() {
   fi
   iupgrade_wait "${TEST_CHART_REPO}" "${TEST_CHART_VERSION}" _iargs
 
-  confirm_mig_mode_disabled_all_nodes
+  confirm_expected_mig_mode_all_nodes
   kubectl apply -f tests/bats/specs/gpu-simple-mig-ts.yaml
   kubectl wait --for=condition=READY pods pod-mig1g --timeout=10s
   run kubectl logs pod-mig1g
@@ -189,5 +213,5 @@ confirm_mig_mode_disabled_all_nodes() {
 
   kubectl delete -f tests/bats/specs/gpu-simple-mig-ts.yaml
   kubectl wait --for=delete pods pod-mig1g --timeout=10s
-  confirm_mig_mode_disabled_all_nodes
+  confirm_expected_mig_mode_all_nodes
 }

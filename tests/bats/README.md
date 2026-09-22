@@ -84,6 +84,18 @@ The secrets are added only to the chart under test, like the image and pull
 policy overrides. The BATS runner references existing Kubernetes secrets; it
 does not create or copy registry credentials.
 
+For GPUs where MIG mode cannot be toggled and is already enabled, run the
+dedicated DynMIG target:
+
+```console
+$ TEST_CHART_LOCAL=1 make -f tests/bats/Makefile tests-gpu-dynmig-no-mig-mode-toggle
+```
+
+This runs the DynMIG tests without disabling MIG mode during cleanup. It
+verifies that MIG mode is enabled before and after allocations and expects the
+full GPU to be absent from the advertised resources while MIG mode remains
+enabled.
+
 ## Test staging chart/image artifacts
 
 Example:

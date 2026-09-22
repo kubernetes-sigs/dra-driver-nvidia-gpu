@@ -50,6 +50,10 @@ TEST_IMAGE ?=
 TEST_IMAGE_PULL_POLICY ?=
 TEST_IMAGE_PULL_SECRETS ?=
 
+# Whether the test GPUs support toggling MIG mode. Set to false for GPUs where
+# MIG mode is permanently enabled and the test suite must not try to disable it.
+TEST_MIG_MODE_TOGGLE_SUPPORTED ?= true
+
 # TODO: calculate precise, expected container image spec,
 # and test for that in test suite, for example:
 # `registry.k8s.io/dra-driver-nvidia/dra-driver-nvidia-gpu:v25.8.0-dev`
@@ -121,6 +125,7 @@ DOCKER_ENVS = \
 	--env TEST_IMAGE=$(TEST_IMAGE) \
 	--env TEST_IMAGE_PULL_POLICY=$(TEST_IMAGE_PULL_POLICY) \
 	--env TEST_IMAGE_PULL_SECRETS=$(TEST_IMAGE_PULL_SECRETS) \
+	--env TEST_MIG_MODE_TOGGLE_SUPPORTED=$(TEST_MIG_MODE_TOGGLE_SUPPORTED) \
 	--env TEST_EXPECTED_IMAGE_SPEC_SUBSTRING=$(TEST_EXPECTED_IMAGE_SPEC_SUBSTRING) \
 	--env SKIP_CLEANUP=$(SKIP_CLEANUP) \
 	--env DISABLE_COMPUTE_DOMAINS=$(DISABLE_COMPUTE_DOMAINS) \
@@ -189,7 +194,7 @@ runner-image:
 # suite/file 'setup' in bats, but we'd lose output on success). During dev, you
 # may want to add --show-output-of-passing-tests (and read bats docs for other
 # cmdline args).
-.PHONY: tests-gpu tests-gpu-single tests-gpu-a10 tests-gpu-dynmig tests-cd
+.PHONY: tests-gpu tests-gpu-single tests-gpu-a10 tests-gpu-dynmig tests-gpu-dynmig-no-mig-mode-toggle tests-cd
 
 # Single-GPU-safe subset. Suitable for CI environments with one GPU and no
 # GPU Operator (e.g., Lambda Cloud). Excludes test_basics.bats (expects GPU
@@ -236,6 +241,12 @@ tests-gpu-a10: runner-image
 
 # DynMIG-only subset for dedicated MIG-capable CI lanes.
 tests-gpu-dynmig: runner-image
+	$(call RUN_BATS, \
+		tests/bats/test_gpu_dynmig.bats)
+
+# DynMIG-only subset for GPUs where MIG mode is permanently enabled.
+tests-gpu-dynmig-no-mig-mode-toggle: TEST_MIG_MODE_TOGGLE_SUPPORTED := false
+tests-gpu-dynmig-no-mig-mode-toggle: runner-image
 	$(call RUN_BATS, \
 		tests/bats/test_gpu_dynmig.bats)
 

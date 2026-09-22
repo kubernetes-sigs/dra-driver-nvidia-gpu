@@ -103,16 +103,22 @@ timeout -v 10 kubectl delete crds computedomains.resource.nvidia.com || echo "CR
 set -e
 bash tests/bats/clean-state-dirs-all-nodes.sh
 
-# Remove any stray MIG devices and disable MIG mode on all nodes.
-# Skip on A100 cloud VMs — disabling MIG mode can put the GPU in an
-# unrecoverable state (#883). Non-fatal for GPUs that don't support MIG.
-nvmm all sh -c '
-  gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
-  case "$gpu_name" in
-    *A100*) echo "Skipping MIG cleanup on A100 (#883)"; exit 0 ;;
-  esac
-  nvidia-smi mig -dci; nvidia-smi mig -dgi; nvidia-smi -mig 0
-' || echo "nvmm MIG cleanup skipped (non-fatal)"
+# Remove any stray MIG devices. Disable MIG mode unless this suite is running
+# on GPUs where MIG mode cannot be toggled.
+if [ "${TEST_MIG_MODE_TOGGLE_SUPPORTED:-true}" = "false" ]; then
+  nvmm all sh -c 'nvidia-smi mig -dci; nvidia-smi mig -dgi' \
+    || echo "nvmm MIG device cleanup skipped (non-fatal)"
+else
+  # Skip on A100 cloud VMs — disabling MIG mode can put the GPU in an
+  # unrecoverable state (#883). Non-fatal for GPUs that don't support MIG.
+  nvmm all sh -c '
+    gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+    case "$gpu_name" in
+      *A100*) echo "Skipping MIG cleanup on A100 (#883)"; exit 0 ;;
+    esac
+    nvidia-smi mig -dci; nvidia-smi mig -dgi; nvidia-smi -mig 0
+  ' || echo "nvmm MIG cleanup skipped (non-fatal)"
+fi
 
 set +x
 echo "cleanup: done"
