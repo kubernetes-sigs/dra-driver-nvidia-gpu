@@ -203,17 +203,6 @@ metadata:
 spec:
   spec:
     devices:
-      config:
-      - requests:
-        - dra-gpu
-        opaque:
-          driver: gpu.nvidia.com
-          parameters:
-            apiVersion: resource.nvidia.com/v1beta1
-            kind: VfioDeviceConfig
-            iommu:
-              backendPolicy: LegacyOnly
-              enableAPIDevice: true
       requests:
       - name: dra-gpu
         exactly:
@@ -242,9 +231,11 @@ The opaque `VfioDeviceConfig` block tells the DRA Driver which VFIO device nodes
 
 - **`enableAPIDevice: true`** — Mounts the VFIO control device `/dev/vfio/vfio` into the virt-launcher pod. KubeVirt **requires** this device to manage VFIO PCI assignments through libvirt.
 
-- **`backendPolicy: LegacyOnly`** — Selects the legacy IOMMU VFIO backend (`/dev/vfio/<iommu-group>`). The alternative, `PreferIommuFD`, uses the IOMMUFD backend (`/dev/vfio/devices/vfio*`) when available on the host.
+  Note: As of v0.6.0, this defaults to `true` for `VfioDeviceConfig`, so KubeVirt claims no longer need this setting to be explicitly provided; set it to `false` to opt out (for example, for Kata).
 
-Keep `backendPolicy: LegacyOnly` for KubeVirt, which does not support the IOMMUFD backend yet.
+- **`backendPolicy: LegacyOnly`** — Selects the legacy IOMMU VFIO backend (`/dev/vfio/<iommu-group>`), which is the default. The alternative, `PreferIommuFD`, uses the IOMMUFD backend (`/dev/vfio/devices/vfio*`) when available on the host.
+
+Keep the default `backendPolicy: LegacyOnly` for KubeVirt, which does not support the IOMMUFD backend yet. Because both defaults already suit KubeVirt, the claim above needs no opaque `VfioDeviceConfig`; add one only to opt out or select `PreferIommuFD`.
 
 ### Select a Fabric Manager partition
 
