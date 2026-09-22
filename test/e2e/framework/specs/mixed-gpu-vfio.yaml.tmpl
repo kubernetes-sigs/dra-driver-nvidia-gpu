@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Namespace }}
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-claim
+  namespace: {{ .Namespace }}
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: vfio-claim
+  namespace: {{ .Namespace }}
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: vfio.gpu.nvidia.com
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-gpu
+  namespace: {{ .Namespace }}
+  labels:
+    app: gpu-workload
+spec:
+  containers:
+  - name: ctr
+    image: nvcr.io/nvidia/cuda:12.2.0-base-ubuntu22.04
+    command: ["bash", "-c"]
+    args: ["nvidia-smi -L && echo GPU_OK && sleep 3600"]
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: gpu-claim
+  tolerations:
+  - key: "nvidia.com/gpu"
+    operator: "Exists"
+    effect: "NoSchedule"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-vfio
+  namespace: {{ .Namespace }}
+  labels:
+    app: vfio-workload
+spec:
+  containers:
+  - name: ctr
+    image: ubuntu:22.04
+    command: ["bash", "-c"]
+    args: ["sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: vfio-claim
+  tolerations:
+  - key: "nvidia.com/gpu"
+    operator: "Exists"
+    effect: "NoSchedule"
