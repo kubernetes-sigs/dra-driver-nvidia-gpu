@@ -50,6 +50,10 @@ TEST_IMAGE ?=
 TEST_IMAGE_PULL_POLICY ?=
 TEST_IMAGE_PULL_SECRETS ?=
 
+# Identifies the CI environment for environment-specific test behavior.
+# This will be overriden by the CI-specific hack/ci e2e scripts.
+TEST_CI ?=
+
 # Whether the test GPUs support toggling MIG mode. Set to false for GPUs where
 # MIG mode is permanently enabled and the test suite must not try to disable it.
 TEST_MIG_MODE_TOGGLE_SUPPORTED ?= true
@@ -125,6 +129,7 @@ DOCKER_ENVS = \
 	--env TEST_IMAGE=$(TEST_IMAGE) \
 	--env TEST_IMAGE_PULL_POLICY=$(TEST_IMAGE_PULL_POLICY) \
 	--env TEST_IMAGE_PULL_SECRETS=$(TEST_IMAGE_PULL_SECRETS) \
+	--env TEST_CI=$(TEST_CI) \
 	--env TEST_MIG_MODE_TOGGLE_SUPPORTED=$(TEST_MIG_MODE_TOGGLE_SUPPORTED) \
 	--env TEST_EXPECTED_IMAGE_SPEC_SUBSTRING=$(TEST_EXPECTED_IMAGE_SPEC_SUBSTRING) \
 	--env SKIP_CLEANUP=$(SKIP_CLEANUP) \

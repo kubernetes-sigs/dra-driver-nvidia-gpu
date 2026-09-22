@@ -159,6 +159,7 @@ export TEST_NVIDIA_DRIVER_ROOT=/
 export TEST_CHART_LOCAL=true
 export DISABLE_COMPUTE_DOMAINS=${DISABLE_CD}
 export TEST_FILTER_TAGS='${FILTER}'
+export TEST_CI=lambda
 export GIT_COMMIT_SHORT=${GIT_COMMIT_SHORT}
 echo "Running BATS target: ${BATS_TARGET}"
 # Use lambda nvmm stub (no GPU Operator). MIG cleanup handled above.

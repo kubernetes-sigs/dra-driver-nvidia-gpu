@@ -55,6 +55,14 @@ bats::on_failure() {
 
 
 confirm_expected_mig_mode_all_nodes() {
+  # Lambda CI has no GPU Operator and uses a no-op nvmm implementation.
+  case "${TEST_CI:-}" in
+    lambda)
+      echo "MIG mode check is a no-op in Lambda CI"
+      return
+      ;;
+  esac
+
   local expected="Disabled"
   if [ "${TEST_MIG_MODE_TOGGLE_SUPPORTED:-true}" = "false" ]; then
     expected="Enabled"
