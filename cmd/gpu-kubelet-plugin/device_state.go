@@ -473,10 +473,14 @@ func (s *DeviceState) DestroyUnknownMIGDevices(ctx context.Context) {
 	}
 
 	var expectedDeviceNames []DeviceName
-	for _, cpclaim := range filtered {
-		for _, res := range cpclaim.Status.Allocation.Devices.Results {
-			expectedDeviceNames = append(expectedDeviceNames, res.Device)
+	for uid, cpclaim := range filtered {
+		names, ok := cpclaim.GetHeldDevices()
+		if !ok {
+			// Everything not on this list is about to be destroyed.
+			klog.Errorf("%s: skip teardown: cannot tell which devices claim %s holds", logpfx, PreparedClaimToString(&cpclaim, uid))
+			return
 		}
+		expectedDeviceNames = append(expectedDeviceNames, names...)
 	}
 
 	klog.Infof("%s: enter teardown routine (%d expect devices: %s)", logpfx, len(expectedDeviceNames), expectedDeviceNames)
@@ -737,6 +741,13 @@ func (s *DeviceState) rollbackPartiallyPreparedMIGDevices(ctx context.Context, c
 		if c.CheckpointState == ClaimCheckpointStatePrepareCompleted {
 			completedClaims[cuid] = c
 		}
+	}
+
+	if pc.Status.Allocation == nil {
+		// A claim in this state has no PreparedDevices checkpointed yet, so
+		// there is nothing left to derive a MIG device from.
+		klog.V(4).Infof("Partial rollback: claim %s has no allocation in the checkpoint", PreparedClaimToString(&pc, claimUID))
+		return nil
 	}
 
 	for _, r := range pc.Status.Allocation.Devices.Results {
@@ -1918,11 +1929,14 @@ func preparedClaimDeviceHasAdminAccess(claim *PreparedClaim, deviceName DeviceNa
 // Make this best-effort for now (do not return an error, but log details).
 func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpecTuple, dname DeviceName, completelyPreparedClaims PreparedClaimsByUID) error {
 	for uid, claim := range completelyPreparedClaims {
-		for _, res := range claim.Status.Allocation.Devices.Results {
-			if res.Device == dname {
-				klog.V(1).Infof("Device %s is in use by completely prepared claim %s", dname, PreparedClaimToString(&claim, uid))
-				return nil
-			}
+		names, ok := claim.GetHeldDevices()
+		if !ok {
+			klog.Warningf("Keep device %s: cannot tell which devices claim %s holds", dname, PreparedClaimToString(&claim, uid))
+			return nil
+		}
+		if slices.Contains(names, dname) {
+			klog.V(1).Infof("Device %s is in use by completely prepared claim %s", dname, PreparedClaimToString(&claim, uid))
+			return nil
 		}
 	}
 
@@ -2015,8 +2029,7 @@ func ownedStatus(status resourceapi.ResourceClaimStatus) resourceapi.ResourceCla
 			dropped = append(dropped, fmt.Sprintf("%s/%s", r.Driver, r.Device))
 		}
 	}
-	// Repeats on every periodic cleanup run until a write persists the
-	// filtered claims, hence the verbosity.
+	// Repeats on every cleanup run until a write persists the filtered claims.
 	klog.V(4).Infof("Dropping %d result(s) of other drivers from a claim: %v", len(dropped), dropped)
 
 	// status is the informer cache's, so filter the copy rather than build a

@@ -46,6 +46,7 @@ type mockNVMLLibrary struct {
 	deviceGetHandleByPciBusIdCalls int
 	deviceGetHandleByUUIDFunc      func(string) (nvml.Device, nvml.Return)
 	deviceGetHandleByUUIDCalls     int
+	deviceGetHandleByUUIDArgs      []string
 }
 
 func (m *mockNVMLLibrary) DeviceGetHandleByPciBusId(busID string) (nvml.Device, nvml.Return) {
@@ -55,6 +56,7 @@ func (m *mockNVMLLibrary) DeviceGetHandleByPciBusId(busID string) (nvml.Device, 
 
 func (m *mockNVMLLibrary) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.Return) {
 	m.deviceGetHandleByUUIDCalls++
+	m.deviceGetHandleByUUIDArgs = append(m.deviceGetHandleByUUIDArgs, uuid)
 	return m.deviceGetHandleByUUIDFunc(uuid)
 }
 

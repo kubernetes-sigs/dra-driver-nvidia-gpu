@@ -28,11 +28,21 @@ import (
 
 type fakeNVMLDeviceLib struct {
 	nvdev.Interface
-	device nvdev.Device
+	device  nvdev.Device
+	visited *int
 }
 
 func (l fakeNVMLDeviceLib) NewDevice(nvml.Device) (nvdev.Device, error) {
 	return l.device, nil
+}
+
+// VisitDevices reports a machine with no GPUs, which keeps a caller that only
+// needs to reach the device walk away from NVML.
+func (l fakeNVMLDeviceLib) VisitDevices(func(int, nvdev.Device) error) error {
+	if l.visited != nil {
+		*l.visited++
+	}
+	return nil
 }
 
 type fakeNVDevice struct {

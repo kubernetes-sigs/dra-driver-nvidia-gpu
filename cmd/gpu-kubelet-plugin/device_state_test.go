@@ -1149,3 +1149,106 @@ func checkpointReadDropsOtherDriversResults(t *testing.T, state *DeviceState) {
 	require.Equal(t, ours, claims["mixed"].Status.Allocation.Devices.Results)
 	require.Equal(t, ours, claims["added"].Status.Allocation.Devices.Results)
 }
+
+// A completed claim whose allocation is missing from the checkpoint still
+// holds whatever it was prepared with, so nothing may be torn down on its
+// behalf until that can be told apart from holding nothing.
+func TestCheckpointedClaimThatCannotBeAccountedFor(t *testing.T) {
+	enableDynamicMIGForTest(t)
+
+	const owned = "gpu-0-mig-1g10gb-19-0"
+	preparedWith := func(name DeviceName) PreparedDevices {
+		return PreparedDevices{{Devices: PreparedDeviceList{newPreparedMigDevice(name, "MIG-0000")}}}
+	}
+	completed := func(claim PreparedClaim) PreparedClaimsByUID {
+		claim.CheckpointState = ClaimCheckpointStatePrepareCompleted
+		return PreparedClaimsByUID{"completed": claim}
+	}
+
+	// The device under test sits on GPU-0, whose parent resolves by PCI bus ID
+	// as well as by minor. The UUID that reaches NVML is then the evidence for
+	// how far the scan got, and it is a specific one.
+	target := &MigSpecTuple{ParentMinor: 0, ParentPCIBusID: "0000:01:00.0", ProfileID: 19}
+	lookingUp := func() (*DeviceState, *mockNVMLLibrary) {
+		nvmllib := &mockNVMLLibrary{deviceGetHandleByUUIDFunc: func(string) (nvml.Device, nvml.Return) {
+			return nil, nvml.ERROR_NOT_FOUND
+		}}
+		return &DeviceState{nvdevlib: &deviceLib{
+			nvmllib: nvmllib,
+			gpuInfosByUUID: map[string]*GpuInfo{
+				"GPU-0": {UUID: "GPU-0", minor: 0, pciBusID: "0000:01:00.0"},
+				"GPU-1": {UUID: "GPU-1", minor: 1, pciBusID: "0000:02:00.0"},
+			},
+			gpuUUIDbyPCIBusID: map[PCIBusID]string{"0000:01:00.0": "GPU-0", "0000:02:00.0": "GPU-1"},
+			devhandleByUUID:   map[string]nvml.Device{},
+		}}, nvmllib
+	}
+
+	t.Run("the teardown routine leaves the GPUs alone", func(t *testing.T) {
+		visited := 0
+		state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{
+			PreparedClaims: completed(PreparedClaim{}),
+		}})
+		state.nvdevlib = &deviceLib{Interface: fakeNVMLDeviceLib{visited: &visited}}
+
+		state.DestroyUnknownMIGDevices(context.Background())
+
+		require.Zero(t, visited, "a keep-list that cannot be completed MUST NOT reach the device walk")
+	})
+
+	t.Run("the device stays when the claim holding it cannot be read", func(t *testing.T) {
+		state, nvmllib := lookingUp()
+
+		err := state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(target, owned, completed(PreparedClaim{}))
+
+		require.NoError(t, err)
+		require.Empty(t, nvmllib.deviceGetHandleByUUIDArgs, "teardown MUST NOT be attempted")
+	})
+
+	t.Run("prepared devices answer for a claim with no allocation", func(t *testing.T) {
+		state, nvmllib := lookingUp()
+
+		err := state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(
+			target, owned, completed(PreparedClaim{PreparedDevices: preparedWith(owned)}))
+
+		require.NoError(t, err)
+		require.Empty(t, nvmllib.deviceGetHandleByUUIDArgs, "the device is in use, teardown MUST NOT be attempted")
+	})
+
+	// Without this the two cases above would pass just as well if the scan
+	// never told the two apart and kept every device.
+	t.Run("a device no prepared claim names reaches the teardown lookup", func(t *testing.T) {
+		state, nvmllib := lookingUp()
+
+		err := state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(
+			target, owned, completed(PreparedClaim{PreparedDevices: preparedWith("gpu-1-mig-1g10gb-19-0")}))
+
+		require.Error(t, err, "the lookup is attempted and the stubbed NVML refuses it")
+		require.Equal(t, []string{"GPU-0"}, nvmllib.deviceGetHandleByUUIDArgs, "the parent of the device under test")
+	})
+
+	// Reading a prepared device through CanonicalName() would panic on an entry
+	// this malformed, and the readable device beside it is what let a partial
+	// keep-list pass for a complete one.
+	t.Run("a readable device beside an unreadable one", func(t *testing.T) {
+		visited := 0
+		state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{
+			PreparedClaims: completed(PreparedClaim{PreparedDevices: PreparedDevices{
+				{Devices: PreparedDeviceList{newPreparedMigDevice(owned, "MIG-0000"), {}, {Mig: &PreparedMigDevice{}}}},
+			}}),
+		}})
+		state.nvdevlib = &deviceLib{Interface: fakeNVMLDeviceLib{visited: &visited}}
+
+		require.NotPanics(t, func() { state.DestroyUnknownMIGDevices(context.Background()) })
+		require.Zero(t, visited, "a claim we still cannot read MUST NOT reach the device walk")
+	})
+
+	t.Run("partial rollback has nothing left to derive", func(t *testing.T) {
+		state := &DeviceState{}
+
+		err := state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", PreparedClaim{},
+			&Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
+
+		require.NoError(t, err)
+	})
+}
