@@ -1,0 +1,43 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: rct-mig-large
+  labels:
+    env: batssuite
+spec:
+  spec:
+    devices:
+      requests:
+      - name: mig-large
+        # Prefer a seven-GPU-slice profile when the GPU supports one, then
+        # fall back to a four-GPU-slice profile.
+        firstAvailable:
+        - name: mig7g
+          deviceClassName: mig.nvidia.com
+          selectors:
+          - cel:
+              expression: device.attributes['gpu.nvidia.com'].profile.startsWith('7g.')
+        - name: mig4g
+          deviceClassName: mig.nvidia.com
+          selectors:
+          - cel:
+              expression: device.attributes['gpu.nvidia.com'].profile.startsWith('4g.')
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-mig-large
+  labels:
+    env: batssuite
+spec:
+  containers:
+  - name: ctr
+    image: ubuntu:22.04
+    command: ["bash", "-c"]
+    args: ["nvidia-smi -L; trap 'exit 0' TERM; sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: migdev
+  resourceClaims:
+  - name: migdev
+    resourceClaimTemplateName: rct-mig-large
