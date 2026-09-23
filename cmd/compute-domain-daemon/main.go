@@ -240,13 +240,13 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	// A node-local domain has no NVML clique, but fabric handles still need a
 	// running IMEX service to broker export and import metadata.
 	if flags.cliqueID == "" {
-		if !shouldManageIMEX(flags.cliqueID) {
-			klog.Infof("no cliqueID: skipping controller and IMEX daemon management")
-			<-ctx.Done()
-			klog.Infof("Exiting")
-			return nil
+		if featuregates.Enabled(featuregates.NodeLocalFabricIPC) {
+			return runNodeLocalIMEX(ctx, flags)
 		}
-		return runNodeLocalIMEX(ctx, flags)
+		klog.Infof("no cliqueID: skipping controller and IMEX daemon management")
+		<-ctx.Done()
+		klog.Infof("Exiting")
+		return nil
 	}
 
 	config := &ControllerConfig{
@@ -363,10 +363,6 @@ func runNodeLocalIMEX(ctx context.Context, flags *Flags) error {
 	return processManager.Watchdog(ctx)
 }
 
-func shouldManageIMEX(cliqueID string) bool {
-	return cliqueID != "" || featuregates.Enabled(featuregates.NodeLocalFabricIPC)
-}
-
 // IMEXDaemonUpdateLoopWithIPs reacts to ComputeDomain status changes by updating the
 // IMEX daemon nodes config file and (re)starting the IMEX daemon process.
 func IMEXDaemonUpdateLoopWithIPs(ctx context.Context, controller *Controller, cliqueID string, pm *ProcessManager) error {
@@ -454,7 +450,7 @@ func IMEXDaemonUpdateLoopWithDNSNames(ctx context.Context, controller *Controlle
 // check verifies if the node is IMEX capable and if so, checks if the IMEX daemon is ready.
 // It returns an error if any step fails.
 func check(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
-	if !shouldManageIMEX(flags.cliqueID) {
+	if flags.cliqueID == "" && !featuregates.Enabled(featuregates.NodeLocalFabricIPC) {
 		fmt.Println("check succeeded (noop, clique ID is empty)")
 		return nil
 	}

@@ -689,41 +689,6 @@ func TestApplyComputeDomainChannelConfigHostManagedNoCliqueSkipsInjection(t *tes
 	assert.Nil(t, configState.containerEdits, "no clique on this node means no IMEX channel device node is injected")
 }
 
-func TestApplyComputeDomainChannelConfigHostManagedNoCliqueRequiresNodeLocalIMEX(t *testing.T) {
-	setNodeLocalFabricIPCForTest(t, true)
-
-	cd := &configapi.ComputeDomain{
-		ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "cd-uid"},
-	}
-	factory := nvinformers.NewSharedInformerFactory(nvfake.NewSimpleClientset(), 0)
-	informer := factory.Resource().V1beta1().ComputeDomains().Informer()
-	require.NoError(t, informer.AddIndexers(cache.Indexers{"computeDomainUID": uidIndexer[*configapi.ComputeDomain]}))
-	require.NoError(t, informer.GetIndexer().Add(cd))
-
-	state := &DeviceState{
-		config:               hostManagedConfig(),
-		checkpointManager:    &fakeCheckpointManager{checkpoint: checkpointWithClaims(nil)},
-		computeDomainManager: &ComputeDomainManager{informer: informer, cliqueID: ""},
-		nvdevlib:             &deviceLib{devRoot: t.TempDir()},
-		allocatable: AllocatableDevices{
-			"channel-0": &AllocatableDevice{Channel: &ComputeDomainChannelInfo{ID: 0}},
-		},
-	}
-
-	config := channelConfig("cd-uid")
-	result := allocationResult("request", DriverName, "channel-0", nil)
-	configState, err := state.applyComputeDomainChannelConfig(
-		context.Background(),
-		config,
-		claimWithResults("claim-uid", result),
-		[]*resourceapi.DeviceRequestAllocationResult{&result},
-	)
-
-	require.Error(t, err)
-	assert.Nil(t, configState)
-	assert.Contains(t, err.Error(), "host nvidia-imex daemon readiness check failed")
-}
-
 func TestApplyComputeDomainChannelConfigDriverManagedNoCliqueInjectsNodeLocalChannel(t *testing.T) {
 	setNodeLocalFabricIPCForTest(t, true)
 
@@ -832,45 +797,55 @@ func TestApplyComputeDomainChannelConfigHostManagedUsesAllocatedChannel(t *testi
 	assert.Contains(t, err.Error(), "channel 2 already allocated")
 }
 
-// TestApplyComputeDomainChannelConfigHostManagedRequiresHostIMEXReady confirms
-// that on a fabric node (non-empty cliqueID), a host-managed channel claim is
-// rejected when the operator's host nvidia-imex daemon cannot be validated as
-// ready (here: nvidia-imex-ctl isn't even present under the driver root).
-// This is the only readiness signal host-managed mode has, since there is no
-// driver-managed daemon to report ComputeDomain readiness.
+// Host-managed mode has no driver-managed daemon to report ComputeDomain readiness,
+// so channel preparation must retry until the host daemon is ready.
 func TestApplyComputeDomainChannelConfigHostManagedRequiresHostIMEXReady(t *testing.T) {
-	cd := &configapi.ComputeDomain{
-		ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "cd-uid"},
+	for name, tc := range map[string]struct {
+		cliqueID                  string
+		nodeLocalFabricIPCEnabled bool
+	}{
+		"fabric with gate disabled": {cliqueID: "clique-a"},
+		"fabric with gate enabled":  {cliqueID: "clique-a", nodeLocalFabricIPCEnabled: true},
+		"node-local fabric":         {nodeLocalFabricIPCEnabled: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setNodeLocalFabricIPCForTest(t, tc.nodeLocalFabricIPCEnabled)
+
+			cd := &configapi.ComputeDomain{
+				ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "cd-uid"},
+			}
+			factory := nvinformers.NewSharedInformerFactory(nvfake.NewSimpleClientset(), 0)
+			informer := factory.Resource().V1beta1().ComputeDomains().Informer()
+			require.NoError(t, informer.AddIndexers(cache.Indexers{"computeDomainUID": uidIndexer[*configapi.ComputeDomain]}))
+			require.NoError(t, informer.GetIndexer().Add(cd))
+
+			state := &DeviceState{
+				config:               hostManagedConfig(),
+				checkpointManager:    &fakeCheckpointManager{checkpoint: checkpointWithClaims(nil)},
+				computeDomainManager: &ComputeDomainManager{informer: informer, cliqueID: tc.cliqueID},
+				nvdevlib:             &deviceLib{devRoot: t.TempDir()},
+				allocatable: AllocatableDevices{
+					"channel-0": &AllocatableDevice{Channel: &ComputeDomainChannelInfo{ID: 0}},
+				},
+			}
+
+			config := channelConfig("cd-uid")
+			result := allocationResult("request", DriverName, "channel-0", nil)
+			claim := claimWithResults("claim-uid", result)
+
+			configState, err := state.applyComputeDomainChannelConfig(
+				context.Background(),
+				config,
+				claim,
+				[]*resourceapi.DeviceRequestAllocationResult{&result},
+			)
+
+			require.Error(t, err)
+			assert.Nil(t, configState)
+			assert.Contains(t, err.Error(), "host nvidia-imex daemon readiness check failed")
+			assert.False(t, isPermanentError(err), "an unready host daemon must be retried, not treated as permanently broken")
+		})
 	}
-	factory := nvinformers.NewSharedInformerFactory(nvfake.NewSimpleClientset(), 0)
-	informer := factory.Resource().V1beta1().ComputeDomains().Informer()
-	require.NoError(t, informer.AddIndexers(cache.Indexers{"computeDomainUID": uidIndexer[*configapi.ComputeDomain]}))
-	require.NoError(t, informer.GetIndexer().Add(cd))
-
-	state := &DeviceState{
-		config:               hostManagedConfig(),
-		checkpointManager:    &fakeCheckpointManager{checkpoint: checkpointWithClaims(nil)},
-		computeDomainManager: &ComputeDomainManager{informer: informer, cliqueID: "clique-a"},
-		nvdevlib:             &deviceLib{devRoot: t.TempDir()},
-		allocatable: AllocatableDevices{
-			"channel-0": &AllocatableDevice{Channel: &ComputeDomainChannelInfo{ID: 0}},
-		},
-	}
-
-	config := channelConfig("cd-uid")
-	result := allocationResult("request", DriverName, "channel-0", nil)
-	claim := claimWithResults("claim-uid", result)
-
-	_, err := state.applyComputeDomainChannelConfig(
-		context.Background(),
-		config,
-		claim,
-		[]*resourceapi.DeviceRequestAllocationResult{&result},
-	)
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "host nvidia-imex daemon readiness check failed")
-	assert.False(t, isPermanentError(err), "an unready host daemon must be retried, not treated as permanently broken")
 }
 
 // TestApplyComputeDomainChannelConfigHostManagedCliqueIDRace guards against a
