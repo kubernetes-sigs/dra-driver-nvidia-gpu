@@ -160,14 +160,14 @@ func (m *DNSNameManager) LogDNSNameMappings() {
 	defer m.Unlock()
 
 	if len(m.mappings) == 0 {
-		klog.Infof("Current compute-domain-daemon mappings: empty")
+		klog.V(2).Infof("Current compute-domain-daemon mappings: empty")
 		return
 	}
 
 	// Already in ascending index order from buildDNSNameMappings, which for
 	// the zero-padded per-domain DNS name format is also ascending DNS-name order.
 	for _, mapping := range m.mappings {
-		klog.Infof("%s -> %s", mapping.dnsName, mapping.ip)
+		klog.V(2).Infof("%s -> %s", mapping.dnsName, mapping.ip)
 	}
 }
 
