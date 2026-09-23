@@ -65,6 +65,61 @@ iupgrade_wait() {
     _mock_args+=("--set" "featureGates.DRAListTypeAttributes=true")
   fi
 
+  # Override the image only for the chart under test. Upgrade tests also call
+  # this helper for the last stable chart, which must keep using its published
+  # image.
+  local _image_args=()
+  if [ "${REPO}" = "${TEST_CHART_REPO}" ] && [ "${VERSION}" = "${TEST_CHART_VERSION}" ]; then
+    if [ -n "${TEST_IMAGE:-}" ]; then
+      local image_repository="${TEST_IMAGE%:*}"
+      local image_tag="${TEST_IMAGE##*:}"
+      if [[ "${TEST_IMAGE}" == *@* ||
+            "${image_repository}" == "${TEST_IMAGE}" ||
+            -z "${image_repository}" ||
+            -z "${image_tag}" ||
+            "${image_tag}" == */* ]]; then
+        echo "TEST_IMAGE must be a tagged image reference, for example registry.example.com/driver:dev" >&2
+        return 1
+      fi
+      _image_args+=(
+        "--set-string" "image.repository=${image_repository}"
+        "--set-string" "image.tag=${image_tag}")
+    fi
+    if [ -n "${TEST_IMAGE_PULL_POLICY:-}" ]; then
+      case "${TEST_IMAGE_PULL_POLICY}" in
+        Always|IfNotPresent|Never) ;;
+        *)
+          echo "TEST_IMAGE_PULL_POLICY must be Always, IfNotPresent, or Never" >&2
+          return 1
+          ;;
+      esac
+      _image_args+=("--set-string" "image.pullPolicy=${TEST_IMAGE_PULL_POLICY}")
+    fi
+    if [ -n "${TEST_IMAGE_PULL_SECRETS:-}" ]; then
+      if [[ "${TEST_IMAGE_PULL_SECRETS}" == ,* ||
+            "${TEST_IMAGE_PULL_SECRETS}" == *, ||
+            "${TEST_IMAGE_PULL_SECRETS}" == *,,* ]]; then
+        echo "TEST_IMAGE_PULL_SECRETS must be a comma-separated list of Kubernetes secret names" >&2
+        return 1
+      fi
+
+      local image_pull_secret_pattern='^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+      local image_pull_secrets=()
+      IFS=',' read -r -a image_pull_secrets <<< "${TEST_IMAGE_PULL_SECRETS}"
+
+      local i
+      local secret_name
+      for i in "${!image_pull_secrets[@]}"; do
+        secret_name="${image_pull_secrets[$i]}"
+        if [ "${#secret_name}" -gt 253 ] || [[ ! "${secret_name}" =~ ${image_pull_secret_pattern} ]]; then
+          echo "Invalid image pull secret name in TEST_IMAGE_PULL_SECRETS: ${secret_name}" >&2
+          return 1
+        fi
+        _image_args+=("--set-string" "imagePullSecrets[${i}].name=${secret_name}")
+      done
+    fi
+  fi
+
   log "iupgrade_wait: start"
   timeout -v 120 helm upgrade --install "${TEST_HELM_RELEASE_NAME}" \
     "${REPO}" \
@@ -74,7 +129,7 @@ iupgrade_wait() {
     --create-namespace \
     --namespace dra-driver-nvidia-gpu \
     --set gpuResourcesEnabledOverride=true \
-    --set nvidiaDriverRoot="${TEST_NVIDIA_DRIVER_ROOT}" "${_mock_args[@]}" "${ADDITIONAL_INSTALL_ARGS[@]}"
+    --set nvidiaDriverRoot="${TEST_NVIDIA_DRIVER_ROOT}" "${_mock_args[@]}" "${_image_args[@]}" "${ADDITIONAL_INSTALL_ARGS[@]}"
 
   # Valueable output to have in the logs in case things went pearshaped.
   kubectl get pods -n dra-driver-nvidia-gpu

@@ -17,11 +17,13 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"testing"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/require"
+	resourceapi "k8s.io/api/resource/v1"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
@@ -87,10 +89,12 @@ func (d *fakeNVMLGPU) SetMigMode(mode int) (nvml.Return, nvml.Return) {
 
 type fakeNVMLGpuInstance struct {
 	nvml.GpuInstance
-	info      nvml.GpuInstanceInfo
-	ci        nvml.ComputeInstance
-	ciProfile nvml.ComputeInstanceProfileInfo
-	events    *[]string
+	info                     nvml.GpuInstanceInfo
+	ci                       nvml.ComputeInstance
+	ciProfile                nvml.ComputeInstanceProfileInfo
+	createComputeInstanceRet nvml.Return
+	getComputeInstanceRet    nvml.Return
+	events                   *[]string
 }
 
 func (g *fakeNVMLGpuInstance) GetInfo() (nvml.GpuInstanceInfo, nvml.Return) {
@@ -98,7 +102,7 @@ func (g *fakeNVMLGpuInstance) GetInfo() (nvml.GpuInstanceInfo, nvml.Return) {
 }
 
 func (g *fakeNVMLGpuInstance) GetComputeInstanceById(int) (nvml.ComputeInstance, nvml.Return) {
-	return g.ci, nvml.SUCCESS
+	return g.ci, g.getComputeInstanceRet
 }
 
 func (g *fakeNVMLGpuInstance) GetComputeInstanceProfileInfo(int, int) (nvml.ComputeInstanceProfileInfo, nvml.Return) {
@@ -106,7 +110,7 @@ func (g *fakeNVMLGpuInstance) GetComputeInstanceProfileInfo(int, int) (nvml.Comp
 }
 
 func (g *fakeNVMLGpuInstance) CreateComputeInstance(*nvml.ComputeInstanceProfileInfo) (nvml.ComputeInstance, nvml.Return) {
-	return g.ci, nvml.SUCCESS
+	return g.ci, g.createComputeInstanceRet
 }
 
 func (g *fakeNVMLGpuInstance) Destroy() nvml.Return {
@@ -135,9 +139,11 @@ func (c *fakeNVMLComputeInstance) Destroy() nvml.Return {
 
 type fakeNVMLMigDevice struct {
 	nvml.Device
-	giID int
-	ciID int
-	uuid string
+	giID                    int
+	ciID                    int
+	uuid                    string
+	getComputeInstanceIDRet nvml.Return
+	getUUIDRet              nvml.Return
 }
 
 func (d *fakeNVMLMigDevice) GetGpuInstanceId() (int, nvml.Return) {
@@ -145,11 +151,11 @@ func (d *fakeNVMLMigDevice) GetGpuInstanceId() (int, nvml.Return) {
 }
 
 func (d *fakeNVMLMigDevice) GetComputeInstanceId() (int, nvml.Return) {
-	return d.ciID, nvml.SUCCESS
+	return d.ciID, d.getComputeInstanceIDRet
 }
 
 func (d *fakeNVMLMigDevice) GetUUID() (string, nvml.Return) {
-	return d.uuid, nvml.SUCCESS
+	return d.uuid, d.getUUIDRet
 }
 
 func enableDynamicMIGForTest(t *testing.T) {
@@ -249,6 +255,87 @@ func TestDeviceLibCreateMigDevice(t *testing.T) {
 		PlacementSize:  1,
 		GiProfileID:    19,
 	}, withoutMigDeviceRuntimeFields(got))
+}
+
+func TestDeviceStateRollbackAfterComputeInstanceCreationFailure(t *testing.T) {
+	enableDynamicMIGForTest(t)
+
+	var events []string
+	migDevice := &fakeNVMLMigDevice{
+		giID:                    3,
+		getComputeInstanceIDRet: nvml.ERROR_NOT_FOUND,
+		getUUIDRet:              nvml.ERROR_NOT_FOUND,
+	}
+	gi := &fakeNVMLGpuInstance{
+		info:                     nvml.GpuInstanceInfo{Id: 3, ProfileId: 19, Placement: nvml.GpuInstancePlacement{Start: 2, Size: 1}},
+		ciProfile:                nvml.ComputeInstanceProfileInfo{Id: 7},
+		createComputeInstanceRet: nvml.ERROR_UNKNOWN,
+		getComputeInstanceRet:    nvml.ERROR_NOT_FOUND,
+		events:                   &events,
+	}
+	gpu := &fakeNVMLGPU{
+		migDevice: migDevice,
+		gi:        gi,
+		giProfile: nvml.GpuInstanceProfileInfo{Id: 19},
+		events:    &events,
+	}
+	parent := &GpuInfo{UUID: "GPU-1", minor: 1, pciBusID: "0000:01:00.0"}
+	nvmllib := &mockNVMLLibrary{
+		deviceGetHandleByUUIDFunc: func(uuid string) (nvml.Device, nvml.Return) {
+			if uuid != parent.UUID {
+				return nil, nvml.ERROR_NOT_FOUND
+			}
+			return gpu, nvml.SUCCESS
+		},
+	}
+	l := &deviceLib{
+		Interface:         fakeNVMLDeviceLib{device: fakeNVDevice{migEnabled: true}},
+		nvmllib:           nvmllib,
+		gpuInfosByUUID:    map[string]*GpuInfo{parent.UUID: parent},
+		gpuUUIDbyPCIBusID: map[PCIBusID]string{parent.pciBusID: parent.UUID},
+		devhandleByUUID:   make(map[string]nvml.Device),
+	}
+	migSpec := &MigSpec{
+		Parent:        parent,
+		Profile:       testMigProfile(),
+		GIProfileInfo: nvml.GpuInstanceProfileInfo{Id: 19},
+		Placement:     nvml.GpuInstancePlacement{Start: 2, Size: 1},
+	}
+
+	_, err := l.createMigDevice(migSpec)
+	require.ErrorContains(t, err, "error creating Compute instance")
+
+	deviceName := migSpec.CanonicalName()
+	parsedSpec, err := NewMigSpecTupleFromCanonicalName(deviceName)
+	require.NoError(t, err)
+	require.Empty(t, parsedSpec.ParentPCIBusID)
+
+	preparedClaim := PreparedClaim{
+		CheckpointState: ClaimCheckpointStatePrepareStarted,
+		Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{Results: []resourceapi.DeviceRequestAllocationResult{
+					{Driver: DriverName, Device: deviceName},
+				}},
+			},
+		},
+	}
+	checkpoint := &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{
+		"claim-uid": preparedClaim,
+	}}}
+	state := &DeviceState{
+		nvdevlib: l,
+		perGPUAllocatable: &PerGPUAllocatableDevices{allocatablesMap: map[PCIBusID]AllocatableDevices{
+			parent.pciBusID: {
+				deviceName: {MigDynamic: migSpec},
+			},
+		}},
+	}
+
+	err = state.rollbackPartiallyPreparedClaim(context.Background(), "claim-uid", preparedClaim, checkpoint)
+	require.NoError(t, err)
+	require.Equal(t, []string{"destroy-gi", "set-mig-mode"}, events)
+	require.Equal(t, 1, nvmllib.deviceGetHandleByUUIDCalls)
 }
 
 func TestDeviceLibDeleteMigDevice(t *testing.T) {

@@ -20,11 +20,30 @@ import (
 	"context"
 	"testing"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	resourceapi "k8s.io/api/resource/v1"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type mockNVMLLibrary struct {
+	nvml.Interface
+	deviceGetHandleByPciBusIdFunc  func(string) (nvml.Device, nvml.Return)
+	deviceGetHandleByPciBusIdCalls int
+	deviceGetHandleByUUIDFunc      func(string) (nvml.Device, nvml.Return)
+	deviceGetHandleByUUIDCalls     int
+}
+
+func (m *mockNVMLLibrary) DeviceGetHandleByPciBusId(busID string) (nvml.Device, nvml.Return) {
+	m.deviceGetHandleByPciBusIdCalls++
+	return m.deviceGetHandleByPciBusIdFunc(busID)
+}
+
+func (m *mockNVMLLibrary) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.Return) {
+	m.deviceGetHandleByUUIDCalls++
+	return m.deviceGetHandleByUUIDFunc(uuid)
+}
 
 // mockHealthMonitor implements deviceHealthMonitor for testing healthEventToTaint.
 type mockHealthMonitor struct {
