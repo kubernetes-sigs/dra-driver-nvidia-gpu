@@ -58,6 +58,9 @@ const (
 
 	// driverRootMountDir is the directory where the driver root is mounted inside the kubelet plugin container.
 	driverRootMountDir = "/driver-root"
+
+	// procMeminfoPath is the file the kernel exposes memory statistics through.
+	procMeminfoPath = "/proc/meminfo"
 )
 
 // fileChecker checks whether a file exists at the given path.
@@ -297,7 +300,7 @@ func (m *MpsControlDaemon) Start(ctx context.Context, config *configapi.MpsConfi
 	}
 
 	mounter := mount.New(mountExecutable)
-	sizeArg := fmt.Sprintf("size=%v", getDefaultShmSize())
+	sizeArg := fmt.Sprintf("size=%v", getDefaultShmSize(procMeminfoPath))
 	mountOptions := []string{"rw", "nosuid", "nodev", "noexec", "relatime", sizeArg}
 	err = mounter.Mount("shm", m.shmDir, "tmpfs", mountOptions)
 	if err != nil {
@@ -470,14 +473,14 @@ func (m *MpsControlDaemon) Stop(ctx context.Context) error {
 }
 
 // getDefaultShmSize returns the default size for the tmpfs to be created.
-// This reads /proc/meminfo to get the total memory to calculate this. If this
-// fails a fallback size of 65536k is used.
-func getDefaultShmSize() string {
+// This reads meminfoPath (normally procMeminfoPath) to get the total memory to
+// calculate this. If this fails a fallback size of 65536k is used.
+func getDefaultShmSize(meminfoPath string) string {
 	const fallbackSize = "65536k"
 
-	meminfo, err := os.Open("/proc/meminfo")
+	meminfo, err := os.Open(meminfoPath)
 	if err != nil {
-		klog.ErrorS(err, "failed to open /proc/meminfo")
+		klog.ErrorS(err, "failed to open meminfo", "path", meminfoPath)
 		return fallbackSize
 	}
 	defer func() {

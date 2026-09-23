@@ -18,6 +18,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -90,4 +91,61 @@ func TestRenderMpsControlDaemonDeploymentImagePullSettings(t *testing.T) {
 	}, deployment.Spec.Template.Spec.ImagePullSecrets)
 	require.Len(t, deployment.Spec.Template.Spec.Containers, 1)
 	require.Equal(t, corev1.PullAlways, deployment.Spec.Template.Spec.Containers[0].ImagePullPolicy)
+}
+
+func TestGetDefaultShmSize(t *testing.T) {
+	const fallbackSize = "65536k"
+
+	writeMeminfo := func(t *testing.T, content string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "meminfo")
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+		return path
+	}
+
+	t.Run("half of MemTotal is returned, keeping the unit", func(t *testing.T) {
+		path := writeMeminfo(t, "MemTotal:       16316296 kB\nMemFree:         1000000 kB\n")
+
+		// 16316296 / 2, with "kB" shortened to the "k" that mount(8) expects.
+		require.Equal(t, "8158148k", getDefaultShmSize(path))
+	})
+
+	t.Run("preceding lines are skipped", func(t *testing.T) {
+		path := writeMeminfo(t, "MemAvailable:    2000 kB\nSwapTotal:       4000 kB\nMemTotal:        1024 kB\n")
+
+		require.Equal(t, "512k", getDefaultShmSize(path))
+	})
+
+	t.Run("an odd MemTotal is rounded down", func(t *testing.T) {
+		path := writeMeminfo(t, "MemTotal:        1025 kB\n")
+
+		require.Equal(t, "512k", getDefaultShmSize(path))
+	})
+
+	t.Run("a MemTotal without a unit is returned unitless", func(t *testing.T) {
+		path := writeMeminfo(t, "MemTotal:        2048\n")
+
+		require.Equal(t, "1024", getDefaultShmSize(path))
+	})
+
+	t.Run("only a MemTotal: prefix is matched", func(t *testing.T) {
+		path := writeMeminfo(t, "MemTotalHuge:    2048 kB\n")
+
+		require.Equal(t, fallbackSize, getDefaultShmSize(path), "no MemTotal line means the fallback")
+	})
+
+	for name, content := range map[string]string{
+		"an unparseable MemTotal": "MemTotal:       not-a-number kB\n",
+		"an empty MemTotal":       "MemTotal:\n",
+		"a missing MemTotal":      "MemFree:         1000000 kB\n",
+		"an empty file":           "",
+	} {
+		t.Run(name+" falls back", func(t *testing.T) {
+			require.Equal(t, fallbackSize, getDefaultShmSize(writeMeminfo(t, content)))
+		})
+	}
+
+	t.Run("an unreadable file falls back", func(t *testing.T) {
+		require.Equal(t, fallbackSize, getDefaultShmSize(filepath.Join(t.TempDir(), "absent")))
+	})
 }
