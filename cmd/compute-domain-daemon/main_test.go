@@ -17,6 +17,8 @@ limitations under the License.
 package main
 
 import (
+	"context"
+	"os/exec"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,7 +27,9 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
-func TestShouldManageIMEX(t *testing.T) {
+func TestCheckIMEXReadiness(t *testing.T) {
+	// An empty PATH makes an attempted readiness probe fail deterministically.
+	t.Setenv("PATH", t.TempDir())
 	previous := featuregates.Enabled(featuregates.NodeLocalFabricIPC)
 	t.Cleanup(func() {
 		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
@@ -33,14 +37,28 @@ func TestShouldManageIMEX(t *testing.T) {
 		}))
 	})
 
-	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
-		string(featuregates.NodeLocalFabricIPC): false,
-	}))
-	assert.False(t, shouldManageIMEX(""))
-	assert.True(t, shouldManageIMEX("clique-a"))
-
-	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
-		string(featuregates.NodeLocalFabricIPC): true,
-	}))
-	assert.True(t, shouldManageIMEX(""))
+	for name, tc := range map[string]struct {
+		cliqueID  string
+		enabled   bool
+		wantProbe bool
+	}{
+		"no clique, gate disabled": {},
+		"no clique, gate enabled":  {enabled: true, wantProbe: true},
+		"clique, gate disabled":    {cliqueID: "clique-a", wantProbe: true},
+		"clique, gate enabled":     {cliqueID: "clique-a", enabled: true, wantProbe: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+				string(featuregates.NodeLocalFabricIPC): tc.enabled,
+			}))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			err := check(ctx, cancel, &Flags{cliqueID: tc.cliqueID})
+			if tc.wantProbe {
+				assert.ErrorIs(t, err, exec.ErrNotFound)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
