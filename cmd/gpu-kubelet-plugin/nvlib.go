@@ -1244,15 +1244,22 @@ func (l deviceLib) inspectMigProfilesAndPlacements(gpuInfo *GpuInfo, device nvde
 	maxMemSlicesConsumed := 0
 
 	err := device.VisitMigProfiles(func(migProfile nvdev.MigProfile) error {
-		if migProfile.GetInfo().C != migProfile.GetInfo().G {
+		info := migProfile.GetInfo()
+		if info.C != info.G {
 			return nil
 		}
 
-		if migProfile.GetInfo().CIProfileID == nvml.COMPUTE_INSTANCE_PROFILE_1_SLICE_REV1 {
+		// Both rev1 and nvl CI profiles are non-standard profiles that are
+		// not available on all GPUs. These conflict with existing
+		// 1_SLICE and 7_SLICE CI profiles as they have the same number of
+		// slices and will lead to MIG creation failures on hosts that do
+		// not support them. To avoid this, we skip these profiles.
+		// We can revisit these if there's an usecase for them.
+		if info.CIProfileID == nvml.COMPUTE_INSTANCE_PROFILE_1_SLICE_REV1 || info.CIProfileID == nvml.COMPUTE_INSTANCE_PROFILE_7_SLICE_NVL {
 			return nil
 		}
 
-		giProfileInfo, ret := device.GetGpuInstanceProfileInfo(migProfile.GetInfo().GIProfileID)
+		giProfileInfo, ret := device.GetGpuInstanceProfileInfo(info.GIProfileID)
 		if ret == nvml.ERROR_NOT_SUPPORTED {
 			return nil
 		}

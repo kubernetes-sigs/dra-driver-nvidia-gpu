@@ -223,3 +223,47 @@ confirm_expected_mig_mode_all_nodes() {
   kubectl wait --for=delete pods pod-mig1g --timeout=10s
   confirm_expected_mig_mode_all_nodes
 }
+
+# bats test_tags=fastfeedback,dynmig
+@test "DynMIG: 1 pod, 1 smallest-slice MIG" {
+  confirm_expected_mig_mode_all_nodes
+  kubectl apply -f tests/bats/specs/gpu-smallest-slice-mig.yaml
+  kubectl wait --for=condition=READY pods pod-mig-small --timeout=10s
+  run kubectl logs pod-mig-small
+
+  # Confirm the following pattern:
+  # GPU 0: NVIDIA GB200 (UUID: GPU-7277883e-ce1e-3b6e-6cc1-6d52e80cdb86)
+  #   MIG 1g.24gb     Device  0: (UUID: MIG-5b696ac1-c323-589e-a082-e6045e980bf4)
+  assert_output --partial "UUID: MIG-"
+  assert_output --partial "UUID: GPU-"
+
+  # Make sure the output contains two lines (first wc -l for debuggability)
+  echo "${output}" | wc -l
+  echo "${output}" | wc -l | grep 2
+
+  kubectl delete -f tests/bats/specs/gpu-smallest-slice-mig.yaml
+  kubectl wait --for=delete pods pod-mig-small --timeout=10s
+  confirm_expected_mig_mode_all_nodes
+}
+
+# bats test_tags=fastfeedback,dynmig
+@test "DynMIG: 1 pod, 1 largest-slice MIG" {
+  confirm_expected_mig_mode_all_nodes
+  kubectl apply -f tests/bats/specs/gpu-largest-slice-mig.yaml
+  kubectl wait --for=condition=READY pods pod-mig-large --timeout=10s
+  run kubectl logs pod-mig-large
+
+  # Confirm the following pattern:
+  # GPU 0: NVIDIA GB200 (UUID: GPU-7277883e-ce1e-3b6e-6cc1-6d52e80cdb86)
+  #   MIG 1g.24gb     Device  0: (UUID: MIG-5b696ac1-c323-589e-a082-e6045e980bf4)
+  assert_output --partial "UUID: MIG-"
+  assert_output --partial "UUID: GPU-"
+
+  # Make sure the output contains two lines (first wc -l for debuggability)
+  echo "${output}" | wc -l
+  echo "${output}" | wc -l | grep 2
+
+  kubectl delete -f tests/bats/specs/gpu-largest-slice-mig.yaml
+  kubectl wait --for=delete pods pod-mig-large --timeout=10s
+  confirm_expected_mig_mode_all_nodes
+}
