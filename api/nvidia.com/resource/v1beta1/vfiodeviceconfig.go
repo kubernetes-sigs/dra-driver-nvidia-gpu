@@ -43,7 +43,7 @@ func DefaultVfioDeviceConfig() *VfioDeviceConfig {
 		},
 		Iommu: &IOMMUConfig{
 			BackendPolicy:   IOMMUBackendPolicyLegacyOnly,
-			EnableAPIDevice: ptr.To(false),
+			EnableAPIDevice: ptr.To(true),
 		},
 	}
 }
@@ -53,7 +53,7 @@ func (c *VfioDeviceConfig) Normalize() error {
 	if c.Iommu == nil {
 		c.Iommu = &IOMMUConfig{
 			BackendPolicy:   IOMMUBackendPolicyLegacyOnly,
-			EnableAPIDevice: ptr.To(false),
+			EnableAPIDevice: ptr.To(true),
 		}
 		return nil
 	}
@@ -63,9 +63,11 @@ func (c *VfioDeviceConfig) Normalize() error {
 		c.Iommu.BackendPolicy = IOMMUBackendPolicyLegacyOnly
 	}
 
-	// Don't enable API device if not specified.
+	// Enable the IOMMU API device by default if not specified, since KubeVirt
+	// (the primary vfio consumer) requires it. Explicitly setting it to false
+	// opts out.
 	if c.Iommu.EnableAPIDevice == nil {
-		c.Iommu.EnableAPIDevice = ptr.To(false)
+		c.Iommu.EnableAPIDevice = ptr.To(true)
 	}
 	return nil
 }
