@@ -473,10 +473,14 @@ func (s *DeviceState) DestroyUnknownMIGDevices(ctx context.Context) {
 	}
 
 	var expectedDeviceNames []DeviceName
-	for _, cpclaim := range filtered {
-		for _, res := range cpclaim.Status.Allocation.Devices.Results {
-			expectedDeviceNames = append(expectedDeviceNames, res.Device)
+	for uid, cpclaim := range filtered {
+		names, ok := cpclaim.GetHeldDevices()
+		if !ok {
+			// Everything not on this list is about to be destroyed.
+			klog.Errorf("%s: skip teardown: cannot tell which devices claim %s holds", logpfx, PreparedClaimToString(&cpclaim, uid))
+			return
 		}
+		expectedDeviceNames = append(expectedDeviceNames, names...)
 	}
 
 	klog.Infof("%s: enter teardown routine (%d expect devices: %s)", logpfx, len(expectedDeviceNames), expectedDeviceNames)
@@ -739,6 +743,13 @@ func (s *DeviceState) rollbackPartiallyPreparedMIGDevices(ctx context.Context, c
 		}
 	}
 
+	if pc.Status.Allocation == nil {
+		// A claim in this state has no PreparedDevices checkpointed yet, so
+		// there is nothing left to derive a MIG device from.
+		klog.V(4).Infof("Partial rollback: claim %s has no allocation in the checkpoint", PreparedClaimToString(&pc, claimUID))
+		return nil
+	}
+
 	for _, r := range pc.Status.Allocation.Devices.Results {
 		if r.Driver != DriverName {
 			continue
@@ -834,7 +845,11 @@ func (s *DeviceState) getCheckpoint(ctx context.Context) (*Checkpoint, error) {
 	}
 
 	klog.V(7).Info("checkpoint read")
-	return checkpoint.ToLatestVersion(), nil
+	// After GetCheckpoint(), so that verifying the checksum still sees the
+	// bytes that were written.
+	latest := checkpoint.ToLatestVersion()
+	ownedCheckpoint(latest.V2)
+	return latest, nil
 }
 
 // logCheckpointDiff is invoked when GetCheckpoint returns
@@ -894,6 +909,8 @@ func (s *DeviceState) updateCheckpoint(ctx context.Context, mutate func(*Checkpo
 	// always safe). This is also called in the getCheckpoint() helper.
 	cp := checkpoint.ToLatestVersion()
 	mutate(cp)
+	// After mutate(), so a claim this update adds is filtered too.
+	ownedCheckpoint(cp.V2)
 
 	err = s.checkpointManager.CreateCheckpoint(DriverPluginCheckpointFileBasename, cp)
 	if err != nil {
@@ -1912,11 +1929,14 @@ func preparedClaimDeviceHasAdminAccess(claim *PreparedClaim, deviceName DeviceNa
 // Make this best-effort for now (do not return an error, but log details).
 func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpecTuple, dname DeviceName, completelyPreparedClaims PreparedClaimsByUID) error {
 	for uid, claim := range completelyPreparedClaims {
-		for _, res := range claim.Status.Allocation.Devices.Results {
-			if res.Device == dname {
-				klog.V(1).Infof("Device %s is in use by completely prepared claim %s", dname, PreparedClaimToString(&claim, uid))
-				return nil
-			}
+		names, ok := claim.GetHeldDevices()
+		if !ok {
+			klog.Warningf("Keep device %s: cannot tell which devices claim %s holds", dname, PreparedClaimToString(&claim, uid))
+			return nil
+		}
+		if slices.Contains(names, dname) {
+			klog.V(1).Infof("Device %s is in use by completely prepared claim %s", dname, PreparedClaimToString(&claim, uid))
+			return nil
 		}
 	}
 
@@ -1986,6 +2006,47 @@ func (s *DeviceState) IsMigCapable() bool {
 		}
 	}
 	return false
+}
+
+// ownedStatus is a claim status with the allocation results of other drivers
+// dropped. The checkpoint is this driver's own view of a claim, and everything
+// reading it back treats a result as a device we placed.
+func ownedStatus(status resourceapi.ResourceClaimStatus) resourceapi.ResourceClaimStatus {
+	if status.Allocation == nil {
+		return status
+	}
+	foreign := func(r resourceapi.DeviceRequestAllocationResult) bool {
+		return r.Driver != DriverName
+	}
+	results := status.Allocation.Devices.Results
+	if !slices.ContainsFunc(results, foreign) {
+		return status
+	}
+
+	dropped := make([]string, 0, len(results))
+	for _, r := range results {
+		if foreign(r) {
+			dropped = append(dropped, fmt.Sprintf("%s/%s", r.Driver, r.Device))
+		}
+	}
+	// Repeats on every cleanup run until a write persists the filtered claims.
+	klog.V(4).Infof("Dropping %d result(s) of other drivers from a claim: %v", len(dropped), dropped)
+
+	// status is the informer cache's, so filter the copy rather than build a
+	// slice that keeps pointing into it.
+	out := status.DeepCopy()
+	out.Allocation.Devices.Results = slices.DeleteFunc(out.Allocation.Devices.Results, foreign)
+	return *out
+}
+
+// ownedCheckpoint drops other drivers' results from every claim in cp. A
+// checkpoint written before this filter existed still carries them, and its
+// readers cannot tell them from devices this driver placed.
+func ownedCheckpoint(cp *CheckpointV2) {
+	for uid, claim := range cp.PreparedClaims {
+		claim.Status = ownedStatus(claim.Status)
+		cp.PreparedClaims[uid] = claim
+	}
 }
 
 func isAdminAccess(results []resourceapi.DeviceRequestAllocationResult) bool {

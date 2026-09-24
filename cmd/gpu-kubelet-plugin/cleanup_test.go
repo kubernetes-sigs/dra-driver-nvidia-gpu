@@ -250,6 +250,15 @@ func TestCleanupOnlyProcessesPrepareStarted(t *testing.T) {
 func newCleanupTestDeviceState(t *testing.T, checkpoint *Checkpoint) *DeviceState {
 	t.Helper()
 
+	state, _ := newCleanupTestDeviceStateInDir(t, checkpoint)
+	return state
+}
+
+// Same, and reports the directory, for a test that has to write checkpoint
+// bytes of its own.
+func newCleanupTestDeviceStateInDir(t *testing.T, checkpoint *Checkpoint) (*DeviceState, string) {
+	t.Helper()
+
 	checkpointDir := t.TempDir()
 	cpManager, err := checkpointmanager.NewCheckpointManager(checkpointDir)
 	require.NoError(t, err)
@@ -266,7 +275,7 @@ func newCleanupTestDeviceState(t *testing.T, checkpoint *Checkpoint) *DeviceStat
 		cplock: flock.NewFlock(
 			filepath.Join(checkpointDir, "cp.lock"),
 		),
-	}
+	}, checkpointDir
 }
 
 func TestEnqueueCleanup(t *testing.T) {
