@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/urfave/cli/v2"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
@@ -76,18 +78,22 @@ type Flags struct {
 	metricsPath  string
 	profilePath  string
 
-	additionalNamespaces cli.StringSlice
-	imagePullSecretsCSV  string
-	klogVerbosity        int
+	additionalNamespaces      cli.StringSlice
+	imagePullSecretsCSV       string
+	cdDaemonPriorityClassName string
+	cdDaemonResourcesJSON     string
+	klogVerbosity             int
 }
 
 type Config struct {
-	driverName           string
-	flags                *Flags
-	clientsets           pkgflags.ClientSets
-	mux                  *http.ServeMux
-	imagePullSecretNames []string
-	imexConfig           imex.Config
+	driverName                string
+	flags                     *Flags
+	clientsets                pkgflags.ClientSets
+	mux                       *http.ServeMux
+	imagePullSecretNames      []string
+	imexConfig                imex.Config
+	cdDaemonPriorityClassName string
+	cdDaemonResources         corev1.ResourceRequirements
 }
 
 func main() {
@@ -129,6 +135,22 @@ func newApp() *cli.App {
 			Usage:       "Comma-separated imagePullSecret names for compute-domain-daemon DaemonSets (e.g. regcred,other). Empty string means none.",
 			Destination: &flags.imagePullSecretsCSV,
 			EnvVars:     []string{"CD_DAEMON_IMAGE_PULL_SECRET_NAMES"},
+		},
+		&cli.StringFlag{
+			Name: "cd-daemon-priority-class-name",
+			Usage: "PriorityClassName applied to dynamically rendered compute-domain-daemon DaemonSet pods, " +
+				"reusing the controller pod's own priorityClassName (controller.priorityClassName Helm value). " +
+				"Empty string means none.",
+			Destination: &flags.cdDaemonPriorityClassName,
+			EnvVars:     []string{"CD_DAEMON_PRIORITY_CLASS_NAME"},
+		},
+		&cli.StringFlag{
+			Name: "cd-daemon-resources-json",
+			Usage: "JSON-encoded corev1.ResourceRequirements (requests/limits) applied to the compute-domain-daemon " +
+				"container of dynamically rendered DaemonSet pods, reusing the controller container's own resources " +
+				". Empty string means none.",
+			Destination: &flags.cdDaemonResourcesJSON,
+			EnvVars:     []string{"CD_DAEMON_RESOURCES_JSON"},
 		},
 		&cli.IntFlag{
 			Name:        "log-verbosity-cd-daemon",
@@ -225,6 +247,10 @@ func newApp() *cli.App {
 			if err := imexConfig.Validate(featuregates.Enabled(featuregates.HostManagedIMEXDaemon)); err != nil {
 				return fmt.Errorf("imex configuration validation failed: %w", err)
 			}
+			cdDaemonResources, err := parseCDDaemonResources(flags.cdDaemonResourcesJSON)
+			if err != nil {
+				return fmt.Errorf("invalid cd-daemon-resources-json: %w", err)
+			}
 			if imexConfig.EffectiveHostManaged() {
 				// The driver never creates per-ComputeDomain IMEX DaemonSets or
 				// ComputeDomainClique objects in host-managed mode, so these gates
@@ -245,12 +271,14 @@ func newApp() *cli.App {
 			}
 
 			config := &Config{
-				mux:                  mux,
-				flags:                flags,
-				clientsets:           clientsets,
-				driverName:           DriverName,
-				imagePullSecretNames: strings.Fields(strings.ReplaceAll(strings.TrimSpace(flags.imagePullSecretsCSV), ",", " ")),
-				imexConfig:           imexConfig,
+				mux:                       mux,
+				flags:                     flags,
+				clientsets:                clientsets,
+				driverName:                DriverName,
+				imagePullSecretNames:      strings.Fields(strings.ReplaceAll(strings.TrimSpace(flags.imagePullSecretsCSV), ",", " ")),
+				imexConfig:                imexConfig,
+				cdDaemonPriorityClassName: flags.cdDaemonPriorityClassName,
+				cdDaemonResources:         cdDaemonResources,
 			}
 
 			if flags.httpEndpoint != "" {
@@ -411,6 +439,22 @@ func runWithLeaderElection(ctx context.Context, config *Config, controller *Cont
 	}
 	klog.InfoS("Leader election loop ended gracefully", "lockID", lockID)
 	return nil
+}
+
+// parseCDDaemonResources decodes the CD_DAEMON_RESOURCES_JSON environment
+// variable (controller.containers.computeDomain.resources Helm value,
+// JSON-encoded by the chart via `toJson`) into a corev1.ResourceRequirements.
+// An empty string is valid and means no resource requests/limits are applied.
+func parseCDDaemonResources(raw string) (corev1.ResourceRequirements, error) {
+	var resources corev1.ResourceRequirements
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return resources, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &resources); err != nil {
+		return corev1.ResourceRequirements{}, fmt.Errorf("failed to unmarshal resource requirements: %w", err)
+	}
+	return resources, nil
 }
 
 func SetupHTTPEndpoint(config *Config) error {

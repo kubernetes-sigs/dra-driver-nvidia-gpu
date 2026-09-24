@@ -130,10 +130,8 @@ Deployed when `resources.computeDomains.enabled=true`.
 | `controller.metrics.enabled` | `true` | Expose Prometheus metrics on the controller pod. |
 | `controller.metrics.httpEndpoint` | `:8080` | Metrics listen address. |
 | `controller.metrics.profilePath` | `""` | Optional pprof profile path. Empty disables profiling. |
-| `controller.priorityClassName` | `system-node-critical` | Priority class for the controller pod. |
+| `controller.priorityClassName` | `system-node-critical` | Priority class for the controller pod. Also applied to dynamically rendered `compute-domain-daemon` DaemonSet pods. |
 | `controller.networkPolicy.enabled` | `false` | Create a NetworkPolicy for the controller. |
-
-The controller schedules onto control-plane nodes by default (`nodeSelector`, `tolerations`, and `affinity` are configurable). Additional `controller.*` values set pod annotations, security contexts, and container resource limits.
 
 ## Kubelet plugin
 
