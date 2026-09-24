@@ -24,6 +24,7 @@ import (
 	"text/template"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -54,6 +55,24 @@ type DaemonSetTemplateData struct {
 	FeatureGates              map[string]bool
 	LogVerbosity              int
 	ImagePullSecretNames      []string
+	PriorityClassName         string
+	ResourceRequests          map[string]string
+	ResourceLimits            map[string]string
+}
+
+// resourceListToMap flattens a corev1.ResourceList (e.g. Requests or
+// Limits from a corev1.ResourceRequirements) into a map[string]string of
+// resource name to quantity string, suitable for rendering in a Go
+// template.
+func resourceListToMap(list corev1.ResourceList) map[string]string {
+	if len(list) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(list))
+	for name, qty := range list {
+		m[string(name)] = qty.String()
+	}
+	return m
 }
 
 type DaemonSetManager struct {
@@ -216,6 +235,9 @@ func (m *DaemonSetManager) Create(ctx context.Context, cd *nvapi.ComputeDomain) 
 		FeatureGates:              featuregates.ToMap(),
 		LogVerbosity:              m.config.logVerbosityCDDaemon,
 		ImagePullSecretNames:      m.config.imagePullSecretNames,
+		PriorityClassName:         m.config.cdDaemonPriorityClassName,
+		ResourceRequests:          resourceListToMap(m.config.cdDaemonResources.Requests),
+		ResourceLimits:            resourceListToMap(m.config.cdDaemonResources.Limits),
 	}
 
 	tmpl, err := template.ParseFiles(DaemonSetTemplatePath)

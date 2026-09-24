@@ -92,6 +92,14 @@ spec:
         - name: CD_DAEMON_IMAGE_PULL_SECRET_NAMES
           value: "{{- range $i, $s := .Values.imagePullSecrets }}{{ if $i }},{{ end }}{{ $s.name }}{{ end }}"
         {{- end }}
+        {{- if .Values.controller.priorityClassName }}
+        - name: CD_DAEMON_PRIORITY_CLASS_NAME
+          value: "{{ .Values.controller.priorityClassName }}"
+        {{- end }}
+        {{- if .Values.controller.containers.computeDomain.resources }}
+        - name: CD_DAEMON_RESOURCES_JSON
+          value: {{ .Values.controller.containers.computeDomain.resources | toJson | quote }}
+        {{- end }}
         # Use runc: explicit "void"; otherwise we inherit "all".
         - name: NVIDIA_VISIBLE_DEVICES
           value: void

@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
@@ -70,6 +71,14 @@ type ManagerConfig struct {
 
 	// imagePullSecretNames are the names of the image pull secrets to apply to dynamically rendered compute-domain-daemon
 	imagePullSecretNames []string
+
+	// cdDaemonPriorityClassName reuses the controller pod's own
+	// priorityClassName for dynamically rendered compute-domain-daemon.
+	cdDaemonPriorityClassName string
+
+	// cdDaemonResources reuses the controller container's own resource
+	// requests/limits for the dynamically rendered compute-domain-daemon.
+	cdDaemonResources corev1.ResourceRequirements
 }
 
 // Controller manages the lifecycle of the DRA driver and its components.
@@ -90,18 +99,20 @@ func (c *Controller) Run(ctx context.Context) error {
 	workQueue := workqueue.New(workqueue.DefaultControllerRateLimiter())
 
 	managerConfig := &ManagerConfig{
-		driverName:            c.config.driverName,
-		driverNamespace:       c.config.flags.namespace,
-		additionalNamespaces:  c.config.flags.additionalNamespaces.Value(),
-		imageName:             c.config.flags.imageName,
-		maxNodesPerIMEXDomain: c.config.flags.maxNodesPerIMEXDomain,
-		imexConfig:            c.config.imexConfig,
-		clientsets:            c.config.clientsets,
-		workQueue:             workQueue,
-		logVerbosityCDDaemon:  c.config.flags.logVerbosityCDDaemon,
-		httpEndpoint:          c.config.flags.httpEndpoint,
-		metricsPath:           c.config.flags.metricsPath,
-		imagePullSecretNames:  c.config.imagePullSecretNames,
+		driverName:                c.config.driverName,
+		driverNamespace:           c.config.flags.namespace,
+		additionalNamespaces:      c.config.flags.additionalNamespaces.Value(),
+		imageName:                 c.config.flags.imageName,
+		maxNodesPerIMEXDomain:     c.config.flags.maxNodesPerIMEXDomain,
+		imexConfig:                c.config.imexConfig,
+		clientsets:                c.config.clientsets,
+		workQueue:                 workQueue,
+		logVerbosityCDDaemon:      c.config.flags.logVerbosityCDDaemon,
+		httpEndpoint:              c.config.flags.httpEndpoint,
+		metricsPath:               c.config.flags.metricsPath,
+		imagePullSecretNames:      c.config.imagePullSecretNames,
+		cdDaemonPriorityClassName: c.config.cdDaemonPriorityClassName,
+		cdDaemonResources:         c.config.cdDaemonResources,
 	}
 
 	// TODO: log full, nested cliFlags structure.

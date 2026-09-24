@@ -17,6 +17,9 @@ spec:
       labels:
         {{ .ComputeDomainLabelKey }}: {{ .ComputeDomainLabelValue }}
     spec:
+      {{- if .PriorityClassName }}
+      priorityClassName: {{ .PriorityClassName }}
+      {{- end }}
       serviceAccountName: compute-domain-daemon-service-account
       {{- if .ImagePullSecretNames }}
       imagePullSecrets:
@@ -72,6 +75,18 @@ spec:
           value: "{{ range $key, $value := .FeatureGates }}{{ $key }}={{ $value }},{{ end }}"
         {{- end }}
         resources:
+          {{- if .ResourceRequests }}
+          requests:
+            {{- range $key, $value := .ResourceRequests }}
+            {{ $key }}: {{ $value }}
+            {{- end }}
+          {{- end }}
+          {{- if .ResourceLimits }}
+          limits:
+            {{- range $key, $value := .ResourceLimits }}
+            {{ $key }}: {{ $value }}
+            {{- end }}
+          {{- end }}
           claims:
           - name: compute-domain-daemon
         # The startup probe aggressively checks every second to see if the pod
