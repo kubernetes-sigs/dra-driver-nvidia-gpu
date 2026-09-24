@@ -25,6 +25,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"text/template"
@@ -39,6 +41,7 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/common"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 )
 
 const (
@@ -61,6 +64,7 @@ type Flags struct {
 	podName                string
 	podNamespace           string
 	maxNodesPerIMEXDomain  int
+	imexConfigOverrides    string
 	httpEndpoint           string
 	metricsPath            string
 	klogVerbosity          int
@@ -163,6 +167,12 @@ func newApp() *cli.App {
 			EnvVars:     []string{"MAX_NODES_PER_IMEX_DOMAIN"},
 			Destination: &flags.maxNodesPerIMEXDomain,
 		},
+		&cli.StringFlag{
+			Name:        "imex-config-overrides",
+			Usage:       "Comma-separated KEY=VALUE overrides for arbitrary nvidia-imex daemon config file settings generated in the driverManaged mode.",
+			Destination: &flags.imexConfigOverrides,
+			EnvVars:     []string{"IMEX_CONFIG_OVERRIDES"},
+		},
 	}
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)
 	cliFlags = append(cliFlags, loggingConfig.Flags()...)
@@ -225,6 +235,11 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 		return fmt.Errorf("feature gate validation failed: %w", err)
 	}
 
+	imexConfigOverrides, err := imex.ParseConfigOverrides(flags.imexConfigOverrides)
+	if err != nil {
+		return fmt.Errorf("invalid imex-config-overrides: %w", err)
+	}
+
 	// Create clientsets for Kubernetes API access
 	kubeConfig := &pkgflags.KubeClientConfig{}
 	clientsets, err := kubeConfig.NewClientSets()
@@ -266,7 +281,7 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	}
 
 	// Render and write the IMEX daemon config with the current pod IP
-	if err := writeIMEXConfig(flags.podIP); err != nil {
+	if err := writeIMEXConfig(flags.podIP, imexConfigOverrides); err != nil {
 		return fmt.Errorf("failed to write IMEX daemon config: %w", err)
 	}
 
@@ -458,8 +473,11 @@ func check(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	return nil
 }
 
-// writeIMEXConfig renders the config template with the pod IP and writes it to the final config file.
-func writeIMEXConfig(podIP string) error {
+// writeIMEXConfig renders the config template with the pod IP, applies any
+// admin-supplied config overrides (resources.computeDomains.imex.config Helm
+// value, threaded through as IMEX_CONFIG_OVERRIDES) on top, and writes the
+// result to the final config file.
+func writeIMEXConfig(podIP string, configOverrides map[string]string) error {
 	configTemplateData := IMEXConfigTemplateData{
 		IMEXCmdBindInterfaceIP:    podIP,
 		IMEXDaemonNodesConfigPath: imexDaemonNodesConfigPath,
@@ -475,18 +493,61 @@ func writeIMEXConfig(podIP string) error {
 		return fmt.Errorf("error executing template: %w", err)
 	}
 
+	finalConfig := applyIMEXConfigOverrides(configFile.Bytes(), configOverrides)
+
 	// Ensure the directory exists
 	dir := filepath.Dir(imexDaemonConfigPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
-	if err := os.WriteFile(imexDaemonConfigPath, configFile.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(imexDaemonConfigPath, finalConfig, 0644); err != nil {
 		return fmt.Errorf("error writing config file %s: %w", imexDaemonConfigPath, err)
 	}
 
-	klog.Infof("Rendered IMEX daemon config file with: %v", configTemplateData)
+	klog.Infof("Rendered IMEX daemon config file with: %v, overrides: %v", configTemplateData, configOverrides)
 	return nil
+}
+
+// applyIMEXConfigOverrides overrides, or appends, KEY=VALUE settings in a
+// rendered nvidia-imex config file's contents.
+func applyIMEXConfigOverrides(config []byte, overrides map[string]string) []byte {
+	if len(overrides) == 0 {
+		return config
+	}
+
+	remaining := make(map[string]string, len(overrides))
+	for k, v := range overrides {
+		remaining[k] = v
+	}
+
+	lines := strings.Split(string(config), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimLeft(line, " \t"), "#") {
+			continue
+		}
+		key, _, found := strings.Cut(line, "=")
+		if !found {
+			continue
+		}
+		if value, ok := remaining[key]; ok {
+			lines[i] = key + "=" + value
+			delete(remaining, key)
+		}
+	}
+
+	// Anything left in `remaining` didn't match an existing "KEY=" line, so
+	// append it as a new setting. Sorted for deterministic output.
+	newKeys := make([]string, 0, len(remaining))
+	for k := range remaining {
+		newKeys = append(newKeys, k)
+	}
+	sort.Strings(newKeys)
+	for _, key := range newKeys {
+		lines = append(lines, key+"="+remaining[key])
+	}
+
+	return []byte(strings.Join(lines, "\n"))
 }
 
 // writeNodesConfig creates a nodesConfig file with IPs for nodes in the same clique.

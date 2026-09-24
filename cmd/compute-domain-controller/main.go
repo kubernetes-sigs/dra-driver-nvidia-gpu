@@ -69,8 +69,9 @@ type Flags struct {
 	maxNodesPerIMEXDomain int
 	logVerbosityCDDaemon  int
 
-	imexMode      string
-	imexIsolation string
+	imexMode            string
+	imexIsolation       string
+	imexConfigOverrides string
 
 	httpEndpoint string
 	metricsPath  string
@@ -88,6 +89,7 @@ type Config struct {
 	mux                  *http.ServeMux
 	imagePullSecretNames []string
 	imexConfig           imex.Config
+	imexConfigOverrides  map[string]string
 }
 
 func main() {
@@ -159,6 +161,12 @@ func newApp() *cli.App {
 			EnvVars:     []string{"IMEX_ISOLATION"},
 		},
 		&cli.StringFlag{
+			Name:        "imex-config-overrides",
+			Usage:       "Comma-separated KEY=VALUE overrides for arbitrary nvidia-imex daemon config file settings generated in the driverManaged mode.",
+			Destination: &flags.imexConfigOverrides,
+			EnvVars:     []string{"IMEX_CONFIG_OVERRIDES"},
+		},
+		&cli.StringFlag{
 			Category:    "HTTP server:",
 			Name:        "http-endpoint",
 			Usage:       "The TCP network `address` where the HTTP server for diagnostics, including pprof and metrics will listen (example: `:8080`). The default is the empty string, which means the server is disabled.",
@@ -225,6 +233,10 @@ func newApp() *cli.App {
 			if err := imexConfig.Validate(featuregates.Enabled(featuregates.HostManagedIMEXDaemon)); err != nil {
 				return fmt.Errorf("imex configuration validation failed: %w", err)
 			}
+			imexConfigOverrides, err := imex.ParseConfigOverrides(flags.imexConfigOverrides)
+			if err != nil {
+				return fmt.Errorf("invalid imex-config-overrides: %w", err)
+			}
 			if imexConfig.EffectiveHostManaged() {
 				// The driver never creates per-ComputeDomain IMEX DaemonSets or
 				// ComputeDomainClique objects in host-managed mode, so these gates
@@ -251,6 +263,7 @@ func newApp() *cli.App {
 				driverName:           DriverName,
 				imagePullSecretNames: strings.Fields(strings.ReplaceAll(strings.TrimSpace(flags.imagePullSecretsCSV), ",", " ")),
 				imexConfig:           imexConfig,
+				imexConfigOverrides:  imexConfigOverrides,
 			}
 
 			if flags.httpEndpoint != "" {

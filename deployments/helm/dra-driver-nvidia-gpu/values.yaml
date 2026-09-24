@@ -105,6 +105,16 @@ resources:
       # Requires the host's /etc/nvidia-imex/config.cfg to set IMEX_CMD_ENABLED to 1 and
       # IMEX_CMD_UNIX_DOMAIN_PATH to this same path.
       hostSocketPath: "/etc/nvidia-imex/imex_ctrl.sock"
+      # config lets you override, or add, arbitrary nvidia-imex daemon
+      # config file settings as a map of setting name to value (see NVIDIA's
+      # IMEX documentation for available settings). Applied on top of the
+      # defaults rendered by dynamically launched compute-domain-daemon
+      # pods. Only applies when mode=driverManaged, since that's when the
+      # driver renders and owns the IMEX daemon's config. Ignored under
+      # mode=hostManaged.
+      #   config:
+      #     IMEX_NODE_DISCONNECTED_GRACE_TIME: "60"
+      config: {}
 
 # Feature gates configuration following Kubernetes patterns
 # Configure feature gates as key-value pairs (feature_name: true/false)
