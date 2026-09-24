@@ -104,6 +104,10 @@ spec:
           value: "{{ .Values.resources.computeDomains.imex.mode }}"
         - name: IMEX_ISOLATION
           value: "{{ .Values.resources.computeDomains.imex.isolation }}"
+        {{- if .Values.resources.computeDomains.imex.config }}
+        - name: IMEX_CONFIG_OVERRIDES
+          value: "{{ range $key, $value := .Values.resources.computeDomains.imex.config }}{{ $key }}={{ $value }},{{ end }}"
+        {{- end }}
         {{- with .Values.controller.containers.computeDomain.env }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

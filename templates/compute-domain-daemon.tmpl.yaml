@@ -43,6 +43,10 @@ spec:
           value: "{{ .LogVerbosity }}"
         - name: MAX_NODES_PER_IMEX_DOMAIN
           value: "{{ .MaxNodesPerIMEXDomain }}"
+        {{- if .IMEXConfigOverrides }}
+        - name: IMEX_CONFIG_OVERRIDES
+          value: "{{ range $key, $value := .IMEXConfigOverrides }}{{ $key }}={{ $value }},{{ end }}"
+        {{- end }}
         - name: NODE_NAME
           valueFrom:
             fieldRef:
