@@ -132,3 +132,16 @@ func requireEventuallyClosed(t *testing.T, ch <-chan struct{}) {
 		t.Fatal("timed out waiting for channel to close")
 	}
 }
+
+func TestWaitForGPUFreeWithoutFuser(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chroot requires root")
+	}
+	// An empty host root has no fuser, so chroot exits 127.
+	vm := &VfioPciManager{nvlib: &deviceLib{hostRoot: t.TempDir()}}
+	info := &VfioDeviceInfo{parent: &GpuInfo{minor: 0}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	require.NoError(t, vm.WaitForGPUFree(ctx, info))
+}

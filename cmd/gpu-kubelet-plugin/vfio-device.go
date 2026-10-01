@@ -189,6 +189,12 @@ func (vm *VfioPciManager) WaitForGPUFree(ctx context.Context, info *VfioDeviceIn
 				if exitErr, ok := cmdErr.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
 					return nil
 				}
+				// chroot exits 127 when the host has no fuser (e.g. Talos), so the
+				// check can never pass there; skip it instead of timing out.
+				if exitErr, ok := cmdErr.(*exec.ExitError); ok && exitErr.ExitCode() == 127 {
+					klog.Warningf("Skipping the check for processes using gpu device %q: fuser is not available on the host", info.PciBusID)
+					return nil
+				}
 				err = fmt.Errorf("unexpected error checking if gpu device %q is free: %w", info.PciBusID, cmdErr)
 				klog.V(6).Infof("%v", err)
 				continue
