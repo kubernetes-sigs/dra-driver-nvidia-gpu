@@ -17,7 +17,30 @@ setup_file() {
 setup() {
   load 'helpers.sh'
   _common_setup
+  MOCK_NVML_CDI_TEST_ACTIVE=false
+  MOCK_NVML_UVM_TOOLS_REMOVED=false
   log_objects
+}
+
+restore_mock_nvml_uvm_tools_node() {
+  local plugin_pod
+  plugin_pod=$(get_one_kubelet_plugin_pod_name)
+  if [ -z "${plugin_pod}" ]; then
+    return 1
+  fi
+
+  kubectl exec -n dra-driver-nvidia-gpu "${plugin_pod}" -c gpus -- \
+    sh -c 'test -c /driver-root/dev/nvidia-uvm-tools || mknod -m 666 /driver-root/dev/nvidia-uvm-tools c 510 1'
+  MOCK_NVML_UVM_TOOLS_REMOVED=false
+}
+
+teardown() {
+  if [ "${MOCK_NVML_CDI_TEST_ACTIVE:-}" = "true" ]; then
+    kubectl delete -f tests/bats/specs/gpu-simple-full.yaml --ignore-not-found --wait=false || true
+  fi
+  if [ "${MOCK_NVML_UVM_TOOLS_REMOVED:-}" = "true" ]; then
+    restore_mock_nvml_uvm_tools_node || true
+  fi
 }
 
 bats::on_failure() {
@@ -294,4 +317,70 @@ SPEC
   final_count=$(kubectl get resourceslices -A -o json | \
     jq '[.items[] | select(.spec.driver=="gpu.nvidia.com") | .spec.devices[]? | select(.attributes.type.string=="gpu")] | length')
   [ "${initial_count}" -eq "${final_count}" ]
+}
+
+
+# --- 10. Incomplete CDI device nodes ---
+
+# bats test_tags=fastfeedback,gpu-robustness,mock-nvml
+@test "MockNVML: incomplete CDI edits fail preparation and are not cached" {
+  if [ "${MOCK_NVML:-}" != "true" ]; then
+    skip "mock NVML only"
+  fi
+
+  local _specpath="tests/bats/specs/gpu-simple-full.yaml"
+  local _podname="pod-full-gpu"
+  local plugin_pod
+  plugin_pod=$(get_one_kubelet_plugin_pod_name)
+  [ -n "${plugin_pod}" ]
+
+  # Remove one required common node from the mock driver root, then restart the
+  # plugin once so neither the common nor per-device CDI cache masks the test.
+  kubectl exec -n dra-driver-nvidia-gpu "${plugin_pod}" -c gpus -- \
+    rm -f /driver-root/dev/nvidia-uvm-tools
+  MOCK_NVML_UVM_TOOLS_REMOVED=true
+
+  kubectl delete pod -n dra-driver-nvidia-gpu "${plugin_pod}" --wait=true --timeout=60s
+  kubectl wait --for=condition=READY pods \
+    -n dra-driver-nvidia-gpu \
+    -l dra-driver-nvidia-gpu-component=kubelet-plugin \
+    --timeout=60s
+
+  plugin_pod=$(get_one_kubelet_plugin_pod_name)
+  local plugin_uid
+  plugin_uid=$(kubectl get pod -n dra-driver-nvidia-gpu "${plugin_pod}" -o jsonpath='{.metadata.uid}')
+  local plugin_restart_count
+  plugin_restart_count=$(kubectl get pod -n dra-driver-nvidia-gpu "${plugin_pod}" \
+    -o jsonpath='{.status.containerStatuses[?(@.name=="gpus")].restartCount}')
+
+  MOCK_NVML_CDI_TEST_ACTIVE=true
+  kubectl apply -f "${_specpath}"
+  kubectl wait \
+    --for=jsonpath='{.status.containerStatuses[0].state.waiting.reason}'=ContainerCreating \
+    pod/"${_podname}" \
+    --timeout=30s
+  wait_for_pod_event pod/"${_podname}" FailedPrepareDynamicResources 30
+
+  run kubectl events --for pod/"${_podname}"
+  assert_output --partial "failed to validate NVIDIA CDI common edits"
+  assert_output --partial "/dev/nvidia-uvm-tools"
+
+  # Restoring the mock driver installation must let kubelet's retry prepare the
+  # same pod without another plugin restart. This proves the incomplete edits
+  # were not cached.
+  restore_mock_nvml_uvm_tools_node
+  kubectl wait --for=condition=READY pod/"${_podname}" --timeout=60s
+
+  local current_plugin_pod
+  current_plugin_pod=$(get_one_kubelet_plugin_pod_name)
+  run kubectl get pod -n dra-driver-nvidia-gpu "${current_plugin_pod}" \
+    -o jsonpath='{.metadata.uid}:{.status.containerStatuses[?(@.name=="gpus")].restartCount}'
+  assert_output "${plugin_uid}:${plugin_restart_count}"
+
+  run kubectl logs "${_podname}"
+  assert_output --partial "UUID: GPU-"
+
+  kubectl delete -f "${_specpath}"
+  kubectl wait --for=delete pod/"${_podname}" --timeout=30s
+  MOCK_NVML_CDI_TEST_ACTIVE=false
 }
