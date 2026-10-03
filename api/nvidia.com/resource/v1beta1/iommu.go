@@ -48,6 +48,7 @@ type IOMMUConfig struct {
 	// EnableAPIDevice represents whether to include the iommu API device.
 	// If set to true, either `/dev/iommu` or `/dev/vfio/vfio` is included in the
 	// claim CDI spec, depending on the selected iommu backend.
+	// Defaults to true when unset; set to false to opt out (for example, for Kata).
 	EnableAPIDevice *bool `json:"enableAPIDevice,omitempty"`
 }
 

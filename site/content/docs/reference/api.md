@@ -102,16 +102,16 @@ apiVersion: resource.nvidia.com/v1beta1
 kind: VfioDeviceConfig
 iommu:
   backendPolicy: LegacyOnly   # LegacyOnly | PreferIommuFD
-  enableAPIDevice: false       # optional
+  enableAPIDevice: true        # optional, defaults to true
 ```
 
 #### Fields
 
 | Field | Type | Description |
 |---|---|---|
-| `iommu` | object | Optional. IOMMU backend configuration. Omit to use defaults (`LegacyOnly`, API device disabled). |
+| `iommu` | object | Optional. IOMMU backend configuration. Omit to use defaults (`LegacyOnly`, API device enabled). |
 | `iommu.backendPolicy` | string | `LegacyOnly` (default) or `PreferIommuFD`. Selects the IOMMU backend used for device passthrough. |
-| `iommu.enableAPIDevice` | bool | Optional. Expose `/dev/iommu` or `/dev/vfio/vfio` to the workload. Defaults to `false`. Requires the [`DeviceMetadata`](feature-gates.md) feature gate. |
+| `iommu.enableAPIDevice` | bool | Optional. Expose `/dev/iommu` or `/dev/vfio/vfio` to the workload. Defaults to `true`; set to `false` to opt out (for example, for Kata). Requires the [`DeviceMetadata`](feature-gates.md) feature gate. |
 
 {{% alert title="Note" %}}
 Requires [`PassthroughSupport`](feature-gates.md) (Alpha, default: false). `iommu.enableAPIDevice` additionally requires [`DeviceMetadata`](feature-gates.md) (Alpha, default: false).
