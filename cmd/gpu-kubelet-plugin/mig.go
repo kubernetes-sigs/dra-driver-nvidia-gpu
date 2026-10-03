@@ -84,10 +84,18 @@ type MigLiveTuple struct {
 // `MigSpecTuple`, though, the properties in this struct are richer objects for
 // convenience.
 type MigSpec struct {
-	Parent        *GpuInfo
-	Profile       nvdev.MigProfile
-	GIProfileInfo nvml.GpuInstanceProfileInfo
-	Placement     nvml.GpuInstancePlacement
+	Parent *GpuInfo
+	// For the same GI profile, there can be multiple CI profiles (eg: 1g37gb and 1g37gb rev1).
+	// These CI profiles have the same name but have difference in the number of multiprocessors
+	// consumed. We should prefer the CI profile that has the same number of multiprocessors
+	// as the GI profile.
+	// Note: We can only determine this during MIG creation after the GI has been
+	// created. Hence, we store all the CI profiles and pick the valid one during MIG creation.
+	// One more benefit of this is that we can later add an override through an opaque config to
+	// use the alternate CI profile.
+	CandidateProfiles []nvdev.MigProfile
+	GIProfileInfo     nvml.GpuInstanceProfileInfo
+	Placement         nvml.GpuInstancePlacement
 }
 
 func (m *MigSpec) Tuple() *MigSpecTuple {
@@ -213,7 +221,37 @@ func NewMigSpecTupleFromCanonicalName(n DeviceName) (*MigSpecTuple, error) {
 }
 
 func (m *MigSpec) CanonicalName() DeviceName {
-	return m.Tuple().ToCanonicalName(m.Profile.String())
+	// All profiles are expected to have the same profile name.
+	// So pick the first one.
+	return m.Tuple().ToCanonicalName(m.CandidateProfiles[0].String())
+}
+
+func (m *MigSpec) validateMigProfiles() error {
+	if len(m.CandidateProfiles) == 0 {
+		return fmt.Errorf("no MIG profiles found")
+	}
+
+	profile0Info := m.CandidateProfiles[0].GetInfo()
+	giProfileID := profile0Info.GIProfileID
+	profileName := profile0Info.String()
+	for idx := 1; idx < len(m.CandidateProfiles); idx++ {
+		info := m.CandidateProfiles[idx].GetInfo()
+
+		// All profiles are expected to have the same GIProfileID.
+		if giProfileID == -1 {
+			giProfileID = info.GIProfileID
+		} else if giProfileID != info.GIProfileID {
+			return fmt.Errorf("MIG profiles have different GIProfileID: %d and %d", giProfileID, info.GIProfileID)
+		}
+
+		// All profiles are expected to have the same profile name.
+		if profileName == "" {
+			profileName = info.String()
+		} else if profileName != info.String() {
+			return fmt.Errorf("MIG profiles have different profile names: %s and %s", profileName, info.String())
+		}
+	}
+	return nil
 }
 
 type MigProfileInfo struct {

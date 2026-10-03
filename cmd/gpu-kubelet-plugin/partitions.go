@@ -173,7 +173,9 @@ func (i MigSpec) Capacities() PartCapacityMap {
 }
 
 func (i MigSpec) Attributes() map[resourceapi.QualifiedName]resourceapi.DeviceAttribute {
-	return CommonAttributesMig(i.Parent, i.Profile.String())
+	// All profiles are expected to have the same profile name.
+	// So pick the first one.
+	return CommonAttributesMig(i.Parent, i.CandidateProfiles[0].String())
 }
 
 func capacitiesToCounters(m PartCapacityMap) map[string]resourceapi.Counter {

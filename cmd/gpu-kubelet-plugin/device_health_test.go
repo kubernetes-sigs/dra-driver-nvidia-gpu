@@ -205,10 +205,10 @@ func TestPartGetDeviceIncludesHealthTaints(t *testing.T) {
 		cudaDriverVersion:     "13.0",
 	}
 	dev := &AllocatableDevice{MigDynamic: &MigSpec{
-		Parent:        parent,
-		Profile:       &nvdev.MigProfileInfo{G: 1, GB: 5, GIProfileID: 19},
-		GIProfileInfo: nvml.GpuInstanceProfileInfo{Id: 19},
-		Placement:     nvml.GpuInstancePlacement{Start: 0, Size: 1},
+		Parent:            parent,
+		CandidateProfiles: []nvdev.MigProfile{&nvdev.MigProfileInfo{G: 1, GB: 5, GIProfileID: 19}},
+		GIProfileInfo:     nvml.GpuInstanceProfileInfo{Id: 19},
+		Placement:         nvml.GpuInstancePlacement{Start: 0, Size: 1},
 	}}
 	taint := &resourceapi.DeviceTaint{
 		Key:    TaintKeyXID,
