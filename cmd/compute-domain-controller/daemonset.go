@@ -51,6 +51,7 @@ type DaemonSetTemplateData struct {
 	ResourceClaimTemplateName string
 	ImageName                 string
 	MaxNodesPerIMEXDomain     int
+	IMEXConfigOverrides       map[string]string
 	FeatureGates              map[string]bool
 	LogVerbosity              int
 	ImagePullSecretNames      []string
@@ -213,6 +214,7 @@ func (m *DaemonSetManager) Create(ctx context.Context, cd *nvapi.ComputeDomain) 
 		ResourceClaimTemplateName: rct.Name,
 		ImageName:                 m.config.imageName,
 		MaxNodesPerIMEXDomain:     m.config.maxNodesPerIMEXDomain,
+		IMEXConfigOverrides:       m.config.imexConfigOverrides,
 		FeatureGates:              featuregates.ToMap(),
 		LogVerbosity:              m.config.logVerbosityCDDaemon,
 		ImagePullSecretNames:      m.config.imagePullSecretNames,

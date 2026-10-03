@@ -47,6 +47,11 @@ type ManagerConfig struct {
 	// imexConfig holds the resolved imex.mode / imex.isolation configuration.
 	imexConfig imex.Config
 
+	// imexConfigOverrides holds arbitrary nvidia-imex daemon config file
+	// overrides (resources.computeDomains.imex.config Helm value), passed
+	// through to dynamically rendered compute-domain-daemon DaemonSets.
+	imexConfigOverrides map[string]string
+
 	// clientsets provides access to various Kubernetes API client interfaces
 	clientsets flags.ClientSets
 
@@ -96,6 +101,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		imageName:             c.config.flags.imageName,
 		maxNodesPerIMEXDomain: c.config.flags.maxNodesPerIMEXDomain,
 		imexConfig:            c.config.imexConfig,
+		imexConfigOverrides:   c.config.imexConfigOverrides,
 		clientsets:            c.config.clientsets,
 		workQueue:             workQueue,
 		logVerbosityCDDaemon:  c.config.flags.logVerbosityCDDaemon,
