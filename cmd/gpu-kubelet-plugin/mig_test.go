@@ -19,6 +19,8 @@ package main
 import (
 	"testing"
 
+	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
+
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -164,4 +166,33 @@ func TestCommonCapacitiesMig(t *testing.T) {
 	assert.Equal(t, int64(6), valueOf("ofaEngines"))
 	// MemorySizeMB is documented as MiB, so it is announced as MiB * 2^20 bytes.
 	assert.Equal(t, int64(7*1024*1024), valueOf("memory"))
+}
+
+func TestMigSpecValidateMigProfiles(t *testing.T) {
+	standard := testMigProfile().GetInfo()
+	alternate := standard
+	alternate.CIProfileID = nvml.COMPUTE_INSTANCE_PROFILE_1_SLICE_REV1
+	differentGI := standard
+	differentGI.GIProfileID++
+	differentName := standard
+	differentName.GB++
+	tests := map[string]struct {
+		profiles []nvdev.MigProfile
+		wantErr  string
+	}{
+		"single":         {profiles: []nvdev.MigProfile{&standard}},
+		"alternate CI":   {profiles: []nvdev.MigProfile{&standard, &alternate}},
+		"different GI":   {profiles: []nvdev.MigProfile{&standard, &differentGI}, wantErr: "different GIProfileID"},
+		"different name": {profiles: []nvdev.MigProfile{&standard, &differentName}, wantErr: "different profile names"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := (&MigSpec{CandidateProfiles: tc.profiles}).validateMigProfiles()
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }

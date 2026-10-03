@@ -42,10 +42,10 @@ func setDynamicMIG(t *testing.T, enabled bool) {
 
 func newMigSpec(parentMinor, profileID, placementStart int, pci string) *MigSpec {
 	return &MigSpec{
-		Parent:        &GpuInfo{minor: parentMinor, pciBusID: pci},
-		Profile:       &nvdev.MigProfileInfo{C: 1, G: 1, GB: 5},
-		GIProfileInfo: nvml.GpuInstanceProfileInfo{Id: uint32(profileID)},
-		Placement:     nvml.GpuInstancePlacement{Start: uint32(placementStart)},
+		Parent:            &GpuInfo{minor: parentMinor, pciBusID: pci},
+		CandidateProfiles: []nvdev.MigProfile{&nvdev.MigProfileInfo{C: 1, G: 1, GB: 5}},
+		GIProfileInfo:     nvml.GpuInstanceProfileInfo{Id: uint32(profileID)},
+		Placement:         nvml.GpuInstancePlacement{Start: uint32(placementStart)},
 	}
 }
 
