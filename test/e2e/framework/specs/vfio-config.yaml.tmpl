@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Namespace }}
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: single-gpu-vfioconfig
+  namespace: {{ .Namespace }}
+spec:
+  spec:
+    devices:
+      config:
+      - opaque:
+          driver: gpu.nvidia.com
+          parameters:
+            apiVersion: resource.nvidia.com/v1beta1
+            kind: VfioDeviceConfig
+            iommu:
+              backendPolicy: LegacyOnly
+              enableAPIDevice: true
+        requests:
+        - gpu
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: vfio.gpu.nvidia.com
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod1
+  namespace: {{ .Namespace }}
+  labels:
+    app: vfio-test
+spec:
+  containers:
+  - name: ctr
+    image: ubuntu:22.04
+    command: ["bash", "-c"]
+    args: ["sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: single-gpu-vfioconfig
+  tolerations:
+  - key: "nvidia.com/gpu"
+    operator: "Exists"
+    effect: "NoSchedule"
