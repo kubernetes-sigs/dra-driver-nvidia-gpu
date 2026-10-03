@@ -79,19 +79,32 @@ The driver classifies XIDs as fatal or non-fatal.
 Fatal XIDs produce a `NoSchedule` taint and non-fatal XIDs produce a `None` taint.
 Refer to the [NVIDIA XID Errors documentation](https://docs.nvidia.com/deploy/xid-errors/latest/introduction.html) for information about XID errors and codes.
 
-By default, the driver classifies the following XID errors as non-fatal because they indicate application-level failures rather than hardware degradation.
-The following table identifies these errors:
+The driver does not classify XIDs from a fixed list of codes.
+For each XID event, it queries the recovery action that NVML currently reports for the parent GPU and classifies the event from that action:
 
-| Code | Description |
-| ---- | ----------- |
-| 13 | Graphics Engine Exception |
-| 31 | GPU memory page fault |
-| 43 | GPU stopped processing |
-| 45 | Preemptive cleanup, due to previous errors |
-| 68 | Video processor exception |
-| 109 | Context Switch Timeout Error |
+| Recovery action | Classification | Taint effect |
+| --- | --- | --- |
+| `NONE` | Non-fatal | `None` |
+| `RECOVER IMEX DOMAIN` | Non-fatal | `None` |
+| `GPU RESET` | Fatal | `NoSchedule` |
+| `NODE REBOOT` | Fatal | `NoSchedule` |
+| `DRAIN P2P` | Fatal | `NoSchedule` |
+| `DRAIN AND RESET` | Fatal | `NoSchedule` |
 
-You can classify additional XID errors as non-fatal by specifying a comma-separated list in the `--additional-xids-to-ignore` CLI argument or the `ADDITIONAL_XIDS_TO_IGNORE` environment variable.
+`RECOVER IMEX DOMAIN` requests recovery of the IMEX domain rather than of the local GPU, so the driver keeps the event informational for GPU scheduling.
+
+If the driver cannot query the recovery action, for example when the parent GPU handle is unavailable, it treats the event as fatal unless the XID is listed in `--additional-xids-to-ignore`.
+
+To treat specific XID errors as non-fatal regardless of the reported recovery action, specify a comma-separated list in the `--additional-xids-to-ignore` CLI argument or the `ADDITIONAL_XIDS_TO_IGNORE` environment variable.
+A listed XID never produces a `NoSchedule` taint.
+The driver still queries the recovery action and records it in the log.
+
+> [!NOTE]
+>
+> In v0.5.0 and earlier, the driver classified XIDs 13, 31, 43, 45, 68, and 109
+> as non-fatal from a built-in list, and `--additional-xids-to-ignore` added to
+> that list. The built-in list has been removed and the argument is now an
+> override.
 
 ## Enabling the feature
 
@@ -147,7 +160,7 @@ The response includes the following details:
 * The `device` field identifies the affected device entry in the `ResourceSlice`.
 * The `key` field identifies the health event category, and `gpu.nvidia.com/xid` indicates an XID error.
 * The `value` field contains the decimal XID code reported by NVML, which is `43` in this example.
-* The `effect` field is `None` because the driver classifies XID `43` as non-fatal by default, so this taint records the event without preventing new allocations. For fatal XID codes, the effect is `NoSchedule`, which prevents new allocations that do not tolerate the taint.
+* The `effect` field is `None` because NVML reported a recovery action of `NONE` for the parent GPU, so this taint records the event without preventing new allocations. When the recovery action calls for a GPU reset, a node reboot, or a drain, the effect is `NoSchedule`, which prevents new allocations that do not tolerate the taint.
 * The `timeAdded` field records when the API server added the taint. The GPU kubelet plugin leaves this field unset when it adds or changes a taint so that the API server assigns the timestamp.
 
 ## Recovering from an unhealthy device
@@ -186,8 +199,10 @@ objects to manually remove or override device taints without restarting the driv
   `DeviceTaintRule` override. The driver does not clear taints when hardware
   recovers.
 - **One taint per key per device**: Each device holds at most one taint per taint
-  key. If multiple XID events occur on the same device, only the most recent value
-  is retained.
+  key. Once a device carries a `NoSchedule` taint for a key, later events on that
+  key do not change it; the taint remains until recovery removes it, so a
+  subsequent non-fatal XID cannot downgrade it to `None`. For a key that holds a
+  `None` taint, a later event replaces the value and effect.
 - **Mutually exclusive feature gates**: Cannot be used with `DynamicMIG`,
   `PassthroughSupport`, or `MPSSupport`.
 - **Publish failure handling**: If the driver fails to update the `ResourceSlice`
