@@ -256,3 +256,52 @@ featureGates:
 ```
 
 See [Feature gates](../reference/feature-gates/) for all available gates.
+
+## Multi-node `nvbandwidth` test (with MPI)
+
+A two-node [`nvbandwidth`](https://github.com/NVIDIA/nvbandwidth) test that consumes four GPUs on each node runs through the [MPI Operator](https://github.com/kubeflow/mpi-operator).
+This validates that `ComputeDomain` channels work correctly across nodes under real inter-GPU traffic.
+
+1. Install the MPI Operator:
+
+   ```bash
+   kubectl create -f https://github.com/kubeflow/mpi-operator/releases/download/v0.6.0/mpi-operator.yaml
+   ```
+
+2. Download the [two-node, four-GPU-per-worker manifest](/examples/imex/nvbandwidth-test-job-2nodes-4gpus.yaml).
+   It creates the `ComputeDomain` and `MPIJob`.
+   The worker pods use `podAffinity` on the `nvidia.com/gpu.clique` topology key so both workers land in the same NVLink domain.
+
+   ```bash
+   curl -fLO https://dra-driver-nvidia-gpu.sigs.k8s.io/examples/imex/nvbandwidth-test-job-2nodes-4gpus.yaml
+   ```
+
+3. Apply the manifest:
+
+   ```bash
+   kubectl apply -f nvbandwidth-test-job-2nodes-4gpus.yaml
+   ```
+
+4. Inspect the results:
+   The launcher log should print an `nvbandwidth` matrix of device-to-device bandwidth across both nodes.
+
+   ```bash
+   kubectl logs --tail=-1 -l job-name=nvbandwidth-test-launcher
+   ```
+
+   Example output:
+
+   ```text
+   Running multinode_device_to_device_memcpy_read_ce.
+   memcpy CE GPU(row) -> GPU(column) bandwidth (GB/s)
+              0         1         2         3         4         5         6         7
+    0       N/A    798.02    798.25    798.02    798.02    797.88    797.73    797.95
+    ...
+   SUM multinode_device_to_device_memcpy_read_ce 44685.29
+   ```
+
+5. Clean up:
+
+   ```bash
+   kubectl delete -f nvbandwidth-test-job-2nodes-4gpus.yaml
+   ```

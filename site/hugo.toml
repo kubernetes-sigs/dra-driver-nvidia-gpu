@@ -8,7 +8,6 @@ enableGitInfo = true
   [languages.en]
     locale = "en-us"
     label = "English"
-    contentDir = "content"
     weight = 1
 
 # Hugo module (Docsy) configuration
@@ -17,6 +16,35 @@ enableGitInfo = true
   [module.hugoVersion]
     extended = true
     min = "0.157.0"
+  [[module.mounts]]
+    source = "archetypes"
+    target = "archetypes"
+  [[module.mounts]]
+    source = "assets"
+    target = "assets"
+  [[module.mounts]]
+    source = "content"
+    target = "content"
+  [[module.mounts]]
+    source = "data"
+    target = "data"
+  [[module.mounts]]
+    source = "i18n"
+    target = "i18n"
+  [[module.mounts]]
+    source = "layouts"
+    target = "layouts"
+  [[module.mounts]]
+    source = "static"
+    target = "static"
+  [[module.mounts]]
+    source = "../demo/specs/imex"
+    target = "assets/examples/imex"
+    files = ["nvbandwidth-test-job-2nodes-4gpus.yaml"]
+  [[module.mounts]]
+    source = "../demo/specs/imex"
+    target = "static/examples/imex"
+    files = ["nvbandwidth-test-job-2nodes-4gpus.yaml"]
   [[module.imports]]
     path = "github.com/google/docsy"
     disable = false
