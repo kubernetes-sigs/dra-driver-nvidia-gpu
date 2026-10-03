@@ -144,12 +144,11 @@ iupgrade_wait() {
   # plugin pod may also still be present in `Completed` state. The label
   # selector below may (rarely) pick it up, and of course that one will never
   # transition to READY. Fix that by only waiting for pods that are not in
-  # Terminating/Completed state (that do not have a deletionTimestamp). That's
-  # not natively supported by `kubectl wait`, hence this must be something of
-  # the shape
-  # `kubectl get pods ... | xargs -I{} kubectl wait --for=condition=Ready pod/{} `
+  # Terminating state (that do not have a deletionTimestamp). That's not
+  # natively supported by `kubectl wait`, see
+  # `wait_ready_non_terminating_pods`.
   sleep 1
-  kubectl wait --for=condition=READY pods -A -l dra-driver-nvidia-gpu-component=kubelet-plugin --timeout=15s
+  wait_ready_non_terminating_pods dra-driver-nvidia-gpu-component=kubelet-plugin 15s
 
   # Again, log current state.
   kubectl get pods -n dra-driver-nvidia-gpu
@@ -157,10 +156,35 @@ iupgrade_wait() {
   # That one should be obvious now, but make that guarantee explicit for
   # consuming tests. Skip when compute domains are disabled (no controller deployment).
   if [ "${DISABLE_COMPUTE_DOMAINS:-}" != "true" ]; then
-    kubectl wait --for=condition=READY pods -A -l dra-driver-nvidia-gpu-component=controller --timeout=10s
+    # With multiple controller replicas, a pod of the previous ReplicaSet may
+    # still be Terminating (e.g. releasing its leader election lease) after
+    # helm returned.
+    wait_ready_non_terminating_pods dra-driver-nvidia-gpu-component=controller 10s
   fi
   # maybe: check version on labels (to confirm that we set labels correctly)
   log "iupgrade_wait: done"
+}
+
+
+# Wait for all pods matching the label selector to become READY, ignoring pods
+# that are already being deleted (they never transition to READY again).
+# Example: wait_ready_non_terminating_pods dra-driver-nvidia-gpu-component=controller 10s
+wait_ready_non_terminating_pods() {
+  local SELECTOR="$1"
+  local TIMEOUT="$2"
+
+  local pods
+  pods=$(kubectl get pods -A -l "${SELECTOR}" -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{.metadata.namespace}} {{.metadata.name}}{{"\n"}}{{end}}{{end}}')
+  if [ -z "${pods}" ]; then
+    echo "no non-terminating pods found for selector ${SELECTOR}" >&2
+    return 1
+  fi
+
+  local ns
+  local name
+  while read -r ns name; do
+    kubectl wait --for=condition=READY -n "${ns}" "pod/${name}" --timeout="${TIMEOUT}" || return 1
+  done <<< "${pods}"
 }
 
 
