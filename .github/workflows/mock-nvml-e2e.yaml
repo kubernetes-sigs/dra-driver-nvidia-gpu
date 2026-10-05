@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
           repository: NVIDIA/k8s-test-infra
-          ref: 18befbf09d3ec4d34b646e9573b30caef54c21ab
+          ref: 57ef01659bacb1bc4adf8fab622193bb9ccf44fa
           path: _k8s-test-infra
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v5
         with:
@@ -64,7 +64,11 @@ jobs:
         env:
           K8S_TEST_INFRA_DIR: ${{ github.workspace }}/_k8s-test-infra
           GPU_PROFILE: gb200
-          GPU_COUNT: "8"
+          # Lowered from 8: the gb200 profile models a 4-GPU compute tray since
+          # https://github.com/NVIDIA/k8s-test-infra/pull/727, and GPUs beyond
+          # the profile get a random UUID per process, so nvidia-smi cannot
+          # find them by UUID.
+          GPU_COUNT: "4"
       - name: Export Kind logs
         if: always()
         run: |

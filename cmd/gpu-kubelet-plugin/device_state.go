@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -88,6 +89,15 @@ type DeviceState struct {
 
 	// Checkpoint read/write lock, file-based for multi-process synchronization.
 	cplock *flock.Flock
+
+	// onTaintsChanged is invoked, without the DeviceState lock held, after
+	// device taints were added, updated or removed. The driver uses it to
+	// wake the KEP-4680 health watchers (see device_health_status.go).
+	onTaintsChanged func()
+	// taintsChanged records a taint modification made while the lock is
+	// held, so that notifyTaintsChanged can report it after the lock is
+	// released, on success and error paths alike.
+	taintsChanged atomic.Bool
 }
 
 // newFabricManager opens a Fabric Manager connection when the
@@ -496,6 +506,9 @@ func (s *DeviceState) DestroyUnknownMIGDevices(ctx context.Context) {
 // starts reporting other changes that require republishing.
 func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.NamespacedObject) (bool, error) {
 	s.Lock()
+	// Deferred first so that it runs after Unlock: a taint cleared by
+	// unprepareDevices is reported even when a later step fails.
+	defer s.notifyTaintsChanged()
 	defer s.Unlock()
 	klog.V(6).Infof("Unprepare() for claim '%s'", claimRef.String())
 
@@ -1973,8 +1986,22 @@ func syncPreparedDevicesGaugeFromCheckpoint(nodeName string, cp *Checkpoint) {
 // the DeviceState lock. Returns true if the taint set was actually modified.
 func (s *DeviceState) AddDeviceTaint(d *AllocatableDevice, taint *resourceapi.DeviceTaint) bool {
 	s.Lock()
-	defer s.Unlock()
-	return d.AddOrUpdateTaint(taint)
+	modified := d.AddOrUpdateTaint(taint)
+	if modified {
+		s.taintsChanged.Store(true)
+	}
+	s.Unlock()
+	s.notifyTaintsChanged()
+	return modified
+}
+
+// notifyTaintsChanged invokes onTaintsChanged once if any taint was modified
+// since the previous call. It must be called without the DeviceState lock
+// held, so that the hook's consumers can take the lock to read the taints.
+func (s *DeviceState) notifyTaintsChanged() {
+	if s.taintsChanged.Swap(false) && s.onTaintsChanged != nil {
+		s.onTaintsChanged()
+	}
 }
 
 // Returns false on nodes where GPU hardware is not MIG capable (L4/Ada,T4/Turing)
@@ -2015,6 +2042,7 @@ func (s *DeviceState) clearDynamicMIGXIDTaint(name DeviceName) bool {
 	if taint, removed := device.RemoveTaint(TaintKeyXID); removed {
 		klog.V(4).Infof("Cleared health taint for destroyed Dynamic MIG device %s: key=%q, value=%q, effect=%s",
 			name, taint.Key, taint.Value, taint.Effect)
+		s.taintsChanged.Store(true)
 		return true
 	}
 	return false
