@@ -79,8 +79,7 @@ The driver classifies XIDs as fatal or non-fatal.
 Fatal XIDs produce a `NoSchedule` taint and non-fatal XIDs produce a `None` taint.
 Refer to the [NVIDIA XID Errors documentation](https://docs.nvidia.com/deploy/xid-errors/latest/introduction.html) for information about XID errors and codes.
 
-The driver does not classify XIDs from a fixed list of codes.
-For each XID event, it queries the recovery action that NVML currently reports for the parent GPU and classifies the event from that action:
+For each XID event, the driver queries the recovery action that NVML currently reports for the parent GPU and classifies the event from that action:
 
 | Recovery action | Classification | Taint effect |
 | --- | --- | --- |
@@ -93,9 +92,9 @@ For each XID event, it queries the recovery action that NVML currently reports f
 
 `RECOVER IMEX DOMAIN` requests recovery of the IMEX domain rather than of the local GPU, so the driver keeps the event informational for GPU scheduling.
 
-If the driver cannot query the recovery action, for example when the parent GPU handle is unavailable, it treats the event as fatal unless the XID is listed in `--additional-xids-to-ignore`.
+If the driver cannot query the recovery action — such as when the parent GPU handle is unavailable — the driver treats the event as fatal unless the XID is listed in `--additional-xids-to-ignore`.
 
-To treat specific XID errors as non-fatal regardless of the reported recovery action, specify a comma-separated list in the `--additional-xids-to-ignore` CLI argument or the `ADDITIONAL_XIDS_TO_IGNORE` environment variable.
+To treat specific XID errors as non-fatal, regardless of the reported recovery action, specify a comma-separated list in the `--additional-xids-to-ignore` CLI argument or the `ADDITIONAL_XIDS_TO_IGNORE` environment variable.
 A listed XID never produces a `NoSchedule` taint.
 The driver still queries the recovery action and records it in the log.
 
@@ -103,7 +102,7 @@ The driver still queries the recovery action and records it in the log.
 >
 > In v0.5.0 and earlier, the driver classified XIDs 13, 31, 43, 45, 68, and 109
 > as non-fatal from a built-in list, and `--additional-xids-to-ignore` added to
-> that list. The built-in list has been removed and the argument is now an
+> that list. The built-in list is removed and the argument is now an
 > override.
 
 ## Enabling the feature
