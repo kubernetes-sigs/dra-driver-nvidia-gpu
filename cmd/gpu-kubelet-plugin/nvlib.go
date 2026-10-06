@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"os/exec"
@@ -286,11 +287,11 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 				if !gpuInfo.migEnabled || supportsMIGModeToggle(d) {
 					thisGPUAllocatable[gpuInfo.CanonicalName()] = parentdev
 				}
-				for _, migspec := range migspecs {
+				for name, migspec := range migspecs {
 					dev := &AllocatableDevice{
 						MigDynamic: migspec,
 					}
-					thisGPUAllocatable[migspec.CanonicalName()] = dev
+					thisGPUAllocatable[name] = dev
 				}
 
 				err = perGPUAllocatable.AddGPUAllocatables(gpuInfo.pciBusID, thisGPUAllocatable)
@@ -963,7 +964,10 @@ func (l deviceLib) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.Return)
 // Assume long-lived NVML session.
 func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 	gpu := migspec.Parent
-	profile := migspec.Profile
+	err := migspec.validateMigProfiles()
+	if err != nil {
+		return nil, fmt.Errorf("error validating MIG profiles for mig device %s: %w", migspec.CanonicalName(), err)
+	}
 	placement := &migspec.Placement
 
 	tdhbu0 := time.Now()
@@ -1009,12 +1013,14 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 		klog.V(6).Infof("%s: MIG mode already enabled for device %s", logpfx, gpu.String())
 	}
 
-	profileInfo := profile.GetInfo()
+	// All candidate MIG profiles only differ by CI profile.
+	giProfileID := migspec.CandidateProfiles[0].GetInfo().GIProfileID
+	profileName := migspec.CandidateProfiles[0].String()
 
 	tcgigi0 := time.Now()
-	giProfileInfo, ret := device.GetGpuInstanceProfileInfo(profileInfo.GIProfileID)
+	giProfileInfo, ret := device.GetGpuInstanceProfileInfo(giProfileID)
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting GPU instance profile info for '%v': %w", profile, ret)
+		return nil, fmt.Errorf("error getting GPU instance profile info for %q: %w", profileName, ret)
 	}
 
 	gi, ret := device.CreateGpuInstanceWithPlacement(&giProfileInfo, placement)
@@ -1030,27 +1036,27 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 	// for now, just return an error without distinguishing "already exists"
 	// from any other type of fault.
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error creating GPU instance for '%s': %w", migspec.CanonicalName(), ret)
+		return nil, fmt.Errorf("error creating GPU instance for %q: %w", migspec.CanonicalName(), ret)
 	}
 
 	giInfo, ret := gi.GetInfo()
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting GPU instance info for '%s': %w", migspec.CanonicalName(), ret)
+		return nil, fmt.Errorf("error getting GPU instance info for %q: %w", migspec.CanonicalName(), ret)
 	}
 
-	ciProfileInfo, ret := gi.GetComputeInstanceProfileInfo(profileInfo.CIProfileID, profileInfo.CIEngProfileID)
-	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting Compute instance profile info for '%v': %w", profile, ret)
+	ciProfileInfo, err := l.selectCIProfile(gi, migspec.CandidateProfiles)
+	if err != nil {
+		return nil, fmt.Errorf("error selecting valid CI profile for %q: %w", profileName, err)
 	}
 
 	ci, ret := gi.CreateComputeInstance(&ciProfileInfo)
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error creating Compute instance for '%v': %w", profile, ret)
+		return nil, fmt.Errorf("error creating Compute instance for %q: %w", profileName, ret)
 	}
 
 	ciInfo, ret := ci.GetInfo()
 	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("error getting GPU instance info for '%v': %w", profile, ret)
+		return nil, fmt.Errorf("error getting GPU instance info for %q: %w", profileName, ret)
 	}
 	klog.V(6).Infof("t_prep_create_mig_dev_cigi %.3f s", time.Since(tcgigi0).Seconds())
 
@@ -1076,7 +1082,7 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 		GIID:           int(giInfo.Id),
 		ParentMinor:    gpu.minor,
 		ParentUUID:     gpu.UUID,
-		Profile:        profile.String(),
+		Profile:        profileName,
 		PlacementStart: int(placement.Start),
 		PlacementSize:  int(placement.Size),
 		GiProfileID:    int(giProfileInfo.Id),
@@ -1129,6 +1135,43 @@ func getMigDeviceUUID(parent nvml.Device, giID, ciID int) (string, error) {
 		return uuid, nil
 	}
 	return "", fmt.Errorf("no MIG device found for GI %d / CI %d", giID, ciID)
+}
+
+// Select the CI profile with the highest number of multiprocessors.
+// During dynamic MIG discovery, we may have multiple CI profiles with the same name and number of slices but
+// differ in their profile IDs. We dont know if the CI profiles are supported until we have the GI created.
+// So we pick the CI profile with the highest number of multiprocessors after filtering by valid profiles.
+func (l deviceLib) selectCIProfile(gi nvml.GpuInstance, profiles []nvdev.MigProfile) (nvml.ComputeInstanceProfileInfo, error) {
+	validCIProfiles := make([]nvml.ComputeInstanceProfileInfo, 0)
+	for _, profile := range profiles {
+		info := profile.GetInfo()
+		ciProfileInfo, ret := gi.GetComputeInstanceProfileInfo(info.CIProfileID, info.CIEngProfileID)
+		if ret == nvml.ERROR_NOT_SUPPORTED {
+			klog.V(6).Infof("CI profile id %d not supported for MIG profile %q, skipping", info.CIProfileID, profile.String())
+			continue
+		}
+		if ret == nvml.ERROR_INVALID_ARGUMENT {
+			klog.V(6).Infof("CI profile id %d is invalid for MIG profile %q, skipping", info.CIProfileID, profile.String())
+			continue
+		}
+		if ret != nvml.SUCCESS {
+			return nvml.ComputeInstanceProfileInfo{}, fmt.Errorf("error getting Compute instance profile info for %q: %w", profile.String(), ret)
+		}
+		validCIProfiles = append(validCIProfiles, ciProfileInfo)
+	}
+	if len(validCIProfiles) == 0 {
+		return nvml.ComputeInstanceProfileInfo{}, fmt.Errorf("no valid CI profiles found for MIG profile %q", profiles[0].String())
+	}
+
+	// Order the CI profiles by the number of multiprocessors in descending order.
+	slices.SortFunc(validCIProfiles, func(a, b nvml.ComputeInstanceProfileInfo) int {
+		return cmp.Compare(b.MultiprocessorCount, a.MultiprocessorCount)
+	})
+	// If there were multiple CI profiles with the same number of SMs, we
+	// always pick the one with the lowest profile ID here as that's the order
+	// in which we enumerate the candidate profiles in `VisitMigProfiles`.
+	// Sorting does not the change relative ordering for these profiles.
+	return validCIProfiles[0], nil
 }
 
 // Assume long-lived NVML session.
@@ -1278,25 +1321,14 @@ func (l deviceLib) maybeDisableMigMode(uuid string, nvmldev nvml.Device) error {
 // Returns a flat list of all possible physical MIG configurations for a
 // specific GPU. Specifically, this discovers all possible profiles, and then
 // then determines the possible placements for each profile.
-func (l deviceLib) inspectMigProfilesAndPlacements(gpuInfo *GpuInfo, device nvdev.Device) ([]*MigSpec, error) {
-	var infos []*MigSpec
-
+func (l deviceLib) inspectMigProfilesAndPlacements(gpuInfo *GpuInfo, device nvdev.Device) (map[string]*MigSpec, error) {
 	maxCapacities := make(PartCapacityMap)
 	maxMemSlicesConsumed := 0
 
+	migSpecs := make(map[string]*MigSpec)
 	err := device.VisitMigProfiles(func(migProfile nvdev.MigProfile) error {
 		info := migProfile.GetInfo()
 		if info.C != info.G {
-			return nil
-		}
-
-		// Both rev1 and nvl CI profiles are non-standard profiles that are
-		// not available on all GPUs. These conflict with existing
-		// 1_SLICE and 7_SLICE CI profiles as they have the same number of
-		// slices and will lead to MIG creation failures on hosts that do
-		// not support them. To avoid this, we skip these profiles.
-		// We can revisit these if there's an usecase for them.
-		if info.CIProfileID == nvml.COMPUTE_INSTANCE_PROFILE_1_SLICE_REV1 || info.CIProfileID == nvml.COMPUTE_INSTANCE_PROFILE_7_SLICE_NVL {
 			return nil
 		}
 
@@ -1324,12 +1356,16 @@ func (l deviceLib) inspectMigProfilesAndPlacements(gpuInfo *GpuInfo, device nvde
 
 		for _, giPlacement := range giPlacements {
 			mi := &MigSpec{
-				Parent:        gpuInfo,
-				Profile:       migProfile,
-				GIProfileInfo: giProfileInfo,
-				Placement:     giPlacement,
+				Parent:            gpuInfo,
+				CandidateProfiles: []nvdev.MigProfile{migProfile},
+				GIProfileInfo:     giProfileInfo,
+				Placement:         giPlacement,
 			}
-			infos = append(infos, mi)
+			if _, ok := migSpecs[mi.CanonicalName()]; !ok {
+				migSpecs[mi.CanonicalName()] = mi
+			} else {
+				migSpecs[mi.CanonicalName()].CandidateProfiles = append(migSpecs[mi.CanonicalName()].CandidateProfiles, mi.CandidateProfiles...)
+			}
 
 			// Assume that the largest MIG profile consumes all memory slices,
 			// and hence we can infer the memory slice count by looking at the
@@ -1359,7 +1395,7 @@ func (l deviceLib) inspectMigProfilesAndPlacements(gpuInfo *GpuInfo, device nvde
 	// profile seen consumes all memory slices; equate maxMemSlicesConsumed =
 	// memSliceCount.
 	gpuInfo.AddDetailAfterWalkingMigProfiles(maxCapacities, maxMemSlicesConsumed)
-	return infos, nil
+	return migSpecs, nil
 }
 
 // FindMigDevBySpec() tests if a MIG device defined by the provided
