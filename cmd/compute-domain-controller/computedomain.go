@@ -303,6 +303,7 @@ func (m *ComputeDomainManager) updateGlobalStatus(ctx context.Context, cd *nvapi
 	newStatus := m.calculateGlobalStatus(newCD)
 
 	if newCD.Status.Status == newStatus {
+		metrics.ObserveComputeDomainStatus(string(newCD.UID), newStatus)
 		return nil
 	}
 

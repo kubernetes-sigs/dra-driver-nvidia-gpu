@@ -17,9 +17,12 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/component-base/metrics/legacyregistry"
 
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
@@ -50,6 +53,45 @@ func TestCalculateGlobalStatusDriverManagedUnaffected(t *testing.T) {
 	cd := &nvapi.ComputeDomain{}
 	cd.Spec.NumNodes = 8
 	require.Equal(t, nvapi.ComputeDomainStatusNotReady, m.calculateGlobalStatus(cd))
+}
+
+func computeDomainInfoValue(t *testing.T, status string) float64 {
+	mfs, err := legacyregistry.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			if mf.GetName() == "nvidia_dra_compute_domain_info" && m.GetLabel()[0].GetValue() == status {
+				return m.GetGauge().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+// After a controller restart, ComputeDomains whose status is already up to
+// date must still be counted, even though no status update is issued.
+func TestUpdateGlobalStatusObservesUnchangedStatus(t *testing.T) {
+	tests := map[string]struct {
+		mode   imex.Config
+		status string
+	}{
+		"driver-managed": {imex.Config{Mode: imex.ModeDriverManaged}, nvapi.ComputeDomainStatusNotReady},
+		"host-managed":   {imex.Config{Mode: imex.ModeHostManaged, Isolation: imex.IsolationIMEXDomain}, nvapi.ComputeDomainStatusReady},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			m := &ComputeDomainManager{config: &ManagerConfig{imexConfig: tc.mode}}
+			cd := &nvapi.ComputeDomain{}
+			cd.UID = types.UID(name)
+			cd.Spec.NumNodes = 2
+			cd.Status.Status = tc.status
+
+			before := computeDomainInfoValue(t, tc.status)
+			require.NoError(t, m.updateGlobalStatus(context.Background(), cd))
+			require.NoError(t, m.updateGlobalStatus(context.Background(), cd)) // resync: no double count
+			require.Equal(t, before+1, computeDomainInfoValue(t, tc.status))
+		})
+	}
 }
 
 // NewComputeDomainManager only stores clientsets on the informer factories it
