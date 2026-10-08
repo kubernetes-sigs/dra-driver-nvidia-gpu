@@ -45,6 +45,12 @@ This project follows the [Kubernetes AI Tool Usage Policy](https://www.kubernete
 
 When in doubt about ownership, check [OWNERS](OWNERS).
 
+## Documentation conventions
+
+Follow the [documentation style guide](site/content/contribute/style-guide.md) when writing or reviewing human-facing documentation.
+It is the source of truth for prose, page structure, examples, and procedure formatting.
+The [documentation contributor guide](site/content/contribute/docs.md) covers local preview and release updates.
+
 ## Build, test, lint
 
 All standard tasks go through the [Makefile](Makefile). Prefer `make` targets over invoking tools directly so CI and local runs stay consistent.
