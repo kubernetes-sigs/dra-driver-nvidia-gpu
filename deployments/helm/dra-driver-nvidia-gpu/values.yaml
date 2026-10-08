@@ -233,7 +233,15 @@ webhook:
       caBundle: ""
 
 controller:
+  # Running more than one replica requires leaderElection.enabled=true.
   replicas: 1
+  # PodDisruptionBudget for the controller, only rendered when enabled and
+  # replicas > 1. maxUnavailable takes precedence over minAvailable; if neither
+  # is set, minAvailable defaults to 1.
+  pdb:
+    enabled: false
+    # minAvailable: 1
+    # maxUnavailable: 1
   leaderElection:
     enabled: false
     leaseDuration: "15s"
