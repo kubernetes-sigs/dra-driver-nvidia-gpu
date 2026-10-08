@@ -33,8 +33,13 @@ import (
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/pmezard/go-difflib/difflib"
+	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	coreclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
@@ -201,6 +206,11 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	fmManager, err := newFabricManager(nvdevlib, driver)
 	if err != nil {
 		return nil, err
+	}
+	if fmManager != nil {
+		if overlaps := fmManager.OverlappingPartitions(); len(overlaps) > 0 {
+			warnOverlappingFabricPartitions(ctx, config.clientsets.Core, config.flags.nodeName, overlaps)
+		}
 	}
 
 	checkpointManager, err := checkpointmanager.NewCheckpointManager(config.DriverPluginPath())
@@ -1536,6 +1546,63 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 	klog.V(2).Infof("Fabric Manager: activating partition %d for %d-GPU claim %s", partitionID, len(gpus), ResourceClaimToString(claim))
 	if err := s.fmManager.ActivatePartition(partitionID); err != nil {
 		return fmt.Errorf("activating fabric partition %d: %w", partitionID, err)
+	}
+	return nil
+}
+
+const (
+	fabricPartitionsNotNestedReason = "FabricPartitionsNotNested"
+	fabricPartitionsEventAction     = "DiscoverFabricPartitions"
+)
+
+func warnOverlappingFabricPartitions(ctx context.Context, client coreclientset.Interface, nodeName string, overlaps [][]fabricmanager.Partition) {
+	summary := fmt.Sprintf("Fabric Manager reports %d partially overlapping partition pair(s), e.g. %s. "+
+		"Allocating either partition of such a pair makes the other unavailable, so this node fits fewer workloads than its partition sizes suggest. "+
+		"Use a nested layout, where each smaller partition fits entirely inside a larger one.",
+		len(overlaps), formatFabricPartitions(overlaps[0]))
+	klog.Warning(summary)
+	for _, pair := range overlaps {
+		klog.V(2).Infof("Fabric Manager partitions partially overlap: %s", formatFabricPartitions(pair))
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := createNodeWarningEvent(ctx, client, nodeName, fabricPartitionsNotNestedReason, fabricPartitionsEventAction, summary); err != nil {
+		klog.Warningf("Failed to create %s event for node %s: %v", fabricPartitionsNotNestedReason, nodeName, err)
+	}
+}
+
+func formatFabricPartitions(parts []fabricmanager.Partition) string {
+	descs := make([]string, len(parts))
+	for i, p := range parts {
+		descs[i] = fmt.Sprintf("partition %d (GPU modules %v)", p.ID, p.GPUModuleIDs())
+	}
+	return strings.Join(descs, " and ")
+}
+
+func createNodeWarningEvent(ctx context.Context, client coreclientset.Interface, nodeName, reason, action, note string) error {
+	now := time.Now()
+	event := &eventsv1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s.%x", nodeName, now.UnixNano()),
+			Namespace: metav1.NamespaceDefault,
+		},
+		EventTime:           metav1.NewMicroTime(now),
+		ReportingController: DriverName + "/gpu-kubelet-plugin",
+		ReportingInstance:   nodeName,
+		Action:              action,
+		Reason:              reason,
+		Note:                note,
+		Type:                corev1.EventTypeWarning,
+		Regarding: corev1.ObjectReference{
+			Kind: "Node",
+			Name: nodeName,
+			UID:  types.UID(nodeName),
+		},
+	}
+	_, err := client.EventsV1().Events(metav1.NamespaceDefault).Create(ctx, event, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("creating event: %w", err)
 	}
 	return nil
 }

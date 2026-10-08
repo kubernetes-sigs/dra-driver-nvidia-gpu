@@ -325,6 +325,78 @@ func TestGetPartitionsBySizeAmbiguous(t *testing.T) {
 	}
 }
 
+func TestOverlappingPartitions(t *testing.T) {
+	cases := []struct {
+		name       string
+		partitions []Partition
+		want       [][]int
+	}{
+		{
+			name: "nested HGX layout",
+			partitions: []Partition{
+				{ID: 0, GPUs: gpus(1, 2, 3, 4, 5, 6, 7, 8)},
+				{ID: 1, GPUs: gpus(1, 2, 3, 4)},
+				{ID: 2, GPUs: gpus(5, 6, 7, 8)},
+				{ID: 3, GPUs: gpus(1, 3)},
+				{ID: 4, GPUs: gpus(2, 4)},
+				{ID: 5, GPUs: gpus(5, 7)},
+				{ID: 6, GPUs: gpus(6, 8)},
+			},
+			want: nil,
+		},
+		{
+			name: "2-GPU partitions straddle both 4-GPU partitions",
+			partitions: []Partition{
+				{ID: 1, GPUs: gpus(1, 2, 3, 4, 5, 6, 7, 8)},
+				{ID: 2, GPUs: gpus(1, 2, 5, 6)},
+				{ID: 3, GPUs: gpus(3, 4, 7, 8)},
+				{ID: 4, GPUs: gpus(1, 3)},
+				{ID: 5, GPUs: gpus(2, 4)},
+				{ID: 6, GPUs: gpus(5, 7)},
+				{ID: 7, GPUs: gpus(6, 8)},
+			},
+			want: [][]int{{2, 4}, {2, 5}, {2, 6}, {2, 7}, {3, 4}, {3, 5}, {3, 6}, {3, 7}},
+		},
+		{
+			name: "disjoint same-size partitions",
+			partitions: []Partition{
+				{ID: 1, GPUs: gpus(1, 2)},
+				{ID: 2, GPUs: gpus(3, 4)},
+			},
+			want: nil,
+		},
+		{
+			name: "overlap independent of GPU order",
+			partitions: []Partition{
+				{ID: 1, GPUs: gpus(4, 3, 2, 1)},
+				{ID: 2, GPUs: gpus(5, 4)},
+			},
+			want: [][]int{{1, 2}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := Open(&fakeClient{partitions: tc.partitions})
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer m.Close()
+
+			var got [][]int
+			for _, pair := range m.OverlappingPartitions() {
+				ids := make([]int, len(pair))
+				for i, p := range pair {
+					ids[i] = p.ID
+				}
+				got = append(got, ids)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("OverlappingPartitions() pairs = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestActivateDeactivate(t *testing.T) {
 	client := &fakeClient{partitions: designDocPartitions()}
 	m, err := Open(client)
