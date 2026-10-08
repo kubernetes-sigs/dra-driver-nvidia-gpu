@@ -28,6 +28,8 @@ Full GPUs support optional sharing for cases where you want to divide the GPU ac
 - **Time-slicing:** containers take turns on the GPU using CUDA preemption. Requires the `TimeSlicingSettings` feature gate.
 - **MPS (Multi-Process Service):** containers run concurrently with configurable thread percentage and memory limits. Requires the `MPSSupport` feature gate.
 
+To choose which workloads share a device and how the GPU runs their work, refer to [GPU sharing](gpu-sharing.md).
+
 Target DeviceClass: `gpu.nvidia.com`
 
 See [`demo/specs/quickstart/`](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/tree/{{< param driver_release_tag >}}/demo/specs/quickstart) for configuration examples.
