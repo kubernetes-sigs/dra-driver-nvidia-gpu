@@ -94,8 +94,8 @@ func (m *CheckpointCleanupManager) Stop() error {
 }
 
 // cleanup() is the high-level cleanup routine run once upon plugin startup and
-// then periodically. It gets all claims in PrepareStarted state from the
-// current checkpoint, and runs `unprepareIfStale()` for each of them. It also
+// then periodically. It gets all claims in PreparePending or PrepareStarted
+// state from the current checkpoint, and runs `unprepareIfStale()` for each. It also
 // removes expired PrepareAborted entries. Each invocation of `cleanup()`
 // and each invocation of `unprepareIfStale()` is best-effort: errors do not
 // need to be propagated (but are expected to be properly logged).
@@ -118,15 +118,16 @@ func (m *CheckpointCleanupManager) cleanup(ctx context.Context) {
 		return
 	}
 
-	// Get checkpointed claims in PrepareStarted state.
+	// Pending claims also need cleanup if their workload disappears while
+	// overlap validation is still failing.
 	filtered := make(PreparedClaimsByUIDV2)
 	for uid, claim := range cp.V2.PreparedClaims {
-		if claim.CheckpointState == ClaimCheckpointStatePrepareStarted {
+		if claim.CheckpointState == ClaimCheckpointStatePreparePending || claim.CheckpointState == ClaimCheckpointStatePrepareStarted {
 			filtered[uid] = claim
 		}
 	}
 
-	klog.V(4).Infof("Checkpointed RC cleanup: claims in PrepareStarted state: %d (of %d)", len(filtered), len(cp.V2.PreparedClaims))
+	klog.V(4).Infof("Checkpointed RC cleanup: claims in PreparePending/PrepareStarted state: %d (of %d)", len(filtered), len(cp.V2.PreparedClaims))
 
 	for cpuid, cpclaim := range filtered {
 		m.unprepareIfStale(ctx, cpuid, cpclaim)

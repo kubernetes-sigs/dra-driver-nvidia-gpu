@@ -7,6 +7,33 @@ description: Upgrading the driver between releases.
 
 This page covers upgrading the DRA Driver for NVIDIA GPUs between releases.
 
+## ComputeDomain pending-preparation checkpoints
+
+The development version records a `PreparePending` entry before checking for
+overlapping channel allocations. If the claim is unprepared while waiting,
+the entry becomes `PrepareAborted` without device teardown. This prevents a
+matching stale retry from preparing the channel after cancellation.
+
+Existing `PrepareStarted`, `PrepareCompleted`, and `PrepareAborted` entries keep
+their existing meanings. No new checkpoint fields are required. Pending entries
+are not device ownership records and are not exported as prepared devices in the
+legacy V1 checkpoint view.
+
+{{% alert color="warning" title="Downgrade and mixed-version limitation" %}}
+Older ComputeDomain kubelet plugins do not understand `PreparePending`. Do not
+run an older plugin alongside this version on the same node, or downgrade while
+pending entries remain. Before rollback, stop scheduling new ComputeDomain
+workloads onto the affected nodes and let the newer plugin finish preparation
+or process cancellation of pending claims. Verify that no `PreparePending`
+entries remain before starting an older plugin. Do not delete checkpoint files
+to bypass this requirement; they also track resources used by running workloads.
+Other release-specific downgrade restrictions still apply.
+{{% /alert %}}
+
+This change covers cancellation after a Prepare attempt has been checkpointed.
+It does not introduce request-level cancellation before the first attempt, or
+reconciliation of orphaned `PrepareCompleted` entries.
+
 ---
 
 ## Upgrade from v0.4.1 to v0.5.0

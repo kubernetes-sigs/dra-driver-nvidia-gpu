@@ -61,6 +61,7 @@ type ClaimCheckpointState string
 
 const (
 	ClaimCheckpointStateUnset            ClaimCheckpointState = ""
+	ClaimCheckpointStatePreparePending   ClaimCheckpointState = "PreparePending"
 	ClaimCheckpointStatePrepareStarted   ClaimCheckpointState = "PrepareStarted"
 	ClaimCheckpointStatePrepareCompleted ClaimCheckpointState = "PrepareCompleted"
 	ClaimCheckpointStatePrepareAborted   ClaimCheckpointState = "PrepareAborted"
