@@ -33,8 +33,23 @@ harness provisions (T4, L4, A10, A100, H100, etc.).
 
 ```bash
 make test-e2e                                   # from the repo root
-go test -mod=vendor -v -timeout=30m ./test/e2e/... -ginkgo.v   # directly
+make test-e2e-gpu-workloads                     # one full GPU for one pod
+make test-e2e-static-mig                        # one preconfigured MIG device
+make test-e2e-full-gpu                          # full GPU basic workloads
+make test-e2e E2E_LABEL_FILTER='full-gpu && multi-gpu' # distinct GPUs for two pods
+make test-e2e E2E_LABEL_FILTER='fastfeedback && !mig' # fast feedback excluding MIG
+make test-e2e E2E_FOCUS='\[cel/memory\]'         # select by Ginkgo name regex
+make test-e2e-static-mig E2E_ARGS='-ginkgo.dry-run' # preview selection
+go test -mod=vendor -tags=e2e -v -timeout=30m ./test/e2e/... -ginkgo.v   # directly
 ```
+
+The generic `test-e2e-<label>` target sets `E2E_LABEL_FILTER` to `<label>`.
+It works for any existing or newly added label without another Makefile target.
+`E2E_LABEL_FILTER` accepts Ginkgo label expressions with `&&`, `||`, `!`,
+and parentheses. Labels on a `Describe` apply to every spec inside it.
+Add `Label("your-label")` to an `It` to select that individual spec, or to a
+`Describe` to select a group. With no filter, `make test-e2e` runs the whole
+suite. If both `E2E_FOCUS` and `E2E_LABEL_FILTER` are set, specs must match both.
 
 `$ARTIFACTS/junit_01.xml` is produced by `-ginkgo.junit-report`, which Prow
 picks up automatically when `runner.sh` sets `ARTIFACTS`.
