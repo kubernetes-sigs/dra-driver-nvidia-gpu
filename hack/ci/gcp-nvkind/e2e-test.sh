@@ -50,7 +50,7 @@ source "${LIB_DIR}/gce.sh"
 : "${BOSKOS_HOST:=http://boskos.test-pods.svc.cluster.local}"
 : "${BOSKOS_RESOURCE_TYPE:=gpu-project}"
 : "${GCE_ZONE:=us-central1-b}"
-: "${K8S_VERSION:=v1.34.3}"
+: "${K8S_VERSION:=v1.37.0}"
 : "${GPU_OPERATOR_VERSION:=v26.3.1}"
 
 mkdir -p "${ARTIFACTS}"
@@ -88,7 +88,9 @@ gce::wait_for_driver
 
 # 2. Ship repo to VM. Vendor is included (Dockerfile uses -mod=vendor).
 WORK=$(mktemp -d)
-tar --exclude='.git' --exclude='_output' --exclude='dist' --exclude='.claude' --exclude='site' \
+# COPYFILE_DISABLE and the ._* exclude keep macOS tar from adding AppleDouble
+# files, which Helm then fails to parse as CRDs on local runs from a Mac.
+COPYFILE_DISABLE=1 tar --exclude='._*' --exclude='.git' --exclude='_output' --exclude='dist' --exclude='.claude' --exclude='site' \
   -czf "${WORK}/dra-src.tgz" -C "${REPO_ROOT}" .
 gce::scp_to "${WORK}/dra-src.tgz" "/tmp/"
 gce::ssh 'rm -rf /tmp/dra-src && mkdir -p /tmp/dra-src && tar -xzf /tmp/dra-src.tgz -C /tmp/dra-src'

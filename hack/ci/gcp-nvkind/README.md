@@ -46,7 +46,12 @@ the full env. `TESTINFRA_DIR` points `e2e-test.sh` at the shared lib under
 - `registry.k8s.io/dra-driver-nvidia/dra-driver-nvidia-gpu:v0.4.0-dev` is
   not published; `install-dra-driver.sh` builds from source and
   `kind load docker-image`s the result.
-- `kindest/node:v1.34.3` (DRA GA). `v1.34.1` is not published on Docker Hub.
+- `kindest/node:v1.37.0`. Device health status (`ResourceHealthStatus`) is
+  beta and on by default since 1.36, so no extra kubelet feature gate is
+  needed to exercise it.
+- kind `v0.33.0`, and nvkind rebuilt against it: Kubernetes 1.37 requires the
+  kubeadm v1beta4 config that kind v0.32.0+ generates. See
+  `lib/setup-nvkind-node.sh`.
 - GPU Operator `v26.3.1` in minimal mode: `driver`, `toolkit`, and
   `devicePlugin` disabled; `cdi.enabled=true`, `nfd.enabled=true`.
 - DLVM ships the NVIDIA driver and toolkit but not Docker/Go/kind/helm/kubectl;

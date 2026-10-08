@@ -3,8 +3,9 @@ title: GPU health checking
 linkTitle: GPU health checking
 weight: 60
 description: >
-  Monitor GPU health using NVML and apply device taints to prevent new workloads
-  from scheduling on unhealthy GPUs.
+  Monitor GPU health using NVML, apply device taints to prevent new workloads
+  from scheduling on unhealthy GPUs, and report the health of allocated GPUs
+  in the pod status.
 ---
 
 The `NVMLDeviceHealthCheck` feature gate enables continuous GPU health monitoring
@@ -16,7 +17,9 @@ signaling the Kubernetes scheduler to avoid placing new workloads on the affecte
 device.
 
 With this feature enabled, unhealthy devices are tainted in the
-`ResourceSlice` so the scheduler stops placing new workloads on them.
+`ResourceSlice` so the scheduler stops placing new workloads on them, and the
+health of every GPU allocated to a pod is reported to the kubelet, which
+surfaces it in the pod status.
 
 ## Feature status
 
@@ -37,6 +40,12 @@ Refer to the [feature gate constraints](../reference/feature-gates/#constraints)
   `kube-controller-manager`, and `kube-scheduler`.
   In Kubernetes v1.34 and 1.35, `DRADeviceTaints` is disabled by default and must be explicitly enabled.
   In Kubernetes v1.36, the feature gate is enabled by default.
+- For device health in the pod status, the
+  [`ResourceHealthStatus`](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/)
+  Kubernetes feature gate must be enabled on the kubelet. In Kubernetes v1.35
+  and earlier, it is disabled by default and must be explicitly enabled. In
+  Kubernetes v1.36, it is enabled by default. Without it, the driver still
+  taints unhealthy devices, but the pod status does not report device health.
 - NVIDIA DRA driver v0.4.0 or later installed via Helm.
 
 ## How it works
@@ -92,6 +101,75 @@ The following table identifies these errors:
 | 109 | Context Switch Timeout Error |
 
 You can classify additional XID errors as non-fatal by specifying a comma-separated list in the `--additional-xids-to-ignore` CLI argument or the `ADDITIONAL_XIDS_TO_IGNORE` environment variable.
+
+## Device health in the pod status
+
+The GPU kubelet plugin also reports the health of its devices to the kubelet
+through the DRA device health API
+([KEP-4680](https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/4680-dra-resource-health)).
+The kubelet shows the health of every device allocated to a container in
+`pod.status.containerStatuses[].allocatedResourcesStatus`, so a workload owner
+can see that the GPU their pod runs on has failed without access to the
+`ResourceSlice`.
+
+The reported health is derived from the same in-memory device taints that
+the driver publishes in the `ResourceSlice`. Rows are listed in order of
+precedence: when a device carries several taints, the first matching row
+determines the health and message.
+
+| Device taints | Reported health | Message |
+|---|---|---|
+| `gpu.nvidia.com/gpu-lost` | `Unhealthy` | `GPU is lost` |
+| `gpu.nvidia.com/xid` with effect `NoSchedule` | `Unhealthy` | `fatal XID <code> reported by NVML` |
+| Any other key with effect `NoSchedule` or `NoExecute` | `Unhealthy` | `device is tainted with <key>` |
+| `gpu.nvidia.com/unmonitored` | `Unknown` | `device health is not monitored by NVML` |
+| `gpu.nvidia.com/xid` with effect `None` | `Healthy` | `non-fatal XID <code> reported by NVML` |
+| No taints | `Healthy` | |
+
+Because a `NoSchedule` taint is never replaced by a later non-fatal event, a
+device that is `Unhealthy` stays `Unhealthy` until the taint is cleared
+(see [Recovering from an unhealthy device](#recovering-from-an-unhealthy-device)).
+
+The driver sends the health of all devices when the kubelet subscribes,
+whenever a device taint changes, and every 10 seconds otherwise. The kubelet
+treats health that is not refreshed within 30 seconds as `Unknown`, so if the
+driver stops responding the pod status shows `Unknown` rather than stale data.
+
+The pod status and the `ResourceSlice` can briefly differ. The pod status is
+updated from the driver's memory as soon as a taint changes, while the
+`ResourceSlice` update is a separate API server write that is not retried on
+failure (see [Limitations and considerations](#limitations-and-considerations)).
+The driver also re-sends the previous health, rather than waiting, while a
+claim is being prepared or unprepared; a taint change that lands during that
+window is reported with the next periodic resend.
+
+To view the health of the GPUs allocated to a pod:
+
+```bash
+kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[*].allocatedResourcesStatus}' | jq
+```
+
+The following output shows a pod whose GPU reported a fatal XID:
+
+```json
+[
+  {
+    "name": "claim:gpu",
+    "resources": [
+      {
+        "health": "Unhealthy",
+        "message": "fatal XID 79 reported by NVML",
+        "resourceID": "k8s.gpu.nvidia.com/claim=a85e5873-fc49-4554-a151-de159f528a04-gpu-0"
+      }
+    ]
+  }
+]
+```
+
+The `name` field identifies the pod's resource claim and the `resourceID`
+field identifies the allocated device. The `message` field is only populated
+when the `ResourceHealthStatusMessage` kubelet feature gate is enabled, which
+it is by default in Kubernetes v1.36 and later.
 
 ## Enabling the feature
 
@@ -164,7 +242,7 @@ To clear taints after a hardware issue is resolved:
 kubectl rollout restart daemonset/dra-driver-nvidia-gpu-kubelet-plugin -n dra-driver-nvidia-gpu
 ```
 
-On restart, the GPU kubelet plugin re-evaluates device health. Devices with no active NVML health events will not receive taints.
+On restart, the GPU kubelet plugin re-evaluates device health. Devices with no active NVML health events will not receive taints, and the pod status reports them as `Healthy` again.
 
 > [!NOTE]
 >

@@ -223,7 +223,8 @@ tests-mock-nvml: runner-image
 		tests/bats/test_cd_failover.bats \
 		tests/bats/test_cd_mnnvl_workload.bats \
 		tests/bats/test_cd_updowngrade.bats \
-		tests/bats/test_cd_leader_election.bats)
+		tests/bats/test_cd_leader_election.bats \
+		tests/bats/test_gpu_health_status.bats)
 
 tests-gpu-single: runner-image
 	$(call RUN_BATS, \
