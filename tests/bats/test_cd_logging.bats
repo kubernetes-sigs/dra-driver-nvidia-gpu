@@ -28,7 +28,7 @@ setup () {
   run kubectl logs -l dra-driver-nvidia-gpu-component=kubelet-plugin -n dra-driver-nvidia-gpu --tail=-1
   assert_output --partial "Verbosity"
   assert_output --partial "nodeName"
-  assert_output --partial "identified fabric clique"
+  assert_output --partial "Discovered GPU clique ID"
   assert_output --partial "driver version validation"
 }
 
