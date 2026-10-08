@@ -339,6 +339,13 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		}
 	}
 
+	// Check host device-node readiness before prepareDevices can mutate MIG,
+	// sharing, passthrough, or Fabric Manager state. A retry first rolls back
+	// mutations left by its prior incomplete attempt above.
+	if err := s.validateClaimCDIDeviceNodes(claim); err != nil {
+		return nil, fmt.Errorf("unable to prepare claim %v: %w", claimUID, err)
+	}
+
 	tucp0 := time.Now()
 	err = s.updateCheckpoint(ctx, func(cp *Checkpoint) {
 		cp.V2.PreparedClaims[claimUID] = PreparedClaim{
@@ -1260,6 +1267,10 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 			return fmt.Errorf("error adding allocatable device: %w", err)
 		}
 		device.Vfio.parent = gpu.Gpu
+		// Rebinding may change the GPU minor. A future
+		// partitionable-passthrough implementation must
+		// perform the same invalidation after it refreshes the rebound GPU.
+		s.cdi.InvalidateDeviceSpec(gpu.Gpu.UUID)
 
 		// The GPU is back on the nvidia driver: its freshly discovered parent
 		// GpuInfo already carries the gpuModuleID (resolved from NVML in
@@ -1273,6 +1284,50 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 	case MigDynamicDeviceType:
 		// TODO: Implement once partitionable device is supported with PassthroughSupport feature gate.
 		return nil
+	}
+	return nil
+}
+
+// validateClaimCDIDeviceNodes verifies that nvcdi can discover the common and
+// per-GPU device nodes needed by a claim before prepareDevices mutates device
+// state. MIG allocations use their physical parent GPU as the parent
+// node is injected into the workload. VFIO allocations are skipped because
+// they use /dev/vfio instead of NVIDIA device nodes.
+func (s *DeviceState) validateClaimCDIDeviceNodes(claim *resourceapi.ResourceClaim) error {
+	if claim.Status.Allocation == nil {
+		return nil
+	}
+
+	gpus := make(map[string]struct{})
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver != DriverName {
+			continue
+		}
+		device := s.perGPUAllocatable.GetAllocatableDevice(result.Device)
+		if device == nil {
+			return fmt.Errorf("allocatable not found for device %q", result.Device)
+		}
+		switch device.Type() {
+		case GpuDeviceType:
+			gpus[device.Gpu.UUID] = struct{}{}
+		case MigStaticDeviceType:
+			gpus[device.MigStatic.ParentUUID] = struct{}{}
+		case MigDynamicDeviceType:
+			gpus[device.MigDynamic.Parent.UUID] = struct{}{}
+		case VfioDeviceType:
+			continue
+		}
+	}
+	if len(gpus) == 0 {
+		return nil
+	}
+	if _, err := s.cdi.GetCommonEditsCached(); err != nil {
+		return fmt.Errorf("failed to validate CDI common device nodes: %w", err)
+	}
+	for uuid := range gpus {
+		if _, err := s.cdi.GetDeviceSpecsByUUIDCached(uuid); err != nil {
+			return fmt.Errorf("failed to validate CDI device node for GPU %q: %w", uuid, err)
+		}
 	}
 	return nil
 }
