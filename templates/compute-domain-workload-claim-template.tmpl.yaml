@@ -16,6 +16,11 @@ spec:
       - name: channel
         exactly:
           deviceClassName: {{ .DeviceClassName }}
+{{- if ne .ChannelID nil }}
+          selectors:
+          - cel:
+              expression: "device.attributes['compute-domain.nvidia.com'].id == {{ .ChannelID }}"
+{{- end }}
       config:
       - requests: ["channel"]
         opaque:

@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,15 +40,15 @@ import (
 )
 
 // computeDomainPublishedDevices returns the devices the kubelet plugin should
-// advertise in its node ResourceSlice. IMEX channel devices other than
-// channel 0 are never advertised here (they are advertised as a network
-// resource from the control plane instead). ComputeDomain daemon devices are
+// advertise in its node ResourceSlice. Driver-managed IMEX advertises channel
+// zero; host-managed IMEX advertises every channel for controller reservations.
+// ComputeDomain daemon devices are
 // additionally omitted when hostManaged is true, since daemon claims are
 // never valid in that mode (see applyComputeDomainDaemonConfig).
 func computeDomainPublishedDevices(allocatable AllocatableDevices, hostManaged bool) []resourceapi.Device {
 	var devices []resourceapi.Device
 	for _, device := range allocatable {
-		if device.Type() == ComputeDomainChannelType && device.Channel.ID != 0 {
+		if !hostManaged && device.Type() == ComputeDomainChannelType && device.Channel.ID != 0 {
 			continue
 		}
 		if hostManaged && device.Type() == ComputeDomainDaemonType {
@@ -54,7 +56,17 @@ func computeDomainPublishedDevices(allocatable AllocatableDevices, hostManaged b
 		}
 		devices = append(devices, device.GetDevice())
 	}
+	slices.SortFunc(devices, func(a, b resourceapi.Device) int { return strings.Compare(a.Name, b.Name) })
 	return devices
+}
+
+func computeDomainPublishedSlices(allocatable AllocatableDevices, hostManaged bool) []resourceslice.Slice {
+	devices := computeDomainPublishedDevices(allocatable, hostManaged)
+	var result []resourceslice.Slice
+	for chunk := range slices.Chunk(devices, resourceapi.ResourceSliceMaxDevices) {
+		result = append(result, resourceslice.Slice{Devices: chunk})
+	}
+	return result
 }
 
 const (
@@ -126,12 +138,9 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	driver.pluginhelper = helper
 
 	// Enumerate the set of ComputeDomain devices to publish.
-	var resourceSlice resourceslice.Slice
-	resourceSlice.Devices = computeDomainPublishedDevices(state.allocatable, config.imexConfig.EffectiveHostManaged())
-
 	resources := resourceslice.DriverResources{
 		Pools: map[string]resourceslice.Pool{
-			config.flags.nodeName: {Slices: []resourceslice.Slice{resourceSlice}},
+			config.flags.nodeName: {Slices: computeDomainPublishedSlices(state.allocatable, config.imexConfig.EffectiveHostManaged())},
 		},
 	}
 

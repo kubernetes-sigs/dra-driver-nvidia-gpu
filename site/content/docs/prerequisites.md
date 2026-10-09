@@ -89,7 +89,7 @@ Host-managed mode requires two Helm values together:
 
 - `featureGates.HostManagedIMEXDaemon` is an alpha gate that only unlocks setting `imex.mode=hostManaged`. It does not by itself change any behavior. Setting `imex.mode=hostManaged` without this gate enabled is a startup validation error (`helm install`/`helm template` fails immediately, and if bypassed, the controller and kubelet plugin pods will fail to start).
 - `imex.isolation` selects the IMEX isolation strategy, and applies under both `driverManaged` and `hostManaged` mode. It must be set to one of:
-  - `domain` (default) — all workloads running in the same IMEX domain share the same channel (0). Under `driverManaged` mode this is inherent to the model (the driver creates one `nvidia-imex` daemon per ComputeDomain); under `hostManaged` mode, multiple ComputeDomains can still run against the same host IMEX domain, all receiving channel 0, with no isolation between them.
+  - `domain` (default) — workers of the same ComputeDomain share one channel ID. Under `driverManaged` mode the driver creates a separate IMEX domain and uses channel 0; under `hostManaged` mode the controller reserves a distinct channel per ComputeDomain in the existing shared host IMEX domain.
   - `channel` — intended to eventually give each workload a unique channel within an IMEX domain. Not implemented yet: setting it is a startup validation error regardless of `imex.mode`.
   - Any other value is a startup validation error.
 - Changing `imex.mode` or `imex.isolation` on a cluster with active ComputeDomain workloads is not supported and is not enforced by the driver, drain and remove existing ComputeDomains first.

@@ -54,6 +54,7 @@ type ResourceClaimTemplateTemplateData struct {
 	DriverName              string
 	ChannelConfig           *nvapi.ComputeDomainChannelConfig
 	DaemonConfig            *nvapi.ComputeDomainDaemonConfig
+	ChannelID               *int
 }
 
 type BaseResourceClaimTemplateManager struct {
@@ -364,10 +365,7 @@ func NewWorkloadResourceClaimTemplateManager(config *ManagerConfig, getComputeDo
 // channelAllocationModeFor decides the AllocationMode to request in the
 // workload ResourceClaimTemplate for a ComputeDomain.
 //
-// Under host-managed IMEX this always forces AllocationMode Single (channel
-// 0), regardless of what the ComputeDomain requested: host-managed IMEX only
-// ever has channel 0 to give out today. TODO: once the controller can assign
-// a unique IMEX channel per ComputeDomain, request that channel here instead.
+// Host-managed IMEX injects only the channel reserved for the ComputeDomain.
 //
 // Otherwise (driver-managed), the ComputeDomain's own AllocationMode is used
 // as-is.
@@ -379,6 +377,14 @@ func channelAllocationModeFor(cd *nvapi.ComputeDomain, hostManaged bool) string 
 }
 
 func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, namespace, name string, cd *nvapi.ComputeDomain) (*resourceapi.ResourceClaimTemplate, error) {
+	var channelID *int
+	if m.config.imexConfig.EffectiveHostManaged() {
+		id, err := m.reserveHostChannel(ctx, string(cd.UID))
+		if err != nil {
+			return nil, err
+		}
+		channelID = &id
+	}
 	rcts, err := getByComputeDomainUID[*resourceapi.ResourceClaimTemplate](ctx, m.mutationCache, string(cd.UID))
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving ResourceClaimTemplate: %w", err)
@@ -387,6 +393,12 @@ func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, names
 		return nil, fmt.Errorf("more than one ResourceClaimTemplate found with same ComputeDomain UID")
 	}
 	if len(rcts) == 1 {
+		if channelID != nil {
+			requests := rcts[0].Spec.Spec.Devices.Requests
+			if len(requests) != 1 || requests[0].Exactly == nil || requests[0].Exactly.DeviceClassName != computeDomainChannelDeviceClass || len(requests[0].Exactly.Selectors) != 1 || requests[0].Exactly.Selectors[0].CEL == nil || requests[0].Exactly.Selectors[0].CEL.Expression != hostChannelSelector(*channelID) {
+				return nil, fmt.Errorf("existing host-managed ResourceClaimTemplate does not match reserved channel %d; drain workloads and recreate the ComputeDomain", *channelID)
+			}
+		}
 		return rcts[0], nil
 	}
 
@@ -405,6 +417,10 @@ func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, names
 		DeviceClassName:         computeDomainDefaultChannelDeviceClass,
 		DriverName:              DriverName,
 		ChannelConfig:           channelConfig,
+		ChannelID:               channelID,
+	}
+	if channelID != nil {
+		templateData.DeviceClassName = computeDomainChannelDeviceClass
 	}
 
 	rct, err := m.BaseResourceClaimTemplateManager.Create(ctx, WorkloadResourceClaimTemplateTemplatePath, &templateData)
@@ -413,4 +429,8 @@ func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, names
 	}
 
 	return rct, nil
+}
+
+func hostChannelSelector(id int) string {
+	return fmt.Sprintf("device.attributes['compute-domain.nvidia.com'].id == %d", id)
 }
