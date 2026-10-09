@@ -16,6 +16,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// This overlay is installed only when the mock does not already export
+// nvmlDeviceGetFieldValues. The pinned mock does, so patch_mock.py hooks
+// NVML_FI_DEV_GET_GPU_RECOVERY_ACTION into engine.GetFieldValue instead.
+
 package main
 
 /*

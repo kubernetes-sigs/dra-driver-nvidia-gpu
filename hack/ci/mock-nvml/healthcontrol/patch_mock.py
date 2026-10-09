@@ -61,23 +61,42 @@ func nvmlDeviceGetFieldValues(device C.nvmlDevice_t, valuesCount C.int, values *
 }
 """
 
-PENDING_XID_CALL = "\thandle, xid, ok := engine.GetEngine().PendingXidEvent()"
-HEALTH_XID_CALL = """\tif handle, xid, gi, ci, ok := engine.GetEngine().ClaimHealthControlEvent(); ok {
-\t\t// Health-control events carry the GPU, GI, and CI selected by the test.
-\t\tdata.device.handle = (*C.struct_nvmlDevice_st)(unsafe.Pointer(handle))
+# k8s-test-infra 18befbf replaced the direct PendingXidEvent call with
+# pendingXidClaim. Health-control events are claimed first so a test can
+# choose the GPU, GI, and CI. The failure-injector path below still runs
+# when the control file has nothing to deliver.
+PENDING_XID_CLAIM = "\thandle, xid, ok := pendingXidClaim()"
+HEALTH_XID_CLAIM = """\tif handle, xid, gi, ci, ok := engine.GetEngine().ClaimHealthControlEvent(); ok {
+\t\tdata.device.handle = (*C.struct_nvmlDevice_st)(handle)
 \t\tdata.eventType = C.NVML_EVENT_TYPE_XID_CRITICAL_ERROR
 \t\tdata.eventData = C.ulonglong(xid)
 \t\tdata.gpuInstanceId = C.uint(gi)
 \t\tdata.computeInstanceId = C.uint(ci)
 \t\treturn true
 \t}
-\thandle, xid, ok := engine.GetEngine().PendingXidEvent()"""
+\thandle, xid, ok := pendingXidClaim()"""
+
+GET_FIELD_VALUE = """func (d *ConfigurableDevice) GetFieldValue(fieldID, scopeID uint32) (FieldValueType, uint64, nvml.Return) {
+	if vt, val, ret, handled := d.getDeviceFieldValue(fieldID, scopeID); handled {"""
+GET_FIELD_VALUE_HOOKED = """func (d *ConfigurableDevice) GetFieldValue(fieldID, scopeID uint32) (FieldValueType, uint64, nvml.Return) {
+	if action, ok := d.healthRecoveryField(fieldID); ok {
+		return FieldValueUint, uint64(action), nvml.SUCCESS
+	}
+	if vt, val, ret, handled := d.getDeviceFieldValue(fieldID, scopeID); handled {"""
 
 FULL_GPU_INSTANCE = (
     "\tdata.gpuInstanceId = C.uint(0xFFFFFFFF)\n"
     "\tdata.computeInstanceId = C.uint(0xFFFFFFFF)\n"
 )
 ZERO_INSTANCE = "\tdata.gpuInstanceId = 0\n\tdata.computeInstanceId = 0\n"
+
+# go-nvlib lowercases the bus ID from NVML before the driver looks the GPU up
+# again. The GB200 profile stores uppercase hex (0000:0A:00.0). Real NVML
+# parses the ID as hex, so the mock has to accept either case or every lookup
+# fails and XIDs are classified as fatal.
+PCI_BUS_ID_COMPARE = "if dev != nil && dev.PciBusID == pciBusId {"
+PCI_BUS_ID_COMPARE_FOLDED = "if dev != nil && strings.EqualFold(dev.PciBusID, pciBusId) {"
+STRINGS_IMPORT = '\t"strings"\n'
 
 
 def die(message):
@@ -128,13 +147,25 @@ def patch_events(events_path):
     if "ClaimHealthControlEvent" in text:
         print(f"event wait already claims health-control events in {events_path}")
         return
-    if PENDING_XID_CALL not in text:
-        die(f"PendingXidEvent call site not found in {events_path}")
-    text = text.replace(PENDING_XID_CALL, HEALTH_XID_CALL, 1)
+    if PENDING_XID_CLAIM not in text:
+        die(f"pendingXidClaim call site not found in {events_path}")
+    text = text.replace(PENDING_XID_CLAIM, HEALTH_XID_CLAIM, 1)
     if ZERO_INSTANCE not in text:
         die(f"hardcoded GI/CI assignment not found in {events_path}")
     text = text.replace(ZERO_INSTANCE, FULL_GPU_INSTANCE, 1)
     write_if_changed(events_path, text)
+
+
+def patch_recovery_action_field(field_values_path):
+    if not field_values_path.is_file():
+        die(f"field value dispatch not found at {field_values_path}")
+    text = field_values_path.read_text()
+    if "healthRecoveryField" in text:
+        print(f"recovery action field already dispatched in {field_values_path}")
+        return
+    if GET_FIELD_VALUE not in text:
+        die(f"GetFieldValue dispatch not found in {field_values_path}")
+    write_if_changed(field_values_path, text.replace(GET_FIELD_VALUE, GET_FIELD_VALUE_HOOKED, 1))
 
 
 def remove_field_value_stub(stubs_path):
@@ -148,6 +179,23 @@ def remove_field_value_stub(stubs_path):
         print(f"GetFieldValues stub already removed from {stubs_path}")
         return
     write_if_changed(stubs_path, text.replace(GET_FIELD_VALUES_STUB + "\n", "", 1))
+
+
+def patch_pci_bus_id_lookup(device_path):
+    text = device_path.read_text()
+    # 18befbf normalizes domain width and case in canonicalPCIBusID.
+    if "canonicalPCIBusID(" in text or PCI_BUS_ID_COMPARE_FOLDED in text:
+        print(f"PCI bus ID lookup already accepts either case in {device_path}")
+        return
+    if PCI_BUS_ID_COMPARE not in text:
+        die(f"PCI bus ID comparison not found in {device_path}")
+    if STRINGS_IMPORT not in text:
+        slices_import = '\t"slices"\n'
+        if slices_import not in text:
+            die(f"cannot add strings import in {device_path}")
+        text = text.replace(slices_import, slices_import + STRINGS_IMPORT, 1)
+    text = text.replace(PCI_BUS_ID_COMPARE, PCI_BUS_ID_COMPARE_FOLDED, 1)
+    write_if_changed(device_path, text)
 
 
 def copy_sources(healthcontrol_dir, mocknvml_dir):
@@ -167,10 +215,25 @@ def copy_sources(healthcontrol_dir, mocknvml_dir):
         die("failed to strip build ignore tag from engine hooks")
     write_if_changed(mocknvml_dir / "engine" / "health_events.go", hooks)
 
+    # The current mock already exports nvmlDeviceGetFieldValues. Installing the
+    # overlay would be a second definition of that symbol. Recovery action is
+    # hooked into GetFieldValue instead.
+    dest = mocknvml_dir / "bridge" / "health_fieldvalues.go"
+    if any(
+        "func nvmlDeviceGetFieldValues(" in path.read_text()
+        for path in (mocknvml_dir / "bridge").glob("*.go")
+        if path != dest
+    ):
+        if dest.is_file():
+            dest.unlink()
+            print(f"removed {dest}; upstream already exports nvmlDeviceGetFieldValues")
+        else:
+            print("upstream already exports nvmlDeviceGetFieldValues")
+        return
     fields = strip_build_ignore((healthcontrol_dir / "overlay" / "fieldvalues.go").read_text())
     if "//go:build ignore" in fields:
         die("failed to strip build ignore tag from field values")
-    write_if_changed(mocknvml_dir / "bridge" / "health_fieldvalues.go", fields)
+    write_if_changed(dest, fields)
 
 
 def main():
@@ -187,6 +250,8 @@ def main():
     remove_field_value_stub(bridge / "stubs_generated.go")
     copy_sources(healthcontrol_dir, mocknvml_dir)
     patch_events(bridge / "events.go")
+    patch_recovery_action_field(engine / "field_values.go")
+    patch_pci_bus_id_lookup(engine / "device.go")
     print("GPU health-control mock patch applied")
 
 
