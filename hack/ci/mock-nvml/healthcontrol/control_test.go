@@ -45,19 +45,24 @@ func TestParseHealthControlKeepsExplicitInstanceIDs(t *testing.T) {
 }
 
 func TestParseRecoveryActionNames(t *testing.T) {
-	cases := map[string]uint32{
-		"NONE":                          RecoveryActionNone,
-		"GPU_RECOVERY_ACTION_NONE":      RecoveryActionNone,
-		"GPU_RESET":                     RecoveryActionGPUReset,
-		"GPU_RECOVERY_ACTION_GPU_RESET": RecoveryActionGPUReset,
-		"  node_reboot ":                RecoveryActionNodeReboot,
-		"RECOVER_IMEX_DOMAIN":           RecoveryActionRecoverIMEXDomain,
+	// The padded lowercase input is a value, not a map key: gocritic's mapKey
+	// check treats leading or trailing whitespace in a key as accidental.
+	cases := []struct {
+		input string
+		want  uint32
+	}{
+		{input: "NONE", want: RecoveryActionNone},
+		{input: "GPU_RECOVERY_ACTION_NONE", want: RecoveryActionNone},
+		{input: "GPU_RESET", want: RecoveryActionGPUReset},
+		{input: "GPU_RECOVERY_ACTION_GPU_RESET", want: RecoveryActionGPUReset},
+		{input: "  node_reboot ", want: RecoveryActionNodeReboot},
+		{input: "RECOVER_IMEX_DOMAIN", want: RecoveryActionRecoverIMEXDomain},
 	}
-	for name, want := range cases {
-		t.Run(name, func(t *testing.T) {
-			got, err := ParseRecoveryAction(name)
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			got, err := ParseRecoveryAction(tc.input)
 			require.NoError(t, err)
-			require.Equal(t, want, got)
+			require.Equal(t, tc.want, got)
 		})
 	}
 
