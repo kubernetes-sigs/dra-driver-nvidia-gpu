@@ -19,6 +19,7 @@ package fabricmanager
 import (
 	"fmt"
 	"os"
+	"slices"
 
 	"k8s.io/klog/v2"
 )
@@ -129,7 +130,7 @@ func (m *Manager) recordsPartitions(parts []Partition) error {
 		seen := make(map[int]struct{}, len(p.GPUs))
 		for _, g := range p.GPUs {
 			if _, dup := seen[g.PhysicalID]; dup {
-				return fmt.Errorf("fabricmanager: partition %d references gpuModuleID %d twice",
+				return fmt.Errorf("fabricmanager: partition %d references physicalID %d twice",
 					p.ID, g.PhysicalID)
 			}
 			seen[g.PhysicalID] = struct{}{}
@@ -147,11 +148,11 @@ func (m *Manager) GetPartition(partitionID int) (Partition, bool) {
 	return p, ok
 }
 
-// GetPartitionsBySizeByModuleID returns a map keyed by partition size (number
+// GetPartitionsBySizeByPhysicalID returns a map keyed by partition size (number
 // of GPUs in the partition) to the partitionId of the partition of that size
-// that includes the given gpuModuleID. e.g.:
+// that includes the given physicalID. e.g.:
 //
-//	gpuModuleID: 1
+//	physicalID: 1
 //	partition1:  8
 //	partition2:  4
 //	partition4:  2
@@ -159,16 +160,16 @@ func (m *Manager) GetPartition(partitionID int) (Partition, bool) {
 //
 // On a well-formed node FM produces exactly one partition per
 // (size, GPU) pair; if more than one is found this method returns an error.
-func (m *Manager) GetPartitionsBySizeByModuleID(moduleID int) (map[int]int, error) {
+func (m *Manager) GetPartitionsBySizeByPhysicalID(physicalID int) (map[int]int, error) {
 	out := make(map[int]int)
 	for _, p := range m.partitionsByID {
 		size := len(p.GPUs)
 		for _, g := range p.GPUs {
-			if g.PhysicalID == moduleID {
+			if g.PhysicalID == physicalID {
 				if existing, dup := out[size]; dup {
 					return nil, fmt.Errorf(
-						"fabricmanager: gpuModuleID %d appears in two partitions of size %d (%d and %d)",
-						moduleID, size, existing, p.ID)
+						"fabricmanager: physicalID %d appears in two partitions of size %d (%d and %d)",
+						physicalID, size, existing, p.ID)
 				}
 				out[size] = p.ID
 				break
@@ -178,15 +179,15 @@ func (m *Manager) GetPartitionsBySizeByModuleID(moduleID int) (map[int]int, erro
 	return out, nil
 }
 
-// FindPartitionByModuleIDs returns the partitionId of the FM partition whose
-// GPU member set is exactly equal to the given set of gpuModuleIDs, or
+// FindPartitionByPhysicalIDs returns the partitionId of the FM partition whose
+// GPU member set is exactly equal to the given set of physicalIDs, or
 // (0, false) if no partition matches.
-func (m *Manager) FindPartitionByModuleIDs(moduleIDs []int) (int, bool) {
-	if len(moduleIDs) == 0 {
+func (m *Manager) FindPartitionByPhysicalIDs(physicalIDs []int) (int, bool) {
+	if len(physicalIDs) == 0 {
 		return 0, false
 	}
-	want := make(map[int]struct{}, len(moduleIDs))
-	for _, id := range moduleIDs {
+	want := make(map[int]struct{}, len(physicalIDs))
+	for _, id := range physicalIDs {
 		want[id] = struct{}{}
 	}
 
@@ -209,20 +210,48 @@ func (m *Manager) FindPartitionByModuleIDs(moduleIDs []int) (int, bool) {
 }
 
 // ActivatePartition asks Fabric Manager to program the NVSwitch fabric for the
-// given partition. It is idempotent: if FM already reports the partition as
-// active (e.g. on a retried Prepare, or after a driver restart), it returns
-// nil without re-activating.
-func (m *Manager) ActivatePartition(partitionID int) error {
+// given partition. If it is inactive and does not overlap an active partition,
+// prepare (when non-nil) runs before activation. A preparation error prevents
+// activation. Already-active partitions skip both preparation and activation.
+// The caller must serialize partition lifecycle operations.
+func (m *Manager) ActivatePartition(partitionID int, prepare func() error) error {
 	if err := m.checkKnownPartition(partitionID); err != nil {
 		return err
 	}
-	activated, err := m.isPartitionActivated(partitionID)
+	partitions, err := m.client.GetSupportedFabricPartitions()
 	if err != nil {
 		return fmt.Errorf("fabricmanager: resolving partition %d activation state: %w", partitionID, err)
 	}
-	if activated {
+	var target *Partition
+	for i := range partitions {
+		if partitions[i].ID == partitionID {
+			target = &partitions[i]
+			break
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("fabricmanager: partition %d is no longer supported", partitionID)
+	}
+	if target.IsActive {
 		klog.V(4).Infof("fabricmanager: partition %d already active; skipping activation", partitionID)
 		return nil
+	}
+	// Preparation may change GPU state, so reject conflicts before invoking it.
+	physicalIDs := target.GPUPhysicalIDs()
+	for _, partition := range partitions {
+		if !partition.IsActive {
+			continue
+		}
+		for _, gpu := range partition.GPUs {
+			if slices.Contains(physicalIDs, gpu.PhysicalID) {
+				return fmt.Errorf("fabricmanager: partition %d overlaps active partition %d", partitionID, partition.ID)
+			}
+		}
+	}
+	if prepare != nil {
+		if err := prepare(); err != nil {
+			return fmt.Errorf("fabricmanager: preparing partition %d: %w", partitionID, err)
+		}
 	}
 	if err := m.client.ActivateFabricPartition(partitionID); err != nil {
 		return fmt.Errorf("fabricmanager: fmActivateFabricPartition(%d): %w", partitionID, err)

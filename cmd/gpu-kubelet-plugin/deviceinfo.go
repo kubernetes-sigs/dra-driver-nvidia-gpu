@@ -56,9 +56,8 @@ type GpuInfo struct {
 	maxCapacities PartCapacityMap
 	memSliceCount int
 
-	// Fabric Manager attributes. Populated only
-	// when an FM Manager is available and the GPU is visible to NVML at
-	// discovery time.
+	// NVML module ID, published when FM partitioning is enabled. This is
+	// distinct from FM's physical GPU ID on some platforms.
 	gpuModuleID int
 
 	// partitionsBySize maps an FM partition size (number of GPUs in the

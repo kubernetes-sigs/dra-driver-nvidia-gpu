@@ -225,9 +225,8 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	state.checkpointCleanupManager = NewCheckpointCleanupManager(state, config.clientsets.Resource)
 
 	// Attach Fabric Manager partition mappings to every discovered GPU. The
-	// gpuModuleID was resolved from NVML during GPU discovery; the FM Manager
-	// (owned by DeviceState) turns it into the size->partitionId mapping that
-	// VFIO devices publish via their parent GpuInfo.
+	// FM Manager (owned by DeviceState) matches GPU identities to the partition
+	// members. VFIO devices publish the mapping via their parent GpuInfo.
 	if state.fabricManagerPartitioningEnabled() {
 		for _, gpu := range nvdevlib.gpuInfosByUUID {
 			if err := state.attachFabricManagerPartitions(gpu); err != nil {
@@ -1405,24 +1404,26 @@ func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configa
 	return &configState, nil
 }
 
-// resolveFabricPartition resolves the FM partition formed by the given
-// set of physical GPUs, using each GPU's gpuModuleID (resolved from NVML at
-// discovery).
+// resolveFabricPartition matches the allocated GPUs to FM members by identity,
+// then selects the partition with exactly that set of FM physical IDs.
 func (s *DeviceState) resolveFabricPartition(gpus []*GpuInfo) (int, error) {
-	moduleIDs := make([]int, 0, len(gpus))
+	physicalIDs := make([]int, 0, len(gpus))
 	for _, gpu := range gpus {
-		if gpu == nil || gpu.gpuModuleID == 0 {
-			pci := ""
-			if gpu != nil {
-				pci = gpu.pciBusID
-			}
-			return 0, fmt.Errorf("fabric manager: no gpuModuleID for GPU at PCI %q", pci)
+		if gpu == nil {
+			return 0, fmt.Errorf("fabric manager: missing physical GPU identity")
 		}
-		moduleIDs = append(moduleIDs, gpu.gpuModuleID)
+		physicalID, found, err := s.fmManager.PhysicalIDForGPU(gpu.UUID, gpu.pciBusID, gpu.gpuModuleID)
+		if err != nil {
+			return 0, err
+		}
+		if !found {
+			return 0, fmt.Errorf("fabric manager: no member for GPU UUID %q PCI %q (NVML module ID %d)", gpu.UUID, gpu.pciBusID, gpu.gpuModuleID)
+		}
+		physicalIDs = append(physicalIDs, physicalID)
 	}
-	partitionID, ok := s.fmManager.FindPartitionByModuleIDs(moduleIDs)
+	partitionID, ok := s.fmManager.FindPartitionByPhysicalIDs(physicalIDs)
 	if !ok {
-		return 0, fmt.Errorf("fabric manager: GPU module set %v does not match any FM partition", moduleIDs)
+		return 0, fmt.Errorf("fabric manager: GPU physical ID set %v does not match any FM partition", physicalIDs)
 	}
 	return partitionID, nil
 }
@@ -1487,25 +1488,26 @@ func (s *DeviceState) deactivateFabricPartition(claimUID string, pc *PreparedCla
 	return nil
 }
 
-// attachFabricManagerPartitions populates the given GPU's size->partitionId
-// mapping from its gpuModuleID using the FM Manager. It is a no-op when Fabric
-// Manager partitioning is disabled. It gracefully skips GPUs whose module ID
-// could not be resolved from NVML (e.g. a GPU that was already bound to
-// vfio-pci at discovery time).
+// attachFabricManagerPartitions populates partition attributes using the GPU's
+// identity in FM. Keep the NVML module ID unchanged for the gpuModuleID attribute.
 func (s *DeviceState) attachFabricManagerPartitions(gpu *GpuInfo) error {
 	if !s.fabricManagerPartitioningEnabled() || gpu == nil {
 		return nil
 	}
-	if gpu.gpuModuleID == 0 {
-		klog.Warningf("GPU %s has no gpuModuleID; skipping Fabric Manager partition attributes. "+
-			"This happens when the GPU was bound to vfio-pci before discovery (e.g. an active passthrough claim across a plugin restart).",
-			gpu.CanonicalName())
+	physicalID, found, err := s.fmManager.PhysicalIDForGPU(gpu.UUID, gpu.pciBusID, gpu.gpuModuleID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		klog.Warningf("GPU UUID %q PCI %q has no Fabric Manager member; skipping partition attributes", gpu.UUID, gpu.pciBusID)
+		gpu.partitionsBySize = nil
 		return nil
 	}
-	bySize, err := s.fmManager.GetPartitionsBySizeByModuleID(gpu.gpuModuleID)
+	bySize, err := s.fmManager.GetPartitionsBySizeByPhysicalID(physicalID)
 	if err != nil {
-		return fmt.Errorf("getting partition-by-size mapping for moduleID %d: %w", gpu.gpuModuleID, err)
+		return fmt.Errorf("getting partition-by-size mapping for physical ID %d: %w", physicalID, err)
 	}
+	klog.V(4).Infof("Fabric Manager: GPU UUID %s PCI %s NVML module ID %d maps to physical ID %d", gpu.UUID, gpu.pciBusID, gpu.gpuModuleID, physicalID)
 	gpu.partitionsBySize = bySize
 	return nil
 }
@@ -1534,7 +1536,19 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 	// step failed) that hits an already-active partition is a no-op rather than
 	// an FM in-use error.
 	klog.V(2).Infof("Fabric Manager: activating partition %d for %d-GPU claim %s", partitionID, len(gpus), ResourceClaimToString(claim))
-	if err := s.fmManager.ActivatePartition(partitionID); err != nil {
+	if err := s.fmManager.ActivatePartition(partitionID, func() error {
+		// FM can fail with NV_ERR_IN_USE while persistence keeps a GPU
+		// initialized. VFIO Configure disables persistence too, but runs
+		// after activation and does not cover full-GPU container claims.
+		for _, gpu := range gpus {
+			// Use nvidia-smi even without a persistenced socket: VFIO cleanup
+			// can enable legacy persistence directly through NVML.
+			if err := s.nvdevlib.disableGPUPersistenceMode(gpu.pciBusID); err != nil {
+				return fmt.Errorf("disabling persistence for GPU %s (PCI %s): %w", gpu.UUID, gpu.pciBusID, err)
+			}
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("activating fabric partition %d: %w", partitionID, err)
 	}
 	return nil
