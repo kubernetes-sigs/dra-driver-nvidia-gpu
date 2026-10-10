@@ -154,7 +154,15 @@ attributes:
     string: gpu
 ```
 
-`gpuModuleID` is the physical module identifier used by Fabric Manager.
+`gpuModuleID` is the module identifier reported by NVML. It can differ from
+Fabric Manager's physical GPU ID, for example on HGX A100 systems. The driver
+matches GPUs to FM partition members by UUID or PCI address; it does not assume
+that these two numeric identifiers are equal. When FM omits UUID and PCI
+identity across the entire topology, the driver uses the documented H100-and-later
+mapping where FM physical IDs equal NVML module IDs. An all-zero PCI address
+with an empty UUID is treated as unavailable. Numeric matching never overrides
+conflicting identity information.
+See the [FM API data structures](https://docs.nvidia.com/datacenter/tesla/fabric-manager-user-guide/index.html#data-structures).
 `partitionN` is the ID of the reported N-GPU partition containing that device.
 The driver publishes a `partitionN` attribute only when Fabric Manager reports
 a partition of that size containing the GPU.
@@ -293,8 +301,8 @@ kubectl logs -n dra-driver-nvidia-gpu \
 |---|---|
 | `fabric manager library not found` | Verify that `libnvfm.so` is installed under `nvidiaDriverRoot` in a standard library directory. |
 | `Fabric Manager could not be opened` | Verify that Fabric Manager is running with `FABRIC_MODE=1` and that its socket or configured address is reachable from the plugin. |
-| `GPU module set [...] does not match any FM partition` | Compare the allocated devices with their `partitionN` attributes. Use one claim with the correct `count: N` and `matchAttribute`. |
-| `no gpuModuleID` or missing FM attributes | Verify NVML visibility and the reported FM topology. A GPU already bound to `vfio-pci` when the plugin starts might not have a resolvable module ID. |
+| `GPU physical ID set [...] does not match any FM partition` | Compare the allocated devices with their `partitionN` attributes. Use one claim with the correct `count: N` and `matchAttribute`. |
+| `no member for GPU` or missing FM attributes | Compare the GPU UUID and PCI address with the members returned by FM, or the NVML module ID when FM omits identities. GPUs missing from the FM topology have no partition attributes; conflicting identities are rejected. |
 | No FM attributes on the node | Confirm that the gate is enabled and that the driver detects an NVSwitch or NVLink 5 switch-managed fabric on the node. |
 
 If a VFIO workload remains in `ContainerCreating` after its partition is

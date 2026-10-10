@@ -408,6 +408,7 @@ func TestSharingReferenceCountingHelpers(t *testing.T) {
 
 type testFMClient struct {
 	partitions     []fabricmanager.Partition
+	activatedIDs   []int
 	deactivatedIDs []int
 }
 
@@ -416,9 +417,22 @@ func (c *testFMClient) Shutdown() error { return nil }
 func (c *testFMClient) GetSupportedFabricPartitions() ([]fabricmanager.Partition, error) {
 	return c.partitions, nil
 }
-func (c *testFMClient) ActivateFabricPartition(id int) error { return nil }
+func (c *testFMClient) ActivateFabricPartition(id int) error {
+	c.activatedIDs = append(c.activatedIDs, id)
+	for i := range c.partitions {
+		if c.partitions[i].ID == id {
+			c.partitions[i].IsActive = true
+		}
+	}
+	return nil
+}
 func (c *testFMClient) DeactivateFabricPartition(id int) error {
 	c.deactivatedIDs = append(c.deactivatedIDs, id)
+	for i := range c.partitions {
+		if c.partitions[i].ID == id {
+			c.partitions[i].IsActive = false
+		}
+	}
 	return nil
 }
 func (c *testFMClient) IsFabricPartitionActive(id int) (bool, error) {
