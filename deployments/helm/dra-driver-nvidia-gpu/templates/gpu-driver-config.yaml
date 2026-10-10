@@ -1,0 +1,19 @@
+{{/* Gate both creation and consumption so disabled installations remain unchanged. */}}
+{{- if and .Values.resources.gpus.enabled (and .Values.featureGates (and (hasKey .Values.featureGates "PerNodeGPUConfig") .Values.featureGates.PerNodeGPUConfig)) }}
+{{- $defaultProfile := .Values.gpuDriverConfig.default }}
+{{- if and $defaultProfile (not (hasKey .Values.gpuDriverConfig.map $defaultProfile)) }}
+{{- fail (printf "gpuDriverConfig default profile %q is not present in gpuDriverConfig.map" $defaultProfile) }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dra-driver-nvidia-gpu.gpuDriverConfigMapName" . }}
+  namespace: {{ include "dra-driver-nvidia-gpu.namespace" . }}
+  labels:
+    {{- include "dra-driver-nvidia-gpu.labels" . | nindent 4 }}
+data:
+{{- range $name, $contents := .Values.gpuDriverConfig.map }}
+  {{ $name }}: |-
+{{ $contents | indent 4 }}
+{{- end }}
+{{- end }}

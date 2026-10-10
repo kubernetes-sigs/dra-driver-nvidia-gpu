@@ -44,6 +44,76 @@ Disable a plugin you do not need with no impact on the other:
 
 When GPU allocation is enabled, the chart also creates DeviceClass resources for full GPUs, MIG slices, and VFIO passthrough. Individual device types still require the appropriate hardware and [feature gates](feature-gates/).
 
+## GPU availability profiles
+
+| Value | Default | Description |
+|---|---|---|
+| `gpuDriverConfig.default` | `""` | Profile selected when a node has no `nvidia.com/dra-driver-gpu.config` label. Empty leaves device availability unchanged on unlabeled nodes. A non-empty name must exist in `gpuDriverConfig.map`. |
+| `gpuDriverConfig.map` | `container`, `passthrough` profiles | Named, versioned DriverConfig YAML documents. Each profile filters which discovered `gpu`, `mig`, and `vfio` devices remain allocatable and published. Feature gates remain release-wide. |
+
+The profiles are used only when `featureGates.PerNodeGPUConfig=true`. The gate
+is disabled by default, so default installations do not create or mount the
+ConfigMap and continue to publish the existing all-types device inventory.
+The ConfigMap name, configuration directory, and
+`nvidia.com/dra-driver-gpu.config` selector label are fixed implementation
+constants rather than Helm values. With the gate enabled, an unlabeled node and
+an empty `gpuDriverConfig.default` use no profile, so release-wide Helm settings
+and feature gates continue to determine publication.
+
+The selected profile filters the node's allocatable inventory at startup.
+Prepare rejects a stale allocation for a filtered device type. Metadata for
+filtered devices is retained only for checkpoint-driven teardown, so Unprepare
+can complete claims prepared under an earlier profile.
+
+Profiles are resolved only at startup. Node-label and ConfigMap profile-content
+changes do not roll plugin pods automatically. Changing
+`gpuDriverConfig.default` through Helm changes the pod environment and triggers
+the DaemonSet's configured rollout strategy for all plugin pods. Drain every
+unlabeled node before changing this default. Any process restart re-resolves
+current Node and ConfigMap state. This Alpha implementation does not persist the
+previously applied profile or reject every config change while claims are active.
+A label or explicit default that names a missing or invalid profile prevents
+the plugin from starting, which also blocks Unprepare on that node until the
+configuration is corrected.
+
+Before changing a node label or selected profile, and before upgrading the
+chart while the gate is enabled:
+
+1. Cordon and drain the node:
+
+   ```bash
+   kubectl cordon <node>
+   kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
+   ```
+
+2. Wait for GPU ResourceClaim workloads to terminate and for their resources to
+   be unprepared. Do not proceed while the node has active prepared claims.
+3. Update the label or ConfigMap. For example:
+
+   ```bash
+   kubectl label node <node> --overwrite \
+       nvidia.com/dra-driver-gpu.config=passthrough
+   ```
+
+4. Find and delete the kubelet-plugin DaemonSet pod on that node so it restarts
+   with the new startup profile:
+
+   ```bash
+   kubectl -n <driver-namespace> get pods -o wide
+   kubectl -n <driver-namespace> delete pod <kubelet-plugin-pod-on-node>
+   ```
+
+   Changing `gpuDriverConfig.default` through Helm updates the pod template and
+   restarts all plugin pods according to the DaemonSet strategy. Before making
+   that change, cordon and drain every unlabeled node, not just one node.
+5. Verify the node's `gpu.nvidia.com` ResourceSlices advertise the expected
+   device types, then run `kubectl uncordon <node>`.
+
+Draining remains mandatory because this initial implementation has no complete
+active-claim transition guard. To disable the gate safely, keep nodes cordoned
+and drained, remove profile labels, set `gpuDriverConfig.default` to empty, and
+restart the plugin pods before disabling the gate and uncordoning.
+
 ## ComputeDomain IMEX
 
 | Value | Default | Description |

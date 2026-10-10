@@ -116,6 +116,25 @@ resources:
       #     IMEX_NODE_DISCONNECTED_GRACE_TIME: "60"
       config: {}
 
+# Startup-only, per-node GPU device-type availability profiles.
+# Requires featureGates.PerNodeGPUConfig=true. When the gate is disabled, these
+# values do not add resources, mounts, or environment variables to the deployment.
+# The ConfigMap name and DRA-owned node-label key are fixed implementation
+# constants. ConfigMap keys are profile names.
+gpuDriverConfig:
+  # Profile used when a node has no explicit selection. Empty leaves device
+  # availability unchanged on unlabeled nodes.
+  default: ""
+  map:
+    container: |-
+      version: v1alpha1
+      gpu:
+        advertisedDeviceTypes: [gpu, mig]
+    passthrough: |-
+      version: v1alpha1
+      gpu:
+        advertisedDeviceTypes: [vfio]
+
 # Feature gates configuration following Kubernetes patterns
 # Configure feature gates as key-value pairs (feature_name: true/false)
 # Examples:
@@ -128,6 +147,7 @@ resources:
 #   HostManagedIMEXDaemon: false       # Gate allowing resources.computeDomains.imex.mode=hostManaged
 #   DRAListTypeAttributes: false       # Publish list-valued DRA device attributes
 #   ConsumableShares: false            # Publish consumable capacity and multi-allocation support for devices
+#   PerNodeGPUConfig: false            # Select startup-only GPU availability profiles per node
 featureGates: {}
 
 # Log verbosity for all components. Zero or greater, higher number means higher

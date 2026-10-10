@@ -103,6 +103,10 @@ const (
 	// via --consumable-shares. Note: MPS sharing is not supported when consumable
 	// shares is enabled.
 	ConsumableShares featuregate.Feature = "ConsumableShares"
+
+	// PerNodeGPUConfig enables startup-only selection of GPU device-type
+	// availability profiles through a DRA-owned node label.
+	PerNodeGPUConfig featuregate.Feature = "PerNodeGPUConfig"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -203,6 +207,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
 			Version:    version.MajorMinor(0, 5),
+		},
+	},
+	PerNodeGPUConfig: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 6),
 		},
 	},
 }

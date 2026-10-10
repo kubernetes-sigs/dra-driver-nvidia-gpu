@@ -25,12 +25,199 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/component-base/featuregate"
+	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/fabricmanager"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
+
+type fakeVfioDeviceManager struct {
+	unconfigure func(*VfioDeviceInfo) error
+}
+
+func (f *fakeVfioDeviceManager) Configure(context.Context, *VfioDeviceInfo) error {
+	return nil
+}
+
+func (f *fakeVfioDeviceManager) Unconfigure(_ context.Context, info *VfioDeviceInfo) error {
+	return f.unconfigure(info)
+}
+
+// TestPrepareRejectsDeviceFilteredByDriverConfig prevents stale allocations from bypassing the selected profile.
+func TestPrepareRejectsDeviceFilteredByDriverConfig(t *testing.T) {
+	gpu := &AllocatableDevice{Gpu: &GpuInfo{minor: 0, UUID: "GPU-0000", pciBusID: "0000:01:00.0"}}
+	vfio := &AllocatableDevice{Vfio: &VfioDeviceInfo{index: 0, UUID: "GPU-0000", PciBusID: "0000:01:00.0"}}
+	perGPU := &PerGPUAllocatableDevices{
+		allocatablesMap: map[PCIBusID]AllocatableDevices{
+			"0000:01:00.0": {
+				gpu.CanonicalName():  gpu,
+				vfio.CanonicalName(): vfio,
+			},
+		},
+	}
+	driverConfig := &DriverConfig{
+		Version: driverConfigVersion,
+		GPU:     &GPUDriverConfig{AdvertisedDeviceTypes: []string{GpuDeviceType}},
+	}
+	perGPU.ApplyDriverConfig(driverConfig)
+
+	state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
+	state.config = &Config{flags: &Flags{nodeName: "node-a"}, driverConfig: driverConfig}
+	state.perGPUAllocatable = perGPU
+	claim := &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{UID: "claim-uid"},
+		Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{
+					Results: []resourceapi.DeviceRequestAllocationResult{
+						{Driver: DriverName, Device: vfio.CanonicalName()},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := state.Prepare(context.Background(), claim)
+
+	require.ErrorContains(t, err, `allocated device "gpu-vfio-0" is excluded by the selected DriverConfig profile`)
+}
+
+// TestPrepareMissingAllowedDeviceUsesExistingPath preserves stale-sibling handling.
+func TestPrepareMissingAllowedDeviceUsesExistingPath(t *testing.T) {
+	const pciBusID = "0000:01:00.0"
+	gpu := &AllocatableDevice{Gpu: &GpuInfo{minor: 0, UUID: "GPU-0000", pciBusID: pciBusID}}
+	perGPU := &PerGPUAllocatableDevices{
+		allocatablesMap: map[PCIBusID]AllocatableDevices{
+			pciBusID: {gpu.CanonicalName(): gpu},
+		},
+	}
+	driverConfig := &DriverConfig{
+		Version: driverConfigVersion,
+		GPU:     &GPUDriverConfig{AdvertisedDeviceTypes: []string{GpuDeviceType, VfioDeviceType}},
+	}
+	perGPU.ApplyDriverConfig(driverConfig)
+
+	state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
+	state.config = &Config{flags: &Flags{nodeName: "node-a"}, driverConfig: driverConfig}
+	state.perGPUAllocatable = perGPU
+	claim := &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{UID: "claim-uid"},
+		Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{
+					Results: []resourceapi.DeviceRequestAllocationResult{
+						{Driver: DriverName, Device: "gpu-vfio-0"},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := state.Prepare(context.Background(), claim)
+
+	require.ErrorContains(t, err, `allocatable not found for device "gpu-vfio-0"`)
+	require.NotContains(t, err.Error(), "DriverConfig profile")
+}
+
+// TestUnprepareCheckpointedDeviceFilteredByDriverConfig keeps teardown independent of current profile selection.
+func TestUnprepareCheckpointedDeviceFilteredByDriverConfig(t *testing.T) {
+	gates := map[string]bool{
+		string(featuregates.PassthroughSupport):        true,
+		string(featuregates.DynamicMIG):                false,
+		string(featuregates.MPSSupport):                false,
+		string(featuregates.TimeSlicingSettings):       false,
+		string(featuregates.ConsumableShares):          false,
+		string(featuregates.FabricManagerPartitioning): false,
+	}
+	original := make(map[string]bool, len(gates))
+	for gate := range gates {
+		original[gate] = featuregates.FeatureGates().Enabled(featuregate.Feature(gate))
+	}
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(gates))
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(original))
+	})
+
+	const claimUID = "claim-uid"
+	gpuInfo := &GpuInfo{minor: 0, UUID: "GPU-0000", pciBusID: "0000:01:00.0"}
+	gpu := &AllocatableDevice{Gpu: gpuInfo}
+	vfioInfo := &VfioDeviceInfo{index: 0, UUID: gpuInfo.UUID, PciBusID: gpuInfo.pciBusID}
+	vfio := &AllocatableDevice{Vfio: vfioInfo}
+	perGPU := &PerGPUAllocatableDevices{
+		allocatablesMap: map[PCIBusID]AllocatableDevices{
+			gpuInfo.pciBusID: {
+				gpu.CanonicalName():  gpu,
+				vfio.CanonicalName(): vfio,
+			},
+		},
+	}
+	driverConfig := &DriverConfig{
+		Version: driverConfigVersion,
+		GPU:     &GPUDriverConfig{AdvertisedDeviceTypes: []string{GpuDeviceType, MigStaticDeviceType}},
+	}
+	perGPU.ApplyDriverConfig(driverConfig)
+	checkpoint := &Checkpoint{V2: &CheckpointV2{
+		PreparedClaims: PreparedClaimsByUID{
+			claimUID: {
+				CheckpointState: ClaimCheckpointStatePrepareCompleted,
+				Status: resourceapi.ResourceClaimStatus{
+					Allocation: &resourceapi.AllocationResult{
+						Devices: resourceapi.DeviceAllocationResult{
+							Results: []resourceapi.DeviceRequestAllocationResult{
+								{Driver: DriverName, Device: gpu.CanonicalName()},
+							},
+						},
+					},
+				},
+				PreparedDevices: PreparedDevices{
+					{
+						Devices: PreparedDeviceList{
+							{
+								Vfio: &PreparedVfioDevice{
+									Info: vfioInfo,
+									Device: &CheckpointedDevice{
+										DeviceName: vfio.CanonicalName(),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}}
+	state := newCleanupTestDeviceState(t, checkpoint)
+	state.config = &Config{flags: &Flags{nodeName: "node-a"}, driverConfig: driverConfig}
+	state.perGPUAllocatable = perGPU
+	state.cdi = &CDIHandler{cdiRoot: t.TempDir()}
+	state.nvdevlib = &deviceLib{vfioEnabled: true}
+	var unconfiguredPCIBusID string
+	state.vfioPciManager = &fakeVfioDeviceManager{
+		unconfigure: func(info *VfioDeviceInfo) error {
+			unconfiguredPCIBusID = info.PciBusID
+			// Avoid sibling rediscovery, which is independent of the Unprepare-only lookup
+			// under test and requires a full NVML fake.
+			state.nvdevlib.vfioEnabled = false
+			return nil
+		},
+	}
+	claimRef := kubeletplugin.NamespacedObject{
+		NamespacedName: types.NamespacedName{Namespace: "default", Name: "claim"},
+		UID:            types.UID(claimUID),
+	}
+
+	_, err := state.Unprepare(context.Background(), claimRef)
+
+	require.NoError(t, err)
+	require.Equal(t, vfioInfo.PciBusID, unconfiguredPCIBusID)
+	updated, err := state.getCheckpoint(context.Background())
+	require.NoError(t, err)
+	require.NotContains(t, updated.V2.PreparedClaims, claimUID)
+}
 
 func TestValidateNoOverlappingPreparedDevices(t *testing.T) {
 	perGPU := &PerGPUAllocatableDevices{
@@ -133,6 +320,7 @@ func TestGetAllocatableDevicesForClaim(t *testing.T) {
 	gpu0 := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0000"}}
 	vfio1 := &AllocatableDevice{Vfio: &VfioDeviceInfo{UUID: "VFIO-0001"}}
 	mig2 := &AllocatableDevice{MigDynamic: &MigSpec{Parent: &GpuInfo{UUID: "GPU-0002"}}}
+	gpu3 := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0003"}}
 	claimStatus := func(results ...resourceapi.DeviceRequestAllocationResult) resourceapi.ResourceClaimStatus {
 		return resourceapi.ResourceClaimStatus{
 			Allocation: &resourceapi.AllocationResult{
@@ -153,6 +341,7 @@ func TestGetAllocatableDevicesForClaim(t *testing.T) {
 					"mig-2": mig2,
 				},
 			},
+			unprepareOnlyDevices: AllocatableDevices{"gpu-3": gpu3},
 		},
 	}
 
@@ -196,6 +385,15 @@ func TestGetAllocatableDevicesForClaim(t *testing.T) {
 			),
 			want: AllocatableDevices{
 				"mig-2": mig2,
+			},
+		},
+		{
+			name: "returns unprepare-only device",
+			status: claimStatus(
+				resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: "gpu-3"},
+			),
+			want: AllocatableDevices{
+				"gpu-3": gpu3,
 			},
 		},
 		{
