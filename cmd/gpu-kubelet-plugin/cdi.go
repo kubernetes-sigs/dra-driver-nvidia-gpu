@@ -21,6 +21,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -125,8 +127,10 @@ func (cdi *CDIHandler) GetCommonEditsCached() (*cdiapi.ContainerEdits, error) {
 	t0 := time.Now()
 	v, err := cdi.nvcdiClaim.GetCommonEdits()
 	klog.V(7).Infof("t_cdi_get_common_edits %.3f s", time.Since(t0).Seconds())
-
 	if err != nil {
+		return nil, err
+	}
+	if err := validateCommonDeviceNodes(v); err != nil {
 		return nil, err
 	}
 	cdi.specCache.Set(key, v, time.Duration(5*time.Minute))
@@ -162,10 +166,84 @@ func (cdi *CDIHandler) GetDeviceSpecsByUUIDCached(uuid string) ([]cdispec.Device
 	if err != nil {
 		return nil, err
 	}
+	if err := validateGPUDeviceNodes(uuid, devs); err != nil {
+		return nil, err
+	}
 	cdi.specCache.Set(key, devs, time.Duration(5*time.Minute))
 	clone := make([]cdispec.Device, len(devs))
 	copy(clone, devs)
 	return clone, nil
+}
+
+// InvalidateDeviceSpec removes cached CDI data for a GPU whose device minor
+// may have changed after rebinding it to the NVIDIA driver.
+func (cdi *CDIHandler) InvalidateDeviceSpec(uuid string) {
+	cdi.specCache.Delete(uuid)
+}
+
+// validateCommonDeviceNodes verifies that nvcdi emitted the global NVIDIA
+// control and UVM device nodes required by GPU and MIG workloads. nvcdi's
+// character-device discoverer resolves these paths against its configured
+// devRoot and omits nodes that do not exist there.
+func validateCommonDeviceNodes(edits *cdiapi.ContainerEdits) error {
+	requiredPaths := []string{
+		"/dev/nvidiactl",
+		"/dev/nvidia-uvm",
+		"/dev/nvidia-uvm-tools",
+	}
+	foundPaths := make(map[string]struct{}, len(requiredPaths))
+	if edits != nil && edits.ContainerEdits != nil {
+		for _, node := range edits.DeviceNodes {
+			if node != nil {
+				foundPaths[node.Path] = struct{}{}
+			}
+		}
+	}
+
+	var missingPaths []string
+	for _, path := range requiredPaths {
+		if _, found := foundPaths[path]; !found {
+			missingPaths = append(missingPaths, path)
+		}
+	}
+	if len(missingPaths) > 0 {
+		return fmt.Errorf("failed to validate NVIDIA CDI common edits: missing required device nodes %s; NVIDIA driver installation may be incomplete", strings.Join(missingPaths, ", "))
+	}
+	return nil
+}
+
+// validateGPUDeviceNodes verifies that nvcdi found a per-GPU device node.
+func validateGPUDeviceNodes(uuid string, devices []cdispec.Device) error {
+	const deviceNodePrefix = "/dev/nvidia"
+
+	for _, device := range devices {
+		for _, node := range device.ContainerEdits.DeviceNodes {
+			if node == nil {
+				continue
+			}
+			minor := strings.TrimPrefix(node.Path, deviceNodePrefix)
+			if minor == node.Path || minor == "" {
+				continue
+			}
+			if _, err := strconv.ParseUint(minor, 10, 32); err == nil {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("failed to validate NVIDIA CDI device spec for GPU %q: missing /dev/nvidia<minor> device node; NVIDIA driver installation may be incomplete", uuid)
+}
+
+// requiresNVIDIADeviceNodes reports whether the claim needs NVIDIA control and
+// GPU device nodes. VFIO-only claims use /dev/vfio devices instead.
+func requiresNVIDIADeviceNodes(preparedDevices PreparedDevices) bool {
+	for _, group := range preparedDevices {
+		for _, device := range group.Devices {
+			if device.Type() == GpuDeviceType || device.Type() == PreparedMigDeviceType {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Note(JP): for a regular GPU, this canonical name is for example `gpu-0`, with
@@ -179,14 +257,18 @@ func (cdi *CDIHandler) GetDeviceSpecsByUUIDCached(uuid string) ([]cdispec.Device
 // full-GPU CDI spec during prepare() (or: to cache it, and re-generate it every
 // now and then during this program's lifetime).
 func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices PreparedDevices) error {
-	// Generate those parts of the container spec that are not device-specific
-	// (to inject e.g. driver library mounts and meta devices). Note that
-	// `nvcdiDevice.GetCommonEdits()` may usually initialize nvsandboxutilslib
-	// under the hood -- we now prevent that from happening by using
-	// `nvcdi.FeatureDisableNvsandboxUtils` above.
-	commonEdits, err := cdi.GetCommonEditsCached()
-	if err != nil {
-		return fmt.Errorf("failed to get common CDI spec edits: %w", err)
+	commonEdits := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{}}
+	if requiresNVIDIADeviceNodes(preparedDevices) {
+		// Generate those parts of the container spec that are not device-specific
+		// (to inject e.g. driver library mounts and meta devices). Note that
+		// `nvcdiDevice.GetCommonEdits()` may usually initialize nvsandboxutilslib
+		// under the hood -- we now prevent that from happening by using
+		// `nvcdi.FeatureDisableNvsandboxUtils` above.
+		var err error
+		commonEdits, err = cdi.GetCommonEditsCached()
+		if err != nil {
+			return fmt.Errorf("failed to get common CDI spec edits: %w", err)
+		}
 	}
 
 	var deviceSpecs []cdispec.Device
