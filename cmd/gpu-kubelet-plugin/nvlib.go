@@ -1569,6 +1569,27 @@ func (l deviceLib) disableGPUPersistenceMode(pciAddress string) error {
 	return nil
 }
 
+// Reset the GPU while it stays bound to the nvidia driver. nvidia-smi refuses
+// the reset while any process, including an NVML client, has the GPU open.
+//
+// Note: we `chroot` into the device root to properly run nvidia-smi.
+func (l deviceLib) resetGPU(pciAddress string) error {
+	cmd := exec.Command(
+		"chroot",
+		l.devRoot,
+		"nvidia-smi",
+		"-i",
+		pciAddress,
+		"-r")
+
+	output, err := cmd.CombinedOutput()
+	klog.V(4).Infof("resetGPU command: %s, output: \n%s", cmd.String(), string(output))
+	if err != nil {
+		return fmt.Errorf("error running nvidia-smi: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
 // Enable GPU Persistence mode
 //
 // While persistence mode disablement can be done using nvidia-smi, we cannot

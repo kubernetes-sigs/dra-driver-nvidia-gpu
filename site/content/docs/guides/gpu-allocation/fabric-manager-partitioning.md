@@ -78,6 +78,19 @@ VFIO cleanup continues to enable persistence when returning GPUs to the
 NVIDIA driver. Both paths enable persistence rather than restoring its original
 setting; the next partition activation disables it again.
 
+## GPU reset on HGX A100
+
+On HGX A100 systems, Fabric Manager trains GPU NVLinks in software during
+partition activation, and the links only train from reset.
+After disabling persistence on an inactive partition, the driver resets each
+Ampere GPU with `nvidia-smi -r` while the GPU is still bound to the NVIDIA
+driver, and then activates the partition.
+If a reset fails, for example because another process still has the GPU open,
+the driver returns an error without activating the partition.
+An already-active partition skips the reset, so a retried Prepare does not
+reset GPUs whose NVLinks are already trained.
+HGX H100 and later systems train NVLinks in hardware and do not need this reset.
+
 ## Prerequisites
 
 Before enabling the feature:

@@ -1559,6 +1559,18 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 				return fmt.Errorf("disabling persistence for GPU %s (PCI %s): %w", gpu.UUID, gpu.pciBusID, err)
 			}
 		}
+		// Software-trained NVLinks (HGX A100) only train from reset, and a
+		// reset after activation leaves them inactive. Preparation runs only
+		// for an inactive partition, so a retry never resets an active one.
+		for _, gpu := range gpus {
+			if !gpu.requiresResetBeforeFabricActivation() {
+				continue
+			}
+			klog.V(2).Infof("Fabric Manager: resetting %s GPU %s (PCI %s) before activating partition %d", gpu.architecture, gpu.UUID, gpu.pciBusID, partitionID)
+			if err := s.nvdevlib.resetGPU(gpu.pciBusID); err != nil {
+				return fmt.Errorf("resetting GPU %s (PCI %s): %w", gpu.UUID, gpu.pciBusID, err)
+			}
+		}
 		return nil
 	}); err != nil {
 		return fmt.Errorf("activating fabric partition %d: %w", partitionID, err)
