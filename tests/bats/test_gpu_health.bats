@@ -158,7 +158,7 @@ wait_for_gpu_log() {
     "--set" "kubeletPlugin.containers.gpus.env[1].name=MOCK_NVML_HEALTH_CONTROL"
     "--set" "kubeletPlugin.containers.gpus.env[1].value=/driver-root/health-control.json"
     "--set" "kubeletPlugin.containers.gpus.env[2].name=ADDITIONAL_XIDS_TO_IGNORE"
-    "--set" "kubeletPlugin.containers.gpus.env[2].value=79"
+    "--set-string" "kubeletPlugin.containers.gpus.env[2].value=79"
   )
   if [ "${DISABLE_COMPUTE_DOMAINS:-}" = "true" ]; then
     _iargs+=("--set" "resources.computeDomains.enabled=false")
