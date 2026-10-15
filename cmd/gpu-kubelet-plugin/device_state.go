@@ -1554,6 +1554,19 @@ func (s *DeviceState) rejectVFIOFMPartitionForMultiAmpereGPUs(claim *resourceapi
 	return nil
 }
 
+func (s *DeviceState) claimHasVfioDevice(claim *resourceapi.ResourceClaim) bool {
+	for _, r := range claim.Status.Allocation.Devices.Results {
+		if r.Driver != DriverName {
+			continue
+		}
+		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
+		if device != nil && device.Type() == VfioDeviceType {
+			return true
+		}
+	}
+	return false
+}
+
 // activateFabricPartition activates the FM partition formed by the physical
 // GPUs backing the claim's allocation results. The caller must ensure
 // fabricManagerPartitioningEnabled() is true and that the claim is allocated.
@@ -1587,6 +1600,11 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 			if err := s.nvdevlib.disableGPUPersistenceMode(gpu.pciBusID); err != nil {
 				return fmt.Errorf("disabling persistence for GPU %s (PCI %s): %w", gpu.UUID, gpu.pciBusID, err)
 			}
+		}
+		// A single-GPU partition has no NVLinks to train, and vfio-pci
+		// resets the GPU after activation regardless.
+		if len(gpus) == 1 && s.claimHasVfioDevice(claim) {
+			return nil
 		}
 		// HGX-2 and HGX A100 NVLinks only train from reset, and a reset
 		// after activation leaves them inactive. Preparation runs only for
