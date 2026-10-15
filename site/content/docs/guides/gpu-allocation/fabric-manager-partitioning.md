@@ -78,18 +78,30 @@ VFIO cleanup continues to enable persistence when returning GPUs to the
 NVIDIA driver. Both paths enable persistence rather than restoring its original
 setting; the next partition activation disables it again.
 
-## GPU reset on HGX A100
+## GPU reset on HGX A100 and HGX-2
 
-On HGX A100 systems, Fabric Manager trains GPU NVLinks in software during
-partition activation, and the links only train from reset.
-After disabling persistence on an inactive partition, the driver resets each
-Ampere GPU with `nvidia-smi -r` while the GPU is still bound to the NVIDIA
-driver, and then activates the partition.
-If a reset fails, for example because another process still has the GPU open,
+On HGX A100 and HGX-2 systems, Fabric Manager trains GPU NVLinks in software
+during partition activation, and the links only train from reset.
+After disabling persistence on an inactive partition, the driver resets all of
+the partition's GPUs together with a single `nvidia-smi -r` command while they
+are still bound to the NVIDIA driver, and then activates the partition.
+GPUs outside the partition are not reset.
+The reset is a single command because Volta GPUs with NVLink connections
+cannot be reset one at a time.
+If the reset fails, for example because another process still has a GPU open,
 the driver returns an error without activating the partition.
 An already-active partition skips the reset, so a retried Prepare does not
 reset GPUs whose NVLinks are already trained.
 HGX H100 and later systems train NVLinks in hardware and do not need this reset.
+
+VFIO passthrough of a multi-GPU partition is not supported on HGX A100 or HGX-2.
+Fabric Manager requires the guest to start without another GPU reset after
+activation, but `vfio-pci` resets the GPU when the device is opened, and the VMM
+resets it again when the VM starts, using a bus reset if function reset is
+unavailable. Either reset leaves the guest's NVLinks inactive.
+Prepare fails for such claims before changing any GPU state.
+VFIO claims for single-GPU partitions and full-GPU claims for any partition size
+are not affected.
 
 ## Prerequisites
 

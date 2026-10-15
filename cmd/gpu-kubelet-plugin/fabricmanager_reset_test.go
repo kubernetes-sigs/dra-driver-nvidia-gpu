@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -39,12 +40,14 @@ func persistenceCommands(smi fakePersistenceSMI, inventory map[int]*GpuInfo, mod
 	return cmds
 }
 
-func resetCommands(smi fakePersistenceSMI, inventory map[int]*GpuInfo, modules []int) []string {
-	var cmds []string
+// The whole partition is reset in one invocation, because pre-Ampere GPUs with
+// NVLink connections cannot be reset one at a time.
+func resetCommand(smi fakePersistenceSMI, inventory map[int]*GpuInfo, modules []int) string {
+	var pci []string
 	for _, module := range modules {
-		cmds = append(cmds, smi.lib.devRoot+" nvidia-smi -i "+inventory[module].pciBusID+" -r")
+		pci = append(pci, inventory[module].pciBusID)
 	}
-	return cmds
+	return smi.lib.devRoot + " nvidia-smi -i " + strings.Join(pci, ",") + " -r"
 }
 
 func TestFabricPartitionResetBeforeActivation(t *testing.T) {
@@ -58,27 +61,39 @@ func TestFabricPartitionResetBeforeActivation(t *testing.T) {
 		{architecture: "Blackwell"},
 		{architecture: ""},
 	} {
-		for _, vfio := range []bool{false, true} {
-			t.Run(fmt.Sprintf("arch=%q/vfio=%t", tc.architecture, vfio), func(t *testing.T) {
-				smi := newFakePersistenceSMI(t, 0)
-				partitions, inventory := a100FabricIdentityFixture()
-				setFabricTestArchitecture(inventory, tc.architecture)
-				modules := []int{1, 2}
-				want := persistenceCommands(smi, inventory, modules)
-				if tc.wantReset {
-					want = append(want, resetCommands(smi, inventory, modules)...)
-				}
-				client := &persistenceFMClient{testFMClient: &testFMClient{partitions: partitions}, beforeActivate: func() {
-					require.Equal(t, want, smi.commands(t), "GPUs must be reset after disabling persistence and before FM activation")
-				}}
-				state, claim := persistenceClaimState(t, client, smi.lib, inventory, modules, vfio)
-				require.NoError(t, state.activateFabricPartition(claim))
-				require.Equal(t, []int{17}, client.activatedIDs)
+		for _, modules := range [][]int{{1}, {1, 2}} {
+			for _, vfio := range []bool{false, true} {
+				t.Run(fmt.Sprintf("arch=%q/GPUs=%d/vfio=%t", tc.architecture, len(modules), vfio), func(t *testing.T) {
+					smi := newFakePersistenceSMI(t, 0)
+					partitions, inventory := a100FabricIdentityFixture()
+					setFabricTestArchitecture(inventory, tc.architecture)
+					partitionID := map[int]int{1: 31, 2: 17}[len(modules)]
+					client := &persistenceFMClient{testFMClient: &testFMClient{partitions: partitions}}
+					state, claim := persistenceClaimState(t, client, smi.lib, inventory, modules, vfio)
 
-				require.NoError(t, state.activateFabricPartition(claim))
-				require.Equal(t, []int{17}, client.activatedIDs)
-				require.Equal(t, want, smi.commands(t), "retry of an active partition must not reset its GPUs")
-			})
+					if tc.wantReset && vfio && len(modules) > 1 {
+						client.beforeActivate = func() { t.Fatal("rejected VFIO handoff must not activate the partition") }
+						err := state.activateFabricPartition(claim)
+						require.ErrorContains(t, err, fmt.Sprintf("VFIO passthrough of 2-GPU fabric partition %d is not supported on %s GPUs", partitionID, tc.architecture))
+						require.Empty(t, smi.commands(t), "rejection must happen before persistence or reset changes")
+						return
+					}
+
+					want := persistenceCommands(smi, inventory, modules)
+					if tc.wantReset {
+						want = append(want, resetCommand(smi, inventory, modules))
+					}
+					client.beforeActivate = func() {
+						require.Equal(t, want, smi.commands(t), "GPUs must be reset after disabling persistence and before FM activation")
+					}
+					require.NoError(t, state.activateFabricPartition(claim))
+					require.Equal(t, []int{partitionID}, client.activatedIDs)
+
+					require.NoError(t, state.activateFabricPartition(claim))
+					require.Equal(t, []int{partitionID}, client.activatedIDs)
+					require.Equal(t, want, smi.commands(t), "retry of an active partition must not reset its GPUs")
+				})
+			}
 		}
 	}
 }
@@ -91,19 +106,19 @@ func TestFabricPartitionResetOnPartitionChange(t *testing.T) {
 	setFabricTestArchitecture(inventory, "Ampere")
 	client := &persistenceFMClient{testFMClient: &testFMClient{partitions: partitions}, beforeActivate: func() {}}
 
-	single, singleClaim := persistenceClaimState(t, client, smi.lib, inventory, []int{1}, true)
+	single, singleClaim := persistenceClaimState(t, client, smi.lib, inventory, []int{1}, false)
 	require.NoError(t, single.activateFabricPartition(singleClaim))
 	require.Equal(t, []int{31}, client.activatedIDs)
 	require.NoError(t, client.DeactivateFabricPartition(31))
 
 	want := persistenceCommands(smi, inventory, []int{1})
-	want = append(want, resetCommands(smi, inventory, []int{1})...)
+	want = append(want, resetCommand(smi, inventory, []int{1}))
 	want = append(want, persistenceCommands(smi, inventory, []int{1, 2})...)
-	want = append(want, resetCommands(smi, inventory, []int{1, 2})...)
+	want = append(want, resetCommand(smi, inventory, []int{1, 2}))
 	client.beforeActivate = func() {
 		require.Equal(t, want, smi.commands(t), "every GPU of the new partition must be reset before activation")
 	}
-	pair, pairClaim := persistenceClaimState(t, client, smi.lib, inventory, []int{1, 2}, true)
+	pair, pairClaim := persistenceClaimState(t, client, smi.lib, inventory, []int{1, 2}, false)
 	require.NoError(t, pair.activateFabricPartition(pairClaim))
 	require.Equal(t, []int{31, 17}, client.activatedIDs)
 }
@@ -119,11 +134,10 @@ func TestFabricPartitionResetFailure(t *testing.T) {
 	state, claim := persistenceClaimState(t, client, smi.lib, inventory, []int{1, 2}, false)
 
 	err := state.activateFabricPartition(claim)
-	require.ErrorContains(t, err, "resetting GPU "+inventory[1].UUID)
-	require.ErrorContains(t, err, inventory[1].pciBusID)
+	require.ErrorContains(t, err, fmt.Sprintf("resetting GPUs [%s %s]", inventory[1].pciBusID, inventory[2].pciBusID))
 	require.ErrorContains(t, err, "GPU is in use")
 	require.Empty(t, client.activatedIDs)
 	want := persistenceCommands(smi, inventory, []int{1, 2})
-	want = append(want, resetCommands(smi, inventory, []int{1})...)
+	want = append(want, resetCommand(smi, inventory, []int{1, 2}))
 	require.Equal(t, want, smi.commands(t))
 }

@@ -1528,6 +1528,32 @@ func (s *DeviceState) fabricManagerPartitioningEnabled() bool {
 	return featuregates.Enabled(featuregates.FabricManagerPartitioning) && s.fmManager != nil
 }
 
+// rejectVFIOFMPartitionForMultiAmpereGPUs rejects VFIO passthrough of a multi-GPU
+// partition whose NVLinks only train from reset (HGX-2 and HGX A100). After
+// activation, vfio-pci runtime-suspends the GPU and resets it when the device
+// is opened, and the VMM resets it again at VM start, falling back to a bus
+// reset when function reset is unavailable. Each leaves the guest's NVLinks
+// inactive. A single-GPU partition has no active NVLinks to lose.
+func (s *DeviceState) rejectVFIOFMPartitionForMultiAmpereGPUs(claim *resourceapi.ResourceClaim, partitionID, partitionSize int) error {
+	if partitionSize < 2 {
+		return nil
+	}
+	for _, r := range claim.Status.Allocation.Devices.Results {
+		if r.Driver != DriverName {
+			continue
+		}
+		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
+		if device == nil || device.Type() != VfioDeviceType || device.Vfio.parent == nil {
+			continue
+		}
+		if device.Vfio.parent.requiresResetBeforeFabricActivation() {
+			return fmt.Errorf("VFIO passthrough of %d-GPU fabric partition %d is not supported on %s GPUs: the GPU resets performed after binding to vfio-pci leave its NVLinks inactive",
+				partitionSize, partitionID, device.Vfio.parent.architecture)
+		}
+	}
+	return nil
+}
+
 // activateFabricPartition activates the FM partition formed by the physical
 // GPUs backing the claim's allocation results. The caller must ensure
 // fabricManagerPartitioningEnabled() is true and that the claim is allocated.
@@ -1544,6 +1570,9 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 	if err != nil {
 		return fmt.Errorf("failed to resolve fabric partition activation: %w", err)
 	}
+	if err := s.rejectVFIOFMPartitionForMultiAmpereGPUs(claim, partitionID, len(gpus)); err != nil {
+		return err
+	}
 	// ActivatePartition is idempotent: a retried Prepare (e.g. after a later
 	// step failed) that hits an already-active partition is a no-op rather than
 	// an FM in-use error.
@@ -1559,17 +1588,23 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 				return fmt.Errorf("disabling persistence for GPU %s (PCI %s): %w", gpu.UUID, gpu.pciBusID, err)
 			}
 		}
-		// Software-trained NVLinks (HGX A100) only train from reset, and a
-		// reset after activation leaves them inactive. Preparation runs only
-		// for an inactive partition, so a retry never resets an active one.
+		// HGX-2 and HGX A100 NVLinks only train from reset, and a reset
+		// after activation leaves them inactive. Preparation runs only for
+		// an inactive partition, so a retry never resets an active one.
+		// HGX-2 GPUs must be reset together, so reset the whole partition
+		// in one call; GPUs outside it are not touched.
+		var resetPCI []string
 		for _, gpu := range gpus {
-			if !gpu.requiresResetBeforeFabricActivation() {
-				continue
+			if gpu.requiresResetBeforeFabricActivation() {
+				resetPCI = append(resetPCI, gpu.pciBusID)
 			}
-			klog.V(2).Infof("Fabric Manager: resetting %s GPU %s (PCI %s) before activating partition %d", gpu.architecture, gpu.UUID, gpu.pciBusID, partitionID)
-			if err := s.nvdevlib.resetGPU(gpu.pciBusID); err != nil {
-				return fmt.Errorf("resetting GPU %s (PCI %s): %w", gpu.UUID, gpu.pciBusID, err)
-			}
+		}
+		if len(resetPCI) == 0 {
+			return nil
+		}
+		klog.V(2).Infof("Fabric Manager: resetting GPUs %v before activating partition %d", resetPCI, partitionID)
+		if err := s.nvdevlib.resetGPUs(resetPCI); err != nil {
+			return fmt.Errorf("resetting GPUs %v: %w", resetPCI, err)
 		}
 		return nil
 	}); err != nil {
