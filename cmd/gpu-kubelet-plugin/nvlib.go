@@ -1569,6 +1569,29 @@ func (l deviceLib) disableGPUPersistenceMode(pciAddress string) error {
 	return nil
 }
 
+// Reset the GPUs in a single nvidia-smi invocation while they stay bound to the
+// nvidia driver. Pre-Ampere GPUs with NVLink connections cannot be reset one at
+// a time. nvidia-smi refuses the reset while any process, including an NVML
+// client, has one of the GPUs open.
+//
+// Note: we `chroot` into the device root to properly run nvidia-smi.
+func (l deviceLib) resetGPUs(pciAddresses []string) error {
+	cmd := exec.Command(
+		"chroot",
+		l.devRoot,
+		"nvidia-smi",
+		"-i",
+		strings.Join(pciAddresses, ","),
+		"-r")
+
+	output, err := cmd.CombinedOutput()
+	klog.V(4).Infof("resetGPUs command: %s, output: \n%s", cmd.String(), string(output))
+	if err != nil {
+		return fmt.Errorf("error running nvidia-smi: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
 // Enable GPU Persistence mode
 //
 // While persistence mode disablement can be done using nvidia-smi, we cannot
@@ -1594,7 +1617,7 @@ func (l deviceLib) enableGPUPersistenceMode(pciAddress string) error {
 	}
 
 	// Check if persistence mode is already enabled.
-	mode, ret := nvml.DeviceGetPersistenceMode(device)
+	mode, ret := device.GetPersistenceMode()
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("error getting persistence mode: %w", ret)
 	}

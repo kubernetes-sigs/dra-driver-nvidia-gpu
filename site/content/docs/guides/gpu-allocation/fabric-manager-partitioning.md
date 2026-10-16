@@ -60,6 +60,49 @@ Use one `ResourceClaim` for one Fabric Manager partition.
 Separate claims cannot use a `matchAttribute` constraint to ensure that their
 combined GPUs form one partition.
 
+## Persistence during activation
+
+Before activating an inactive partition, the driver disables persistence on
+that claim's GPUs using `nvidia-smi`. This handles both daemon-managed and
+legacy persistence and applies to full-GPU and VFIO claims. If disabling
+persistence fails, the driver returns an error without activating the partition.
+
+An already-active partition skips this step. The driver rejects activation
+of a partition that overlaps another active partition before changing
+persistence. GPUs outside the requested partition are not changed.
+Full-GPU cleanup enables legacy persistence after successful partition
+deactivation, once no other claim uses the GPUs. This also applies to cleanup
+of partially prepared claims. If enabling persistence fails, cleanup returns an
+error and retries even when the partition is already inactive.
+VFIO cleanup continues to enable persistence when returning GPUs to the
+NVIDIA driver. Both paths enable persistence rather than restoring its original
+setting; the next partition activation disables it again.
+
+## GPU reset on HGX A100 and HGX-2
+
+On HGX A100 and HGX-2 systems, Fabric Manager trains GPU NVLinks in software
+during partition activation, and the links only train from reset.
+After disabling persistence on an inactive partition, the driver resets all of
+the partition's GPUs together with a single `nvidia-smi -r` command while they
+are still bound to the NVIDIA driver, and then activates the partition.
+GPUs outside the partition are not reset.
+The reset is a single command because Volta GPUs with NVLink connections
+cannot be reset one at a time.
+If the reset fails, for example because another process still has a GPU open,
+the driver returns an error without activating the partition.
+An already-active partition skips the reset, so a retried Prepare does not
+reset GPUs whose NVLinks are already trained.
+HGX H100 and later systems train NVLinks in hardware and do not need this reset.
+
+VFIO passthrough of a multi-GPU partition is not supported on HGX A100 or HGX-2.
+Fabric Manager requires the guest to start without another GPU reset after
+activation, but `vfio-pci` resets the GPU when the device is opened, and the VMM
+resets it again when the VM starts, using a bus reset if function reset is
+unavailable. Either reset leaves the guest's NVLinks inactive.
+Prepare fails for such claims before changing any GPU state.
+VFIO claims for single-GPU partitions and full-GPU claims for any partition size
+are not affected.
+
 ## Prerequisites
 
 Before enabling the feature:
@@ -154,7 +197,17 @@ attributes:
     string: gpu
 ```
 
-`gpuModuleID` is the physical module identifier used by Fabric Manager.
+`gpuModuleID` is the module identifier reported by NVML. It can differ from
+Fabric Manager's physical GPU ID, for example on HGX A100 systems. The driver
+matches GPUs to FM partition members by UUID or PCI address; it does not assume
+that these two numeric identifiers are equal. When FM omits UUID and PCI
+identity across the entire topology, the driver uses the documented H100-and-later
+mapping where FM physical IDs equal NVML module IDs. An all-zero PCI address
+with an empty UUID is treated as unavailable. Numeric matching never overrides
+conflicting identity information. The driver builds UUID and PCI lookup indexes
+at startup and rejects malformed or inconsistent FM identities before serving
+claims.
+See the [FM API data structures](https://docs.nvidia.com/datacenter/tesla/fabric-manager-user-guide/index.html#data-structures).
 `partitionN` is the ID of the reported N-GPU partition containing that device.
 The driver publishes a `partitionN` attribute only when Fabric Manager reports
 a partition of that size containing the GPU.
@@ -293,8 +346,8 @@ kubectl logs -n dra-driver-nvidia-gpu \
 |---|---|
 | `fabric manager library not found` | Verify that `libnvfm.so` is installed under `nvidiaDriverRoot` in a standard library directory. |
 | `Fabric Manager could not be opened` | Verify that Fabric Manager is running with `FABRIC_MODE=1` and that its socket or configured address is reachable from the plugin. |
-| `GPU module set [...] does not match any FM partition` | Compare the allocated devices with their `partitionN` attributes. Use one claim with the correct `count: N` and `matchAttribute`. |
-| `no gpuModuleID` or missing FM attributes | Verify NVML visibility and the reported FM topology. A GPU already bound to `vfio-pci` when the plugin starts might not have a resolvable module ID. |
+| `GPU physical ID set [...] does not match any FM partition` | Compare the allocated devices with their `partitionN` attributes. Use one claim with the correct `count: N` and `matchAttribute`. |
+| `no member for GPU` or missing FM attributes | Compare the GPU UUID and PCI address with the members returned by FM, or the NVML module ID when FM omits identities. GPUs missing from the FM topology have no partition attributes; conflicting identities are rejected. |
 | No FM attributes on the node | Confirm that the gate is enabled and that the driver detects an NVSwitch or NVLink 5 switch-managed fabric on the node. |
 
 If a VFIO workload remains in `ContainerCreating` after its partition is

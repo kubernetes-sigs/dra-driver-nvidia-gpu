@@ -56,9 +56,8 @@ type GpuInfo struct {
 	maxCapacities PartCapacityMap
 	memSliceCount int
 
-	// Fabric Manager attributes. Populated only
-	// when an FM Manager is available and the GPU is visible to NVML at
-	// discovery time.
+	// NVML module ID, published when FM partitioning is enabled. This is
+	// distinct from FM's physical GPU ID on some platforms.
 	gpuModuleID int
 
 	// partitionsBySize maps an FM partition size (number of GPUs in the
@@ -210,9 +209,9 @@ func (d *GpuInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.DeviceA
 	return attrs
 }
 
-// addFabricManagerAttributes publishes the Fabric Manager-derived attributes
-// (`gpuModuleID` and `partitionN`) for this physical GPU. The values are
-// resolved from NVML / FM at discovery time (see attachFabricManagerPartitions).
+// addFabricManagerAttributes publishes the NVML-reported gpuModuleID and
+// Fabric Manager partitionN attributes for this physical GPU. Partition
+// membership is resolved at discovery time (see attachFabricManagerPartitions).
 func (d *GpuInfo) addFabricManagerAttributes(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute) {
 	if d == nil {
 		return
@@ -236,6 +235,19 @@ func (d *GpuInfo) addFabricManagerAttributes(attrs map[resourceapi.QualifiedName
 		attrs[key] = resourceapi.DeviceAttribute{
 			IntValue: ptr.To(int64(partitionID)),
 		}
+	}
+}
+
+// requiresResetBeforeFabricActivation reports whether this GPU must be reset
+// before every Fabric Manager partition activation. On HGX-2 and HGX A100, FM
+// trains GPU NVLinks in software and they only train from reset. Hopper and
+// later train NVLinks in hardware.
+func (d *GpuInfo) requiresResetBeforeFabricActivation() bool {
+	switch d.architecture {
+	case "Volta", "Ampere":
+		return true
+	default:
+		return false
 	}
 }
 

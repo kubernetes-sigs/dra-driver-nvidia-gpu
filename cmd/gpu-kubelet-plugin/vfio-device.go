@@ -191,8 +191,17 @@ func (vm *VfioPciManager) WaitForGPUFree(ctx context.Context, info *VfioDeviceIn
 	}
 }
 
-// Unconfigure binds the GPU to the nvidia driver.
+// Unconfigure binds the GPU to the nvidia driver and enables persistence.
 func (vm *VfioPciManager) Unconfigure(ctx context.Context, info *VfioDeviceInfo) error {
+	if err := vm.UnconfigureDriver(ctx, info); err != nil {
+		return err
+	}
+	return vm.EnablePersistence(info)
+}
+
+// UnconfigureDriver binds the GPU to the nvidia driver without enabling
+// persistence. The caller must call EnablePersistence afterwards.
+func (vm *VfioPciManager) UnconfigureDriver(ctx context.Context, info *VfioDeviceInfo) error {
 	// Do nothing if we dont expect to switch to nvidia driver.
 	if !vm.nvidiaEnabled {
 		return nil
@@ -203,13 +212,20 @@ func (vm *VfioPciManager) Unconfigure(ctx context.Context, info *VfioDeviceInfo)
 	if err != nil {
 		return fmt.Errorf("error changing driver for GPU %q: %w", info.PciBusID, err)
 	}
+	return nil
+}
 
-	// Enable GPU Persistence Mode.
-	err = vm.enableGPUPersistenceMode(info.PciBusID)
+// EnablePersistence enables persistence on a GPU returned to the nvidia
+// driver.
+func (vm *VfioPciManager) EnablePersistence(info *VfioDeviceInfo) error {
+	if !vm.nvidiaEnabled {
+		return nil
+	}
+
+	err := vm.enableGPUPersistenceMode(info.PciBusID)
 	if err != nil {
 		return fmt.Errorf("error enabling persistence mode for GPU %q: %w", info.PciBusID, err)
 	}
-
 	return nil
 }
 
