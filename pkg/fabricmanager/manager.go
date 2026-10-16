@@ -38,8 +38,11 @@ const (
 )
 
 type Manager struct {
-	client         Client
-	partitionsByID map[int]Partition
+	client               Client
+	partitionsByID       map[int]Partition
+	physicalIDByUUID     map[string]int
+	physicalIDByPCI      map[string]int
+	identityByPhysicalID map[int]gpuIdentity
 }
 
 // Open builds a Manager for the caller to subsequently activate and deactivate
@@ -115,9 +118,12 @@ func (m *Manager) Close() error {
 
 // recordsPartitions records the FM-supplied partition topology, validating
 // that every partition is well-formed (unique id, non-empty, no duplicate GPU
-// members).
+// members) and consistent GPU identities across partitions.
 func (m *Manager) recordsPartitions(parts []Partition) error {
 	byID := make(map[int]Partition, len(parts))
+	byUUID := make(map[string]int)
+	byPCI := make(map[string]int)
+	identities := make(map[int]gpuIdentity)
 
 	for _, p := range parts {
 		if _, dup := byID[p.ID]; dup {
@@ -129,14 +135,49 @@ func (m *Manager) recordsPartitions(parts []Partition) error {
 		seen := make(map[int]struct{}, len(p.GPUs))
 		for _, g := range p.GPUs {
 			if _, dup := seen[g.PhysicalID]; dup {
-				return fmt.Errorf("fabricmanager: partition %d references gpuModuleID %d twice",
+				return fmt.Errorf("fabricmanager: partition %d references physicalID %d twice",
 					p.ID, g.PhysicalID)
 			}
 			seen[g.PhysicalID] = struct{}{}
+
+			pci, err := normalizePCIBusID(g.PCIBusID)
+			if err != nil {
+				return fmt.Errorf("fabricmanager: partition %d physical ID %d: %w", p.ID, g.PhysicalID, err)
+			}
+			// Some FM versions represent an unavailable BDF as all zeroes.
+			if g.UUID == "" && pci == "0000:00:00.0" {
+				pci = ""
+			}
+			identity := identities[g.PhysicalID]
+			if g.UUID != "" {
+				if id, exists := byUUID[g.UUID]; exists && id != g.PhysicalID {
+					return fmt.Errorf("fabricmanager: GPU UUID %q maps to multiple physical IDs (%d and %d)", g.UUID, id, g.PhysicalID)
+				}
+				if identity.uuid != "" && identity.uuid != g.UUID {
+					return fmt.Errorf("fabricmanager: physical ID %d has conflicting UUIDs (%q and %q)", g.PhysicalID, identity.uuid, g.UUID)
+				}
+				byUUID[g.UUID] = g.PhysicalID
+				identity.uuid = g.UUID
+			}
+			if pci != "" {
+				if id, exists := byPCI[pci]; exists && id != g.PhysicalID {
+					return fmt.Errorf("fabricmanager: GPU PCI %q maps to multiple physical IDs (%d and %d)", pci, id, g.PhysicalID)
+				}
+				if identity.pci != "" && identity.pci != pci {
+					return fmt.Errorf("fabricmanager: physical ID %d has conflicting PCI addresses (%q and %q)", g.PhysicalID, identity.pci, pci)
+				}
+				byPCI[pci] = g.PhysicalID
+				identity.pci = pci
+			}
+			// Keep entries even when FM omits both identifiers, for module-ID fallback.
+			identities[g.PhysicalID] = identity
 		}
 		byID[p.ID] = p
 	}
 	m.partitionsByID = byID
+	m.physicalIDByUUID = byUUID
+	m.physicalIDByPCI = byPCI
+	m.identityByPhysicalID = identities
 	return nil
 }
 
@@ -147,11 +188,11 @@ func (m *Manager) GetPartition(partitionID int) (Partition, bool) {
 	return p, ok
 }
 
-// GetPartitionsBySizeByModuleID returns a map keyed by partition size (number
+// GetPartitionsBySizeByPhysicalID returns a map keyed by partition size (number
 // of GPUs in the partition) to the partitionId of the partition of that size
-// that includes the given gpuModuleID. e.g.:
+// that includes the given physicalID. e.g.:
 //
-//	gpuModuleID: 1
+//	physicalID: 1
 //	partition1:  8
 //	partition2:  4
 //	partition4:  2
@@ -159,16 +200,16 @@ func (m *Manager) GetPartition(partitionID int) (Partition, bool) {
 //
 // On a well-formed node FM produces exactly one partition per
 // (size, GPU) pair; if more than one is found this method returns an error.
-func (m *Manager) GetPartitionsBySizeByModuleID(moduleID int) (map[int]int, error) {
+func (m *Manager) GetPartitionsBySizeByPhysicalID(physicalID int) (map[int]int, error) {
 	out := make(map[int]int)
 	for _, p := range m.partitionsByID {
 		size := len(p.GPUs)
 		for _, g := range p.GPUs {
-			if g.PhysicalID == moduleID {
+			if g.PhysicalID == physicalID {
 				if existing, dup := out[size]; dup {
 					return nil, fmt.Errorf(
-						"fabricmanager: gpuModuleID %d appears in two partitions of size %d (%d and %d)",
-						moduleID, size, existing, p.ID)
+						"fabricmanager: physicalID %d appears in two partitions of size %d (%d and %d)",
+						physicalID, size, existing, p.ID)
 				}
 				out[size] = p.ID
 				break
@@ -178,15 +219,15 @@ func (m *Manager) GetPartitionsBySizeByModuleID(moduleID int) (map[int]int, erro
 	return out, nil
 }
 
-// FindPartitionByModuleIDs returns the partitionId of the FM partition whose
-// GPU member set is exactly equal to the given set of gpuModuleIDs, or
+// FindPartitionByPhysicalIDs returns the partitionId of the FM partition whose
+// GPU member set is exactly equal to the given set of physicalIDs, or
 // (0, false) if no partition matches.
-func (m *Manager) FindPartitionByModuleIDs(moduleIDs []int) (int, bool) {
-	if len(moduleIDs) == 0 {
+func (m *Manager) FindPartitionByPhysicalIDs(physicalIDs []int) (int, bool) {
+	if len(physicalIDs) == 0 {
 		return 0, false
 	}
-	want := make(map[int]struct{}, len(moduleIDs))
-	for _, id := range moduleIDs {
+	want := make(map[int]struct{}, len(physicalIDs))
+	for _, id := range physicalIDs {
 		want[id] = struct{}{}
 	}
 

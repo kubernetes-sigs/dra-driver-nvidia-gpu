@@ -106,10 +106,10 @@ func gpus(ids ...int) []PartitionGPU {
 	return out
 }
 
-func TestPartitionGPUModuleIDs(t *testing.T) {
+func TestPartitionGPUPhysicalIDs(t *testing.T) {
 	p := Partition{GPUs: gpus(3, 7, 2)}
-	if got, want := p.GPUModuleIDs(), []int{3, 7, 2}; !reflect.DeepEqual(got, want) {
-		t.Errorf("GPUModuleIDs = %v, want %v", got, want)
+	if got, want := p.GPUPhysicalIDs(), []int{3, 7, 2}; !reflect.DeepEqual(got, want) {
+		t.Errorf("GPUPhysicalIDs = %v, want %v", got, want)
 	}
 }
 
@@ -148,7 +148,7 @@ func TestDiscoverLookups(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	if p, ok := m.GetPartition(2); !ok || !reflect.DeepEqual(p.GPUModuleIDs(), []int{1, 2, 5, 6}) {
+	if p, ok := m.GetPartition(2); !ok || !reflect.DeepEqual(p.GPUPhysicalIDs(), []int{1, 2, 5, 6}) {
 		t.Errorf("GetPartition(2) = (%+v, %v)", p, ok)
 	}
 	if _, ok := m.GetPartition(999); ok {
@@ -156,10 +156,10 @@ func TestDiscoverLookups(t *testing.T) {
 	}
 }
 
-// TestFindPartitionByModuleIDs covers the inverse lookup used at prepare time:
-// given the exact set of GPU module ids in a claim, find the single partition
+// TestFindPartitionByPhysicalIDs covers the inverse lookup used at prepare time:
+// given the exact set of GPU physical IDs in a claim, find the single partition
 // whose membership matches exactly.
-func TestFindPartitionByModuleIDs(t *testing.T) {
+func TestFindPartitionByPhysicalIDs(t *testing.T) {
 	client := &fakeClient{partitions: designDocPartitions()}
 	m, err := Open(client)
 	if err != nil {
@@ -168,20 +168,20 @@ func TestFindPartitionByModuleIDs(t *testing.T) {
 	defer m.Close()
 
 	// Exact match (order independent).
-	if id, ok := m.FindPartitionByModuleIDs([]int{6, 1, 5, 2}); !ok || id != 2 {
-		t.Errorf("FindPartitionByModuleIDs({1,2,5,6}) = (%d, %v), want (2, true)", id, ok)
+	if id, ok := m.FindPartitionByPhysicalIDs([]int{6, 1, 5, 2}); !ok || id != 2 {
+		t.Errorf("FindPartitionByPhysicalIDs({1,2,5,6}) = (%d, %v), want (2, true)", id, ok)
 	}
 	// Single-GPU partition.
-	if id, ok := m.FindPartitionByModuleIDs([]int{1}); !ok || id != 8 {
-		t.Errorf("FindPartitionByModuleIDs({1}) = (%d, %v), want (8, true)", id, ok)
+	if id, ok := m.FindPartitionByPhysicalIDs([]int{1}); !ok || id != 8 {
+		t.Errorf("FindPartitionByPhysicalIDs({1}) = (%d, %v), want (8, true)", id, ok)
 	}
 	// A subset of a partition does not match.
-	if _, ok := m.FindPartitionByModuleIDs([]int{1, 2}); ok {
-		t.Errorf("FindPartitionByModuleIDs({1,2}) unexpectedly matched")
+	if _, ok := m.FindPartitionByPhysicalIDs([]int{1, 2}); ok {
+		t.Errorf("FindPartitionByPhysicalIDs({1,2}) unexpectedly matched")
 	}
 	// The empty set never matches.
-	if _, ok := m.FindPartitionByModuleIDs(nil); ok {
-		t.Errorf("FindPartitionByModuleIDs(nil) unexpectedly matched")
+	if _, ok := m.FindPartitionByPhysicalIDs(nil); ok {
+		t.Errorf("FindPartitionByPhysicalIDs(nil) unexpectedly matched")
 	}
 }
 
@@ -204,8 +204,8 @@ func TestDiscoverFMPartitionWithArbitraryModuleIDs(t *testing.T) {
 	if !ok {
 		t.Errorf("partition 1 not recorded")
 	}
-	if want := []int{1, 2, 99}; !reflect.DeepEqual(p.GPUModuleIDs(), want) {
-		t.Errorf("partition 1 module ids = %v, want %v", p.GPUModuleIDs(), want)
+	if want := []int{1, 2, 99}; !reflect.DeepEqual(p.GPUPhysicalIDs(), want) {
+		t.Errorf("partition 1 physical IDs = %v, want %v", p.GPUPhysicalIDs(), want)
 	}
 }
 
@@ -282,7 +282,7 @@ func TestDiscoverNilArgs(t *testing.T) {
 	}
 }
 
-func TestGetPartitionsBySizeByModuleID(t *testing.T) {
+func TestGetPartitionsBySizeByPhysicalID(t *testing.T) {
 	client := &fakeClient{partitions: designDocPartitions()}
 	m, err := Open(client)
 	if err != nil {
@@ -290,20 +290,20 @@ func TestGetPartitionsBySizeByModuleID(t *testing.T) {
 	}
 	defer m.Close()
 
-	// Module 1 is in: partition 1 (size 8), 2 (size 4), 4 (size 2), 8 (size 1).
-	got, err := m.GetPartitionsBySizeByModuleID(1)
+	// Physical ID 1 is in: partition 1 (size 8), 2 (size 4), 4 (size 2), 8 (size 1).
+	got, err := m.GetPartitionsBySizeByPhysicalID(1)
 	if err != nil {
-		t.Fatalf("GetPartitionsBySizeByModuleID(1): %v", err)
+		t.Fatalf("GetPartitionsBySizeByPhysicalID(1): %v", err)
 	}
 	want := map[int]int{8: 1, 4: 2, 2: 4, 1: 8}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("size->partitionId for module 1 = %v, want %v", got, want)
 	}
 
-	// An unknown module id yields an empty map and no error.
-	got2, err := m.GetPartitionsBySizeByModuleID(99)
+	// An unknown physical ID yields an empty map and no error.
+	got2, err := m.GetPartitionsBySizeByPhysicalID(99)
 	if err != nil || len(got2) != 0 {
-		t.Errorf("unknown module lookup: got=%v err=%v", got2, err)
+		t.Errorf("unknown physical ID lookup: got=%v err=%v", got2, err)
 	}
 }
 
@@ -320,7 +320,7 @@ func TestGetPartitionsBySizeAmbiguous(t *testing.T) {
 	}
 	defer m.Close()
 
-	if _, err := m.GetPartitionsBySizeByModuleID(1); err == nil {
+	if _, err := m.GetPartitionsBySizeByPhysicalID(1); err == nil {
 		t.Errorf("expected error for ambiguous size mapping")
 	}
 }
