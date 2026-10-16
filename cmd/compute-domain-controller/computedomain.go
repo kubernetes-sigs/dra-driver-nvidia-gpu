@@ -441,6 +441,10 @@ func (m *ComputeDomainManager) onAddOrUpdateHostManaged(ctx context.Context, cd 
 			return fmt.Errorf("error asserting removal of ResourceClaimTemplate: %w", err)
 		}
 
+		if err := m.resourceClaimTemplateManager.releaseHostChannel(ctx, string(cd.UID)); err != nil {
+			return fmt.Errorf("error releasing IMEX channel: %w", err)
+		}
+
 		if err := m.RemoveFinalizer(ctx, string(cd.UID)); err != nil {
 			return fmt.Errorf("error removing finalizer: %w", err)
 		}

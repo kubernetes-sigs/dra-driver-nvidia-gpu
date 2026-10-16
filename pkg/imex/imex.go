@@ -42,8 +42,9 @@ type Isolation string
 
 const (
 	// IsolationIMEXDomain is the default isolation strategy, under both
-	// ModeDriverManaged and ModeHostManaged: all workloads running in the
-	// same IMEX domain share the same channel (0).
+	// ModeDriverManaged and ModeHostManaged: workers of a ComputeDomain share
+	// one channel. Driver-managed mode uses channel zero in its own domain;
+	// host-managed mode reserves a distinct channel in the shared host domain.
 	IsolationIMEXDomain Isolation = "domain"
 
 	// IsolationIMEXChannel would give each workload a unique channel within
