@@ -12,6 +12,9 @@ We have full documentation on how to get started contributing here:
 - [Kubernetes Contributor Guide](https://k8s.dev/guide) - Main contributor documentation, or you can just jump directly to the [contributing page](https://k8s.dev/docs/guide/contributing/)
 - [Contributor Cheat Sheet](https://k8s.dev/cheatsheet) - Common resources for existing developers
 
+For documentation changes in this repository, follow the [documentation style guide](site/content/contribute/style-guide.md).
+The [documentation contributor guide](site/content/contribute/docs.md) covers local preview and release updates.
+
 ## Mentorship
 
 - [Mentoring Initiatives](https://k8s.dev/community/mentoring) - We have a diverse set of mentorship programs available that are always looking for volunteers!

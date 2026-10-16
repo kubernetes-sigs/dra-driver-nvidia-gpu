@@ -1,0 +1,10 @@
+{{- $path := .Get "src" -}}
+{{- if not $path -}}
+  {{- errorf "The include-yaml shortcode requires src: %s" .Position -}}
+{{- else -}}
+  {{- with resources.Get $path -}}
+    {{- transform.Highlight .Content "yaml" -}}
+  {{- else -}}
+    {{- errorf "YAML file %q not found: %s" $path $.Position -}}
+  {{- end -}}
+{{- end -}}

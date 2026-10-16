@@ -10,6 +10,8 @@ The site lives in
 and is built with [Hugo](https://gohugo.io/) (the extended build) and the
 [Docsy](https://www.docsy.dev/) theme.
 
+Follow the [documentation style guide](/contribute/style-guide/) when writing or reviewing pages, procedures, and examples.
+
 ## Quick start
 
 You need [Hugo (extended)](https://gohugo.io/installation/),
