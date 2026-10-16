@@ -17,9 +17,13 @@ limitations under the License.
 package fabricmanager
 
 import (
+	"cmp"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 )
 
@@ -206,6 +210,31 @@ func (m *Manager) FindPartitionByModuleIDs(moduleIDs []int) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// OverlappingPartitions returns every pair of partitions that share some, but
+// not all, GPUs. Activating either partition of such a pair makes the other
+// unavailable, so a node with such pairs fits fewer workloads than its
+// partition sizes suggest.
+// See https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/issues/1506
+func (m *Manager) OverlappingPartitions() [][]Partition {
+	parts := slices.SortedFunc(maps.Values(m.partitionsByID), func(a, b Partition) int {
+		return cmp.Compare(a.ID, b.ID)
+	})
+
+	var overlaps [][]Partition
+	for i, a := range parts {
+		gpusA := sets.New(a.GPUModuleIDs()...)
+		for _, b := range parts[i+1:] {
+			gpusB := sets.New(b.GPUModuleIDs()...)
+			// no overlap if b is a superset of a or a is a superset of b or they have no GPUs in common
+			if gpusB.IsSuperset(gpusA) || gpusA.IsSuperset(gpusB) || gpusA.Intersection(gpusB).Len() == 0 {
+				continue
+			}
+			overlaps = append(overlaps, []Partition{a, b})
+		}
+	}
+	return overlaps
 }
 
 // ActivatePartition asks Fabric Manager to program the NVSwitch fabric for the

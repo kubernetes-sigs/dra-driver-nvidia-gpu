@@ -60,6 +60,42 @@ Use one `ResourceClaim` for one Fabric Manager partition.
 Separate claims cannot use a `matchAttribute` constraint to ensure that their
 combined GPUs form one partition.
 
+### Choose a nested partition layout
+
+Allocating a partition makes every other partition that shares a GPU with it
+unavailable.
+Use a nested layout, where any two partitions either share no GPUs or one
+contains the other.
+In a nested layout, each smaller partition fits entirely inside a larger one.
+
+Avoid layouts where a smaller partition straddles two larger ones.
+For example, with four-GPU partitions `{1, 2, 5, 6}` and `{3, 4, 7, 8}` and
+two-GPU partitions `{1, 3}`, `{2, 4}`, `{5, 7}`, and `{6, 8}`, every two-GPU
+partition uses one GPU from each four-GPU partition:
+
+- After one four-GPU partition is allocated, no two-GPU partition can be
+  allocated, even though four GPUs are idle.
+- After one two-GPU partition is allocated, neither four-GPU partition can be
+  allocated.
+
+Grouping the four-GPU partitions as `{1, 2, 3, 4}` and `{5, 6, 7, 8}` makes the
+same two-GPU partitions nested.
+Then one allocated four-GPU partition still leaves two two-GPU partitions free.
+
+When the GPU kubelet plugin starts, it checks the reported partitions.
+If any pair partially overlaps, the plugin logs a warning and creates a
+`Warning` event with reason `FabricPartitionsNotNested` on the node.
+The plugin still starts and publishes all partitions.
+To list every overlapping pair, run the plugin with log verbosity 2 or higher.
+
+Kubernetes deletes events after one hour by default, so check for the event
+soon after setting up the node or changing the Fabric Manager configuration:
+
+```bash
+kubectl get events -n default \
+    --field-selector reason=FabricPartitionsNotNested,involvedObject.name=<node-name>
+```
+
 ## Prerequisites
 
 Before enabling the feature:
@@ -296,6 +332,7 @@ kubectl logs -n dra-driver-nvidia-gpu \
 | `GPU module set [...] does not match any FM partition` | Compare the allocated devices with their `partitionN` attributes. Use one claim with the correct `count: N` and `matchAttribute`. |
 | `no gpuModuleID` or missing FM attributes | Verify NVML visibility and the reported FM topology. A GPU already bound to `vfio-pci` when the plugin starts might not have a resolvable module ID. |
 | No FM attributes on the node | Confirm that the gate is enabled and that the driver detects an NVSwitch or NVLink 5 switch-managed fabric on the node. |
+| `partially overlapping partition pair(s)` or a `FabricPartitionsNotNested` event | Partition claims can stay `Pending` while GPUs are idle. Change the Fabric Manager partition layout to a [nested layout](#choose-a-nested-partition-layout). |
 
 If a VFIO workload remains in `ContainerCreating` after its partition is
 selected, continue with the VFIO-specific

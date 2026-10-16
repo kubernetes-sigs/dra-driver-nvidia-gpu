@@ -21,10 +21,19 @@ import (
 	"testing"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
@@ -937,4 +946,73 @@ func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
 		require.NoError(t, err)
 		require.Zero(t, nvmllib.deviceGetHandleByUUIDCalls, "a device held by a completed claim must not reach MIG teardown")
 	})
+}
+
+func testPartition(id int, moduleIDs ...int) fabricmanager.Partition {
+	p := fabricmanager.Partition{ID: id}
+	for _, m := range moduleIDs {
+		p.GPUs = append(p.GPUs, fabricmanager.PartitionGPU{PhysicalID: m})
+	}
+	return p
+}
+
+func TestWarnOverlappingFabricPartitions(t *testing.T) {
+	const nodeName = "gpu-node-1"
+	overlaps := [][]fabricmanager.Partition{
+		{testPartition(2, 1, 2, 5, 6), testPartition(4, 1, 3)},
+		{testPartition(2, 1, 2, 5, 6), testPartition(5, 2, 4)},
+	}
+
+	tests := map[string]struct {
+		createErr error
+	}{
+		"creates one event": {},
+		"event creation failure does not panic or retry": {
+			createErr: apierrors.NewForbidden(schema.GroupResource{Group: "events.k8s.io", Resource: "events"}, "", nil),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			client := k8sfake.NewSimpleClientset()
+			if tc.createErr != nil {
+				client.PrependReactor("create", "events", func(k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, tc.createErr
+				})
+			}
+
+			warnOverlappingFabricPartitions(context.Background(), client, nodeName, overlaps)
+
+			var creates int
+			for _, a := range client.Actions() {
+				if a.GetVerb() == "create" && a.GetResource().Resource == "events" {
+					creates++
+				}
+			}
+			require.Equal(t, 1, creates)
+			if tc.createErr != nil {
+				return
+			}
+
+			events, err := client.EventsV1().Events(metav1.NamespaceDefault).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, events.Items, 1)
+			assertNodeWarningEvent(t, &events.Items[0], nodeName)
+		})
+	}
+}
+
+func assertNodeWarningEvent(t *testing.T, event *eventsv1.Event, nodeName string) {
+	t.Helper()
+	assert.Equal(t, corev1.EventTypeWarning, event.Type)
+	assert.Equal(t, fabricPartitionsNotNestedReason, event.Reason)
+	assert.Equal(t, fabricPartitionsEventAction, event.Action)
+	assert.Equal(t, corev1.ObjectReference{Kind: "Node", Name: nodeName, UID: types.UID(nodeName)}, event.Regarding)
+	assert.Equal(t, nodeName, event.ReportingInstance)
+	assert.Empty(t, validation.IsQualifiedName(event.ReportingController))
+	assert.False(t, event.EventTime.IsZero())
+	assert.Contains(t, event.Note, "2 partially overlapping partition pair(s)")
+	assert.Contains(t, event.Note, "partition 2 (GPU modules [1 2 5 6]) and partition 4 (GPU modules [1 3])")
+	// The API server rejects events.k8s.io notes longer than 1 KiB.
+	assert.LessOrEqual(t, len(event.Note), 1024)
 }
