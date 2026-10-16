@@ -67,12 +67,19 @@ type DeviceConfigState struct {
 	TimeSliceApplied   *bool `json:"timeSliceApplied,omitempty"`
 }
 
+// vfioDeviceManager lets checkpointed-Unprepare tests verify the Unprepare-only lookup
+// without rebinding a host device.
+type vfioDeviceManager interface {
+	Configure(context.Context, *VfioDeviceInfo) error
+	Unconfigure(context.Context, *VfioDeviceInfo) error
+}
+
 type DeviceState struct {
 	sync.Mutex
 	cdi                      *CDIHandler
 	tsManager                *TimeSlicingManager
 	mpsManager               *MpsManager
-	vfioPciManager           *VfioPciManager
+	vfioPciManager           vfioDeviceManager
 	checkpointCleanupManager *CheckpointCleanupManager
 	config                   *Config
 
@@ -138,6 +145,9 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error enumerating all possible devices: %w", err)
 	}
+	if config.driverConfig != nil {
+		perGPUAllocatable.ApplyDriverConfig(config.driverConfig)
+	}
 
 	hostDriverRoot := config.flags.hostDriverRoot
 
@@ -193,7 +203,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		mpsManager = NewMpsManager(config, nvdevlib, hostDriverRoot, MpsControlDaemonTemplatePath)
 	}
 
-	var vfioPciManager *VfioPciManager
+	var vfioPciManager vfioDeviceManager
 	if featuregates.Enabled(featuregates.PassthroughSupport) && nvdevlib.IsVfioEnabled() {
 		vfioPciManager = NewVfioPciManager(driver.Root, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
 	}
@@ -336,6 +346,12 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		klog.V(4).Infof("Claim %s already in PrepareStarted state: attempt rollback before new prepare", ResourceClaimToString(claim))
 		if err := s.rollbackPartiallyPreparedClaim(ctx, claimUID, preparedClaim, cp); err != nil {
 			return nil, fmt.Errorf("failed to roll back partially prepared claim %s: %w", PreparedClaimToString(&preparedClaim, claimUID), err)
+		}
+	}
+
+	if s.config.driverConfig != nil {
+		if err := s.validateAllocatedDevicesAvailable(claim); err != nil {
+			return nil, err
 		}
 	}
 
@@ -529,7 +545,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 	// TODO: Remove this once partitionable device support is introduced for vfio devices.
 	if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 		for _, device := range pc.PreparedDevices.GetDevices() {
-			allocatableDevice := s.perGPUAllocatable.GetAllocatableDevice(device.DeviceName)
+			allocatableDevice := s.perGPUAllocatable.GetDeviceForUnprepare(device.DeviceName)
 			if allocatableDevice == nil {
 				klog.Warningf("allocatable not found for device: %v", device.DeviceName)
 				continue
@@ -678,7 +694,7 @@ func (s *DeviceState) getAllocatableDevicesForClaim(claimUID string, pc Prepared
 		if r.Driver != DriverName {
 			continue
 		}
-		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
+		device := s.perGPUAllocatable.GetDeviceForUnprepare(r.Device)
 		if device == nil {
 			// The allocatable may legitimately be absent, e.g. the sibling
 			// GPU was already rediscovered by a previous rollback attempt.
@@ -1218,7 +1234,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 // gpuModuleID resolved from NVML now that the GPU is visible again.
 func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices PreparedDeviceList) error {
 	for _, device := range devices {
-		vfioAllocatable := s.perGPUAllocatable.GetAllocatableDevice(device.Vfio.Device.DeviceName)
+		vfioAllocatable := s.perGPUAllocatable.GetDeviceForUnprepare(device.Vfio.Device.DeviceName)
 		if vfioAllocatable == nil {
 			return fmt.Errorf("allocatable not found for vfio device %q", device.Vfio.Device.DeviceName)
 		}
@@ -1435,7 +1451,7 @@ func (s *DeviceState) gpuInfosFromPreparedClaim(results []resourceapi.DeviceRequ
 		if r.Driver != DriverName {
 			continue
 		}
-		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
+		device := s.perGPUAllocatable.GetDeviceForUnprepare(r.Device)
 		if device == nil {
 			klog.Warningf("allocatable not found for device %q", r.Device)
 			continue
@@ -1604,6 +1620,23 @@ func GetOpaqueDeviceConfigs(
 	}
 
 	return resultConfigs, nil
+}
+
+// validateAllocatedDevicesAvailable rejects only devices known to have been
+// filtered by the profile; other missing devices follow the existing Prepare path.
+func (s *DeviceState) validateAllocatedDevicesAvailable(claim *resourceapi.ResourceClaim) error {
+	if claim.Status.Allocation == nil {
+		return nil
+	}
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver != DriverName ||
+			s.perGPUAllocatable.GetAllocatableDevice(result.Device) != nil ||
+			s.perGPUAllocatable.GetFilteredDevice(result.Device) == nil {
+			continue
+		}
+		return fmt.Errorf("allocated device %q is excluded by the selected DriverConfig profile", result.Device)
+	}
+	return nil
 }
 
 // requestedNonAdminDevices returns the set of device names requested by the claim,

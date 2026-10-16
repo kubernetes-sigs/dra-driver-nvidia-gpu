@@ -156,6 +156,99 @@ func TestGenerateDriverResources(t *testing.T) {
 	})
 }
 
+// TestGenerateDriverResourcesFiltersDynamicMIG ensures MIG-only profiles retain parent counters and Unprepare-only metadata.
+func TestGenerateDriverResourcesFiltersDynamicMIG(t *testing.T) {
+	for _, useSplit := range []bool{false, true} {
+		name := "combined"
+		if useSplit {
+			name = "split"
+		}
+		t.Run(name, func(t *testing.T) {
+			pciBusID := "0000:01:00.0"
+			parent := newPartTestGpu(PartCapacityMap{"multiprocessors": intcap(132)}, 8)
+			parent.pciBusID = pciBusID
+			mig := newPartTestMigSpec(parent, 0, 1)
+			allocatable := AllocatableDevices{
+				parent.CanonicalName(): {Gpu: parent},
+				mig.CanonicalName():    {MigDynamic: mig},
+			}
+			config := &Config{
+				flags: &Flags{},
+				driverConfig: &DriverConfig{
+					Version: driverConfigVersion,
+					GPU:     &GPUDriverConfig{AdvertisedDeviceTypes: []string{MigStaticDeviceType}},
+				},
+			}
+			perGPUAllocatable := &PerGPUAllocatableDevices{
+				allocatablesMap: map[PCIBusID]AllocatableDevices{pciBusID: allocatable},
+			}
+			perGPUAllocatable.ApplyDriverConfig(config.driverConfig)
+			d := &driver{
+				useSplitResourceSlices: useSplit,
+				state: &DeviceState{
+					config:            config,
+					perGPUAllocatable: perGPUAllocatable,
+				},
+			}
+
+			resources := d.GenerateDriverResources("node-a")
+			slices := resources.Pools["node-a"].Slices
+			deviceSlice := slices[0]
+			if useSplit {
+				require.Len(t, slices, 2)
+				assert.Empty(t, slices[0].Devices)
+				require.Len(t, slices[0].SharedCounters, 1)
+				assert.Equal(t, parent.GetSharedCounterSetName(), slices[0].SharedCounters[0].Name)
+				deviceSlice = slices[1]
+			} else {
+				require.Len(t, slices, 1)
+				require.Len(t, slices[0].SharedCounters, 1)
+				assert.Equal(t, parent.GetSharedCounterSetName(), slices[0].SharedCounters[0].Name)
+			}
+			require.Len(t, deviceSlice.Devices, 1)
+			assert.Equal(t, mig.CanonicalName(), deviceSlice.Devices[0].Name)
+			assert.Equal(t, MigStaticDeviceType, *deviceSlice.Devices[0].Attributes["type"].StringValue)
+			require.Len(t, deviceSlice.Devices[0].ConsumesCounters, 1)
+			assert.Equal(t, parent.GetSharedCounterSetName(), deviceSlice.Devices[0].ConsumesCounters[0].CounterSet)
+			assert.Len(t, d.state.perGPUAllocatable.GetAllDevices(), 1)
+			assert.NotNil(t, d.state.perGPUAllocatable.GetDeviceForUnprepare(parent.CanonicalName()))
+		})
+	}
+}
+
+// TestGenerateDriverResourcesDropsFilteredDeviceSlices prevents active profiles from publishing empty per-GPU slices.
+func TestGenerateDriverResourcesDropsFilteredDeviceSlices(t *testing.T) {
+	for _, useSplit := range []bool{false, true} {
+		name := "combined"
+		if useSplit {
+			name = "split"
+		}
+		t.Run(name, func(t *testing.T) {
+			gpu := newTestGpuInfo(nil)
+			d := newTestDriverWithGPUs(useSplit, map[PCIBusID]*GpuInfo{"0000:01:00.0": gpu})
+			d.state.config = &Config{
+				flags: &Flags{},
+				driverConfig: &DriverConfig{
+					Version: driverConfigVersion,
+					GPU:     &GPUDriverConfig{AdvertisedDeviceTypes: []string{VfioDeviceType}},
+				},
+			}
+			d.state.perGPUAllocatable.ApplyDriverConfig(d.state.config.driverConfig)
+
+			resources := d.GenerateDriverResources("node-a")
+			slices := resources.Pools["node-a"].Slices
+			if useSplit {
+				require.Len(t, slices, 1)
+				assert.Empty(t, slices[0].Devices)
+			} else {
+				assert.Empty(t, slices)
+			}
+			assert.Empty(t, d.state.perGPUAllocatable.GetAllDevices())
+			assert.NotNil(t, d.state.perGPUAllocatable.GetDeviceForUnprepare(gpu.CanonicalName()))
+		})
+	}
+}
+
 func TestShutdownNilReceiver(t *testing.T) {
 	var d *driver
 	assert.NoError(t, d.Shutdown())

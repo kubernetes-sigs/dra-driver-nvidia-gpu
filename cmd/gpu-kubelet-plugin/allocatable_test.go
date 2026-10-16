@@ -288,6 +288,17 @@ func TestPerGPUAddAllocatableDevice(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, "GPU-d", got.UUID())
 	assert.Nil(t, p.GetAllocatableDevice("does-not-exist"))
+
+	// Rediscovery must not reintroduce a device type excluded at startup.
+	p.ApplyDriverConfig(&DriverConfig{
+		Version: driverConfigVersion,
+		GPU:     &GPUDriverConfig{AdvertisedDeviceTypes: []string{GpuDeviceType, MigStaticDeviceType}},
+	})
+	vfio := &AllocatableDevice{Vfio: &VfioDeviceInfo{index: 4, UUID: "GPU-d", PciBusID: "0000:05:00.0"}}
+	require.NoError(t, p.AddAllocatableDevice(vfio))
+	assert.Nil(t, p.GetAllocatableDevice(vfio.CanonicalName()))
+	assert.NotContains(t, p.GetAllDevices(), vfio.CanonicalName())
+	assert.Same(t, vfio, p.GetDeviceForUnprepare(vfio.CanonicalName()))
 }
 
 func TestPerGPUGetAllDevicesMerges(t *testing.T) {

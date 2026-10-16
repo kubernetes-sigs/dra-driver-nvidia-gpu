@@ -44,3 +44,36 @@ if [[ "${policy}" != *"${expected}"* ]]; then
     echo "expected: ${expected}" >&2
     exit 1
 fi
+
+profiles_disabled=$(helm template "${RELEASE_NAME}" "${CHART_PATH}" \
+    --namespace "${NAMESPACE}" \
+    --set gpuResourcesEnabledOverride=true)
+# Gate-off rendering must not introduce profile configuration artifacts.
+for unexpected in "DEFAULT_CONFIG" "/available-configs" "gpu-driver-config"; do
+    if [[ "${profiles_disabled}" == *"${unexpected}"* ]]; then
+        echo "per-node GPU config artifact ${unexpected} rendered with the feature gate disabled" >&2
+        exit 1
+    fi
+done
+
+profiles_enabled=$(helm template "${RELEASE_NAME}" "${CHART_PATH}" \
+    --namespace "${NAMESPACE}" \
+    --set gpuResourcesEnabledOverride=true \
+    --set featureGates.PerNodeGPUConfig=true)
+# Gate-on rendering must wire the profile ConfigMap into the GPU plugin.
+for expected_profile_artifact in "DEFAULT_CONFIG" "/available-configs" "gpu-driver-config"; do
+    if [[ "${profiles_enabled}" != *"${expected_profile_artifact}"* ]]; then
+        echo "per-node GPU config artifact ${expected_profile_artifact} missing with the feature gate enabled" >&2
+        exit 1
+    fi
+done
+
+# An explicit fallback must name an available profile.
+if helm template "${RELEASE_NAME}" "${CHART_PATH}" \
+    --namespace "${NAMESPACE}" \
+    --set gpuResourcesEnabledOverride=true \
+    --set featureGates.PerNodeGPUConfig=true \
+    --set gpuDriverConfig.default=missing >/dev/null 2>&1; then
+    echo "expected rendering to fail when the default GPU profile is missing" >&2
+    exit 1
+fi

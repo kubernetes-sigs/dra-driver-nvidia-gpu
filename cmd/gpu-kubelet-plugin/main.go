@@ -68,6 +68,7 @@ type Flags struct {
 	klogVerbosity                 int
 	additionalXidsToIgnore        string
 	consumableShares              string
+	defaultConfig                 string
 }
 
 type Config struct {
@@ -75,6 +76,7 @@ type Config struct {
 	clientsets           pkgflags.ClientSets
 	imagePullSecretNames []string
 	imagePullPolicy      string
+	driverConfig         *DriverConfig
 }
 
 func (c Config) DriverPluginPath() string {
@@ -220,6 +222,12 @@ func newApp() *cli.App {
 			Destination: &flags.consumableShares,
 			EnvVars:     []string{"CONSUMABLE_SHARES"},
 		},
+		&cli.StringFlag{
+			Name:        "default-config",
+			Usage:       "The default config to use if no label is set. Empty leaves device availability unchanged.",
+			Destination: &flags.defaultConfig,
+			EnvVars:     []string{"DEFAULT_CONFIG"},
+		},
 	}
 	cliFlags = append(cliFlags, flags.kubeClientConfig.Flags()...)
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)
@@ -259,11 +267,15 @@ func newApp() *cli.App {
 				return fmt.Errorf("create client: %w", err)
 			}
 
-			config := &Config{
-				flags:                flags,
-				clientsets:           clientSets,
-				imagePullSecretNames: strings.Fields(strings.ReplaceAll(strings.TrimSpace(flags.imagePullSecrets), ",", " ")),
-				imagePullPolicy:      strings.TrimSpace(flags.imagePullPolicy),
+			config, err := newRuntimeConfig(
+				c.Context,
+				flags,
+				clientSets,
+				driverConfigDirectory,
+				featuregates.Enabled(featuregates.PerNodeGPUConfig),
+			)
+			if err != nil {
+				return err
 			}
 
 			return RunPlugin(c.Context, config)
@@ -286,6 +298,48 @@ func newApp() *cli.App {
 	}
 
 	return app
+}
+
+// newRuntimeConfig resolves the node's availability profile once, before device
+// discovery. Profile changes require a deliberate plugin restart because
+// changing device representations while claims are active is not yet safe.
+func newRuntimeConfig(
+	ctx context.Context,
+	flags *Flags,
+	clientSets pkgflags.ClientSets,
+	configDirectory string,
+	perNodeGPUConfigEnabled bool,
+) (*Config, error) {
+	var driverConfig *DriverConfig
+	if perNodeGPUConfigEnabled {
+		resolvedConfig, profile, err := resolveDriverConfigFromDirectory(
+			ctx,
+			clientSets.Core,
+			flags.nodeName,
+			configDirectory,
+			flags.defaultConfig,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("resolve driver config: %w", err)
+		}
+		driverConfig = resolvedConfig
+		if driverConfig != nil {
+			klog.Infof("Using DriverConfig profile %q", profile)
+			if driverConfig.advertises(VfioDeviceType) && !featuregates.Enabled(featuregates.PassthroughSupport) {
+				klog.Warningf("DriverConfig profile %q advertises %q but feature gate %s is disabled", profile, VfioDeviceType, featuregates.PassthroughSupport)
+			}
+		}
+	} else if flags.defaultConfig != "" {
+		klog.Warningf("--default-config is ignored because feature gate %s is disabled", featuregates.PerNodeGPUConfig)
+	}
+
+	return &Config{
+		flags:                flags,
+		clientsets:           clientSets,
+		imagePullSecretNames: strings.Fields(strings.ReplaceAll(strings.TrimSpace(flags.imagePullSecrets), ",", " ")),
+		imagePullPolicy:      strings.TrimSpace(flags.imagePullPolicy),
+		driverConfig:         driverConfig,
+	}, nil
 }
 
 // Input validation of CLI flags.
