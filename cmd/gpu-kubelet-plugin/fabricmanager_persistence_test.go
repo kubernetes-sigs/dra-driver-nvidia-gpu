@@ -131,7 +131,12 @@ func persistenceClaimState(t *testing.T, client fabricmanager.Client, lib *devic
 		results = append(results, resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: fmt.Sprintf("device-%d", module)})
 	}
 	claim := &resourceapi.ResourceClaim{Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{Devices: resourceapi.DeviceAllocationResult{Results: results}}}}
-	return &DeviceState{fmManager: manager, nvdevlib: lib, perGPUAllocatable: &PerGPUAllocatableDevices{allocatablesMap: allocatables}}, claim
+	return &DeviceState{
+		fmManager:         manager,
+		nvdevlib:          lib,
+		vfioPciManager:    NewVfioPciManager("", "", lib, true),
+		perGPUAllocatable: &PerGPUAllocatableDevices{allocatablesMap: allocatables},
+	}, claim
 }
 
 func TestFabricPartitionPersistenceOrder(t *testing.T) {
@@ -236,6 +241,16 @@ func enableFabricPartitioningForTest(t *testing.T) {
 	})
 }
 
+// releaseFabricPartitionForTest runs the same sequence as Unprepare: deactivate
+// the partition, then restore persistence only if it was deactivated.
+func releaseFabricPartitionForTest(s *DeviceState, claimUID string, pc *PreparedClaim, checkpoint *Checkpoint) error {
+	deactivated, err := s.deactivateFabricPartition(claimUID, pc, checkpoint)
+	if err != nil || !deactivated {
+		return err
+	}
+	return s.enableFabricPartitionPersistence(claimUID, pc)
+}
+
 func TestFabricPartitionPersistenceCleanup(t *testing.T) {
 	enableFabricPartitioningForTest(t)
 	for _, vfio := range []bool{false, true} {
@@ -252,15 +267,15 @@ func TestFabricPartitionPersistenceCleanup(t *testing.T) {
 					return nvml.SUCCESS
 				}
 				pc := &PreparedClaim{Status: claim.Status, CheckpointState: ClaimCheckpointStatePrepareCompleted}
-				require.NoError(t, state.deactivateFabricPartition("claim", pc, nil))
+				require.NoError(t, releaseFabricPartitionForTest(state, "claim", pc, nil))
+				// VFIO cleanup defers persistence to this point when FM
+				// partitioning is enabled, so both device types are restored.
 				var want []string
-				if !vfio {
-					for _, module := range modules {
-						want = append(want, inventory[module].pciBusID)
-					}
+				for _, module := range modules {
+					want = append(want, inventory[module].pciBusID)
 				}
-				require.ElementsMatch(t, want, smi.nvml.enabledPCI, "only full GPUs in this claim need persistence restored here")
-				require.NoError(t, state.deactivateFabricPartition("claim", pc, nil))
+				require.ElementsMatch(t, want, smi.nvml.enabledPCI, "only GPUs in this claim need persistence restored")
+				require.NoError(t, releaseFabricPartitionForTest(state, "claim", pc, nil))
 				require.Equal(t, []int{partitionID}, client.deactivatedIDs)
 				require.ElementsMatch(t, want, smi.nvml.enabledPCI, "cleanup retry must be idempotent")
 			})
@@ -297,15 +312,36 @@ func (*failingDeactivateFMClient) DeactivateFabricPartition(int) error {
 
 func TestFabricPartitionPersistenceCleanupFailure(t *testing.T) {
 	enableFabricPartitioningForTest(t)
-	t.Run("FM failure leaves persistence disabled", func(t *testing.T) {
+	for _, vfio := range []bool{false, true} {
+		t.Run(fmt.Sprintf("vfio=%t/FM failure leaves persistence disabled", vfio), func(t *testing.T) {
+			smi := newFakePersistenceSMI(t, 0)
+			partitions, inventory := a100FabricIdentityFixture()
+			client := &failingDeactivateFMClient{&testFMClient{partitions: partitions}}
+			state, claim := persistenceClaimState(t, client, smi.lib, inventory, []int{1}, vfio)
+			require.NoError(t, state.activateFabricPartition(claim))
+			err := releaseFabricPartitionForTest(state, "claim", &PreparedClaim{Status: claim.Status}, nil)
+			require.ErrorContains(t, err, "deactivation failed")
+			require.Empty(t, smi.nvml.enabledPCI)
+		})
+	}
+	t.Run("VFIO persistence failure retries after deactivation", func(t *testing.T) {
 		smi := newFakePersistenceSMI(t, 0)
 		partitions, inventory := a100FabricIdentityFixture()
-		client := &failingDeactivateFMClient{&testFMClient{partitions: partitions}}
-		state, claim := persistenceClaimState(t, client, smi.lib, inventory, []int{1}, false)
+		client := &testFMClient{partitions: partitions}
+		state, claim := persistenceClaimState(t, client, smi.lib, inventory, []int{1}, true)
 		require.NoError(t, state.activateFabricPartition(claim))
-		err := state.deactivateFabricPartition("claim", &PreparedClaim{Status: claim.Status}, nil)
-		require.ErrorContains(t, err, "deactivation failed")
+		smi.nvml.beforeEnable = func(string) nvml.Return { return nvml.ERROR_UNKNOWN }
+		pc := &PreparedClaim{Status: claim.Status}
+		err := releaseFabricPartitionForTest(state, "claim", pc, nil)
+		require.ErrorContains(t, err, "enabling persistence for VFIO device")
+		require.ErrorContains(t, err, inventory[1].pciBusID)
 		require.Empty(t, smi.nvml.enabledPCI)
+		require.Equal(t, []int{31}, client.deactivatedIDs)
+
+		smi.nvml.beforeEnable = nil
+		require.NoError(t, releaseFabricPartitionForTest(state, "claim", pc, nil))
+		require.Equal(t, []int{31}, client.deactivatedIDs, "retry must not deactivate again")
+		require.Equal(t, []string{inventory[1].pciBusID}, smi.nvml.enabledPCI)
 	})
 	t.Run("persistence failure retries after deactivation", func(t *testing.T) {
 		smi := newFakePersistenceSMI(t, 0)
@@ -323,14 +359,14 @@ func TestFabricPartitionPersistenceCleanupFailure(t *testing.T) {
 			return nvml.SUCCESS
 		}
 		pc := &PreparedClaim{Status: claim.Status}
-		err := state.deactivateFabricPartition("claim", pc, nil)
+		err := releaseFabricPartitionForTest(state, "claim", pc, nil)
 		require.ErrorContains(t, err, "enabling persistence for GPU")
 		require.ErrorContains(t, err, failedPCI)
 		require.Len(t, smi.nvml.enabledPCI, 1)
 		require.Equal(t, []int{17}, client.deactivatedIDs)
 
 		smi.nvml.beforeEnable = nil
-		require.NoError(t, state.deactivateFabricPartition("claim", pc, nil))
+		require.NoError(t, releaseFabricPartitionForTest(state, "claim", pc, nil))
 		require.Equal(t, []int{17}, client.deactivatedIDs, "retry must not deactivate again")
 		require.ElementsMatch(t, []string{inventory[1].pciBusID, inventory[2].pciBusID}, smi.nvml.enabledPCI)
 	})
@@ -338,41 +374,48 @@ func TestFabricPartitionPersistenceCleanupFailure(t *testing.T) {
 
 func TestFabricPartitionPersistenceCleanupScope(t *testing.T) {
 	enableFabricPartitioningForTest(t)
-	for _, name := range []string{"admin access", "no allocation", "FM disabled", "unresolved partition", "other active partition"} {
-		t.Run(name, func(t *testing.T) {
-			smi := newFakePersistenceSMI(t, 0)
-			partitions, inventory := a100FabricIdentityFixture()
-			client := &testFMClient{partitions: partitions}
-			state, claim := persistenceClaimState(t, client, smi.lib, inventory, []int{1}, false)
-			switch name {
-			case "admin access":
-				claim.Status.Allocation.Devices.Results[0].AdminAccess = ptr.To(true)
-			case "no allocation":
-				claim.Status.Allocation = nil
-			case "FM disabled":
-				require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): false}))
-				t.Cleanup(func() {
-					require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): true}))
-				})
-			case "unresolved partition":
-				inventory[1].UUID = "unknown"
-			case "other active partition":
-				require.NoError(t, client.ActivateFabricPartition(33))
-				require.NoError(t, state.activateFabricPartition(claim))
-			}
-			require.NoError(t, state.deactivateFabricPartition("claim", &PreparedClaim{Status: claim.Status}, nil))
-			if name == "other active partition" {
+	for _, vfio := range []bool{false, true} {
+		for _, name := range []string{"admin access", "no allocation", "FM disabled", "unresolved partition", "other active partition"} {
+			t.Run(fmt.Sprintf("vfio=%t/%s", vfio, name), func(t *testing.T) {
+				smi := newFakePersistenceSMI(t, 0)
+				partitions, inventory := a100FabricIdentityFixture()
+				client := &testFMClient{partitions: partitions}
+				state, claim := persistenceClaimState(t, client, smi.lib, inventory, []int{1}, vfio)
+				switch name {
+				case "admin access":
+					claim.Status.Allocation.Devices.Results[0].AdminAccess = ptr.To(true)
+				case "no allocation":
+					claim.Status.Allocation = nil
+				case "FM disabled":
+					require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): false}))
+					t.Cleanup(func() {
+						require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): true}))
+					})
+				case "unresolved partition":
+					inventory[1].UUID = "unknown"
+				case "other active partition":
+					require.NoError(t, client.ActivateFabricPartition(33))
+					require.NoError(t, state.activateFabricPartition(claim))
+				}
+				pc := &PreparedClaim{Status: claim.Status}
+				deactivated, err := state.deactivateFabricPartition("claim", pc, nil)
+				require.NoError(t, err)
+				if name != "other active partition" {
+					require.False(t, deactivated, "persistence must not be restored without a deactivated partition")
+					require.Empty(t, client.deactivatedIDs)
+					return
+				}
+				require.True(t, deactivated)
 				require.Equal(t, []int{31}, client.deactivatedIDs)
+				require.Empty(t, smi.nvml.enabledPCI, "deactivation alone must not change persistence")
+				require.NoError(t, state.enableFabricPartitionPersistence("claim", pc))
 				require.Equal(t, []string{inventory[1].pciBusID}, smi.nvml.enabledPCI)
 				for _, partition := range client.partitions {
 					if partition.ID == 33 {
 						require.True(t, partition.IsActive)
 					}
 				}
-			} else {
-				require.Empty(t, client.deactivatedIDs)
-				require.Empty(t, smi.nvml.enabledPCI)
-			}
-		})
+			})
+		}
 	}
 }

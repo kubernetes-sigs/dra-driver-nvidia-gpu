@@ -539,9 +539,10 @@ func TestDeactivateFabricPartitionRefCounting(t *testing.T) {
 	pc1 := checkpoint.V2.PreparedClaims["claim-1"]
 
 	// Case 1: Unpreparing claim-1 while claim-2 is still active on GPU-0000.
-	// isGpuUUIDInUseByOtherClaims returns true -> deactivateFabricPartition returns nil early without calling FM DeactivatePartition.
-	err = state.deactivateFabricPartition("claim-1", &pc1, checkpoint)
+	// isGpuUUIDInUseByOtherClaims returns true -> deactivateFabricPartition returns early without calling FM DeactivatePartition.
+	deactivated, err := state.deactivateFabricPartition("claim-1", &pc1, checkpoint)
 	require.NoError(t, err)
+	require.False(t, deactivated, "persistence must not be restored while claim-2 is active")
 	require.Empty(t, fmClient.deactivatedIDs, "FM partition deactivation MUST NOT be called while claim-2 is active")
 	require.Empty(t, smi.nvml.enabledPCI, "persistence must not change while claim-2 is active")
 
@@ -549,9 +550,12 @@ func TestDeactivateFabricPartitionRefCounting(t *testing.T) {
 	// Now deactivateFabricPartition calls FM DeactivatePartition(1).
 	delete(checkpoint.V2.PreparedClaims, "claim-2")
 
-	err = state.deactivateFabricPartition("claim-1", &pc1, checkpoint)
+	deactivated, err = state.deactivateFabricPartition("claim-1", &pc1, checkpoint)
 	require.NoError(t, err)
+	require.True(t, deactivated)
 	require.Equal(t, []int{1}, fmClient.deactivatedIDs, "FM partition deactivation MUST be called when no active claims remain")
+	require.Empty(t, smi.nvml.enabledPCI, "deactivation alone must not change persistence")
+	require.NoError(t, state.enableFabricPartitionPersistence("claim-1", &pc1))
 	require.Len(t, smi.nvml.enabledPCI, 1)
 }
 

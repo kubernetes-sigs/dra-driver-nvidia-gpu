@@ -142,7 +142,9 @@ func TestFabricPartitionLifecycleGPUIdentity(t *testing.T) {
 			require.Equal(t, []int{33}, client.activatedIDs)
 			require.NoError(t, state.activateFabricPartition(claim))
 			require.Equal(t, []int{33}, client.activatedIDs, "retry must not reactivate")
-			require.NoError(t, state.deactivateFabricPartition("claim", &PreparedClaim{Status: claim.Status}, nil))
+			deactivated, err := state.deactivateFabricPartition("claim", &PreparedClaim{Status: claim.Status}, nil)
+			require.NoError(t, err)
+			require.True(t, deactivated)
 			require.Equal(t, []int{33}, client.deactivatedIDs)
 		})
 	}

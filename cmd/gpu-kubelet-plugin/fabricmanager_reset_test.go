@@ -80,7 +80,9 @@ func TestFabricPartitionResetBeforeActivation(t *testing.T) {
 					}
 
 					want := persistenceCommands(smi, inventory, modules)
-					if tc.wantReset {
+					// A single-GPU partition has no NVLinks to train, and
+					// vfio-pci resets the GPU after activation regardless.
+					if tc.wantReset && (!vfio || len(modules) > 1) {
 						want = append(want, resetCommand(smi, inventory, modules))
 					}
 					client.beforeActivate = func() {
