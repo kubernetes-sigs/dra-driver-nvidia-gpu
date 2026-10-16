@@ -172,6 +172,14 @@ func (m *ComputeDomainManager) Start(ctx context.Context) (rerr error) {
 	return nil
 }
 
+// shouldRemoveCliqueLabelOnStop reports whether Stop removes the GPU clique
+// node label. With per-pod socket names (rolling updates), the new plugin
+// instance sets the label before the old instance stops, so the old instance
+// leaves the label in place.
+func shouldRemoveCliqueLabelOnStop(labelEnabled bool, podUID string) bool {
+	return labelEnabled && podUID == ""
+}
+
 //nolint:contextcheck
 func (m *ComputeDomainManager) Stop() error {
 	if m.cancelContext != nil {
@@ -179,7 +187,7 @@ func (m *ComputeDomainManager) Stop() error {
 	}
 	m.waitGroup.Wait()
 
-	if m.config.flags.gpuCliqueLabelEnabled {
+	if shouldRemoveCliqueLabelOnStop(m.config.flags.gpuCliqueLabelEnabled, m.config.flags.podUID) {
 		rmCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := m.RemoveGPUCliqueLabel(rmCtx); err != nil {
