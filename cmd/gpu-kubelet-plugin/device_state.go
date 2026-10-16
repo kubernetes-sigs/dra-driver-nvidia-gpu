@@ -83,6 +83,7 @@ type DeviceState struct {
 
 	nvdevlib          *deviceLib
 	checkpointManager checkpointmanager.CheckpointManager
+	localIPCManager   *LocalIPCManager
 
 	fmManager *fabricmanager.Manager
 
@@ -208,6 +209,10 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("unable to create checkpoint manager: %w", err)
 	}
 
+	// The manager only stores paths. Keep it available when the gate is
+	// disabled so previously prepared claims can still be restored and removed.
+	localIPCManager := NewLocalIPCManager(config.DriverPluginPath())
+
 	cpLockPath := filepath.Join(config.DriverPluginPath(), "cp.lock")
 
 	state := &DeviceState{
@@ -219,6 +224,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		config:            config,
 		nvdevlib:          nvdevlib,
 		checkpointManager: checkpointManager,
+		localIPCManager:   localIPCManager,
 		fmManager:         fmManager,
 		cplock:            flock.NewFlock(cpLockPath),
 	}
@@ -264,10 +270,14 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 				if err != nil {
 					return nil, fmt.Errorf("unable to update checkpoint: %w", err)
 				}
-				syncPreparedDevicesGaugeFromCheckpoint(config.flags.nodeName, cp)
+				if err := state.reconcileCheckpointState(cp); err != nil {
+					return nil, err
+				}
 				return state, nil
 			} else if storedBootID == currentBootID {
-				syncPreparedDevicesGaugeFromCheckpoint(config.flags.nodeName, cp)
+				if err := state.reconcileCheckpointState(cp); err != nil {
+					return nil, err
+				}
 				return state, nil
 			} else {
 				klog.Infof("Invalidating checkpoint: checkpoint nodeBootID %q != current %q", storedBootID, currentBootID)
@@ -279,6 +289,9 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	newCheckpoint := &Checkpoint{V2: &CheckpointV2{NodeBootID: currentBootID}}
 	if err := state.createCheckpoint(ctx, newCheckpoint); err != nil {
 		return nil, fmt.Errorf("unable to create fresh checkpoint: %w", err)
+	}
+	if err := state.reconcileCheckpointState(newCheckpoint); err != nil {
+		return nil, err
 	}
 
 	return state, nil
@@ -315,6 +328,9 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		// Prepare() must be idempotent, as it may be invoked more than once per
 		// claim (and actual device preparation must happen at most once).
 		klog.V(4).Infof("Skip prepare: claim already in PrepareCompleted state: %s", ResourceClaimToString(claim))
+		if err := s.localIPCManager.Restore(claimUID, preparedClaim.Status.Allocation); err != nil {
+			return nil, fmt.Errorf("unable to restore local IPC directory for prepared claim: %w", err)
+		}
 		return preparedClaim.PreparedDevices.GetDevices(), nil
 	}
 
@@ -354,6 +370,15 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	klog.V(6).Infof("t_prep_update_checkpoint %.3f s", time.Since(tucp0).Seconds())
 	klog.V(6).Infof("checkpoint updated for claim %v", claimUID)
 
+	localIPCInfo, err := s.localIPCManager.Prepare(claimUID, claim.Status.Allocation)
+	if err != nil {
+		return nil, fmt.Errorf("unable to prepare local IPC directory: %w", err)
+	}
+	var claimContainerEdits *cdiapi.ContainerEdits
+	if localIPCInfo != nil {
+		claimContainerEdits = localIPCInfo.GetCDIContainerEdits()
+	}
+
 	tprep0 := time.Now()
 	preparedDevices, err := s.prepareDevices(ctx, claim, cp)
 	klog.V(6).Infof("t_prep_core %.3f s (claim %s)", time.Since(tprep0).Seconds(), ResourceClaimToString(claim))
@@ -376,7 +401,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	}
 
 	tccsf0 := time.Now()
-	if err := s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
+	if err := s.cdi.CreateClaimSpecFile(claimUID, preparedDevices, claimContainerEdits); err != nil {
 		return nil, fmt.Errorf("unable to create CDI spec file for claim: %w", err)
 	}
 	klog.V(7).Infof("t_prep_ccsf %.3f s", time.Since(tccsf0).Seconds())
@@ -577,6 +602,11 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 		// attempting to remove the claim from the checkpoint.
 		klog.Errorf("unable to delete CDI spec file for claim %s: %s", claimRef.String(), err)
 	}
+	if err := s.localIPCManager.Remove(claimUID); err != nil {
+		// Keep the checkpoint entry so kubelet can retry cleanup instead of
+		// orphaning a writable claim directory.
+		return false, fmt.Errorf("unable to remove local IPC directory for claim %s: %w", claimRef.String(), err)
+	}
 
 	// Mutate checkpoint reflecting that all devices for this claim have been
 	// unprepared, by virtue of removing its entry (based on claim UID) from the
@@ -609,6 +639,10 @@ func (s *DeviceState) rollbackPartiallyPreparedClaim(ctx context.Context, cuid s
 				return fmt.Errorf("failed to roll back partially prepared MIG devices: %w", err)
 			}
 		}
+	}
+
+	if err := s.localIPCManager.Remove(cuid); err != nil {
+		return fmt.Errorf("failed to remove partially prepared local IPC directory: %w", err)
 	}
 
 	return nil
@@ -795,6 +829,14 @@ func (s *DeviceState) rollbackPartiallyPreparedVFIODevices(ctx context.Context, 
 	return nil
 }
 
+func (s *DeviceState) reconcileCheckpointState(cp *Checkpoint) error {
+	if err := s.localIPCManager.Reconcile(cp.V2.PreparedClaims); err != nil {
+		return fmt.Errorf("unable to reconcile local IPC directories: %w", err)
+	}
+	syncPreparedDevicesGaugeFromCheckpoint(s.config.flags.nodeName, cp)
+	return nil
+}
+
 func (s *DeviceState) createCheckpoint(ctx context.Context, cp *Checkpoint) error {
 	klog.V(6).Info("acquire cplock (create cp)")
 	release, err := s.cplock.Acquire(ctx, flock.WithTimeout(10*time.Second))
@@ -808,7 +850,6 @@ func (s *DeviceState) createCheckpoint(ctx context.Context, cp *Checkpoint) erro
 	if err != nil {
 		return err
 	}
-	syncPreparedDevicesGaugeFromCheckpoint(s.config.flags.nodeName, cp)
 	return nil
 }
 
