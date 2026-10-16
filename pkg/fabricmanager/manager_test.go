@@ -106,10 +106,10 @@ func gpus(ids ...int) []PartitionGPU {
 	return out
 }
 
-func TestPartitionGPUModuleIDs(t *testing.T) {
+func TestPartitionGPUPhysicalIDs(t *testing.T) {
 	p := Partition{GPUs: gpus(3, 7, 2)}
-	if got, want := p.GPUModuleIDs(), []int{3, 7, 2}; !reflect.DeepEqual(got, want) {
-		t.Errorf("GPUModuleIDs = %v, want %v", got, want)
+	if got, want := p.GPUPhysicalIDs(), []int{3, 7, 2}; !reflect.DeepEqual(got, want) {
+		t.Errorf("GPUPhysicalIDs = %v, want %v", got, want)
 	}
 }
 
@@ -148,7 +148,7 @@ func TestDiscoverLookups(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	if p, ok := m.GetPartition(2); !ok || !reflect.DeepEqual(p.GPUModuleIDs(), []int{1, 2, 5, 6}) {
+	if p, ok := m.GetPartition(2); !ok || !reflect.DeepEqual(p.GPUPhysicalIDs(), []int{1, 2, 5, 6}) {
 		t.Errorf("GetPartition(2) = (%+v, %v)", p, ok)
 	}
 	if _, ok := m.GetPartition(999); ok {
@@ -156,10 +156,10 @@ func TestDiscoverLookups(t *testing.T) {
 	}
 }
 
-// TestFindPartitionByModuleIDs covers the inverse lookup used at prepare time:
-// given the exact set of GPU module ids in a claim, find the single partition
+// TestFindPartitionByPhysicalIDs covers the inverse lookup used at prepare time:
+// given the exact set of GPU physical IDs in a claim, find the single partition
 // whose membership matches exactly.
-func TestFindPartitionByModuleIDs(t *testing.T) {
+func TestFindPartitionByPhysicalIDs(t *testing.T) {
 	client := &fakeClient{partitions: designDocPartitions()}
 	m, err := Open(client)
 	if err != nil {
@@ -168,20 +168,20 @@ func TestFindPartitionByModuleIDs(t *testing.T) {
 	defer m.Close()
 
 	// Exact match (order independent).
-	if id, ok := m.FindPartitionByModuleIDs([]int{6, 1, 5, 2}); !ok || id != 2 {
-		t.Errorf("FindPartitionByModuleIDs({1,2,5,6}) = (%d, %v), want (2, true)", id, ok)
+	if id, ok := m.FindPartitionByPhysicalIDs([]int{6, 1, 5, 2}); !ok || id != 2 {
+		t.Errorf("FindPartitionByPhysicalIDs({1,2,5,6}) = (%d, %v), want (2, true)", id, ok)
 	}
 	// Single-GPU partition.
-	if id, ok := m.FindPartitionByModuleIDs([]int{1}); !ok || id != 8 {
-		t.Errorf("FindPartitionByModuleIDs({1}) = (%d, %v), want (8, true)", id, ok)
+	if id, ok := m.FindPartitionByPhysicalIDs([]int{1}); !ok || id != 8 {
+		t.Errorf("FindPartitionByPhysicalIDs({1}) = (%d, %v), want (8, true)", id, ok)
 	}
 	// A subset of a partition does not match.
-	if _, ok := m.FindPartitionByModuleIDs([]int{1, 2}); ok {
-		t.Errorf("FindPartitionByModuleIDs({1,2}) unexpectedly matched")
+	if _, ok := m.FindPartitionByPhysicalIDs([]int{1, 2}); ok {
+		t.Errorf("FindPartitionByPhysicalIDs({1,2}) unexpectedly matched")
 	}
 	// The empty set never matches.
-	if _, ok := m.FindPartitionByModuleIDs(nil); ok {
-		t.Errorf("FindPartitionByModuleIDs(nil) unexpectedly matched")
+	if _, ok := m.FindPartitionByPhysicalIDs(nil); ok {
+		t.Errorf("FindPartitionByPhysicalIDs(nil) unexpectedly matched")
 	}
 }
 
@@ -204,8 +204,8 @@ func TestDiscoverFMPartitionWithArbitraryModuleIDs(t *testing.T) {
 	if !ok {
 		t.Errorf("partition 1 not recorded")
 	}
-	if want := []int{1, 2, 99}; !reflect.DeepEqual(p.GPUModuleIDs(), want) {
-		t.Errorf("partition 1 module ids = %v, want %v", p.GPUModuleIDs(), want)
+	if want := []int{1, 2, 99}; !reflect.DeepEqual(p.GPUPhysicalIDs(), want) {
+		t.Errorf("partition 1 physical IDs = %v, want %v", p.GPUPhysicalIDs(), want)
 	}
 }
 
@@ -282,7 +282,7 @@ func TestDiscoverNilArgs(t *testing.T) {
 	}
 }
 
-func TestGetPartitionsBySizeByModuleID(t *testing.T) {
+func TestGetPartitionsBySizeByPhysicalID(t *testing.T) {
 	client := &fakeClient{partitions: designDocPartitions()}
 	m, err := Open(client)
 	if err != nil {
@@ -290,20 +290,20 @@ func TestGetPartitionsBySizeByModuleID(t *testing.T) {
 	}
 	defer m.Close()
 
-	// Module 1 is in: partition 1 (size 8), 2 (size 4), 4 (size 2), 8 (size 1).
-	got, err := m.GetPartitionsBySizeByModuleID(1)
+	// Physical ID 1 is in: partition 1 (size 8), 2 (size 4), 4 (size 2), 8 (size 1).
+	got, err := m.GetPartitionsBySizeByPhysicalID(1)
 	if err != nil {
-		t.Fatalf("GetPartitionsBySizeByModuleID(1): %v", err)
+		t.Fatalf("GetPartitionsBySizeByPhysicalID(1): %v", err)
 	}
 	want := map[int]int{8: 1, 4: 2, 2: 4, 1: 8}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("size->partitionId for module 1 = %v, want %v", got, want)
 	}
 
-	// An unknown module id yields an empty map and no error.
-	got2, err := m.GetPartitionsBySizeByModuleID(99)
+	// An unknown physical ID yields an empty map and no error.
+	got2, err := m.GetPartitionsBySizeByPhysicalID(99)
 	if err != nil || len(got2) != 0 {
-		t.Errorf("unknown module lookup: got=%v err=%v", got2, err)
+		t.Errorf("unknown physical ID lookup: got=%v err=%v", got2, err)
 	}
 }
 
@@ -320,7 +320,7 @@ func TestGetPartitionsBySizeAmbiguous(t *testing.T) {
 	}
 	defer m.Close()
 
-	if _, err := m.GetPartitionsBySizeByModuleID(1); err == nil {
+	if _, err := m.GetPartitionsBySizeByPhysicalID(1); err == nil {
 		t.Errorf("expected error for ambiguous size mapping")
 	}
 }
@@ -333,11 +333,11 @@ func TestActivateDeactivate(t *testing.T) {
 	}
 	defer m.Close()
 
-	if err := m.ActivatePartition(2); err != nil {
+	if err := m.ActivatePartition(2, nil); err != nil {
 		t.Fatalf("ActivatePartition(2): %v", err)
 	}
-	if err := m.ActivatePartition(8); err != nil {
-		t.Fatalf("ActivatePartition(8): %v", err)
+	if err := m.ActivatePartition(3, nil); err != nil {
+		t.Fatalf("ActivatePartition(3): %v", err)
 	}
 
 	assertActivated := func(id int, want bool) {
@@ -352,13 +352,13 @@ func TestActivateDeactivate(t *testing.T) {
 	}
 
 	assertActivated(2, true)
-	assertActivated(8, true)
+	assertActivated(3, true)
 	assertActivated(1, false)
-	if !reflect.DeepEqual(client.activated, []int{2, 8}) {
-		t.Errorf("client.activated = %v, want [2 8]", client.activated)
+	if !reflect.DeepEqual(client.activated, []int{2, 3}) {
+		t.Errorf("client.activated = %v, want [2 3]", client.activated)
 	}
 
-	if err := m.ActivatePartition(999); err == nil {
+	if err := m.ActivatePartition(999, nil); err == nil {
 		t.Errorf("expected error activating unknown partition")
 	}
 
@@ -366,7 +366,7 @@ func TestActivateDeactivate(t *testing.T) {
 		t.Fatalf("DeactivatePartition(2): %v", err)
 	}
 	assertActivated(2, false)
-	assertActivated(8, true)
+	assertActivated(3, true)
 }
 
 // TestActivatedResolvedFromFM verifies isPartitionActivated reflects whatever
@@ -423,7 +423,7 @@ func TestActivatePartitionFMError(t *testing.T) {
 	}
 	defer m.Close()
 
-	if err := m.ActivatePartition(2); err == nil {
+	if err := m.ActivatePartition(2, nil); err == nil {
 		t.Errorf("expected activation error, got nil")
 	}
 	if active, err := m.isPartitionActivated(2); err != nil || active {
@@ -447,5 +447,62 @@ func TestStubClient(t *testing.T) {
 	}
 	if err := c.Shutdown(); err != nil {
 		t.Errorf("stub Shutdown: %v", err)
+	}
+}
+
+func TestActivatePartitionPreparation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		activeID   int
+		unknown    bool
+		missing    bool
+		listErr    error
+		prepareErr error
+		fmErr      error
+		wantCalls  []string
+		wantError  bool
+	}{
+		{name: "ordered preparation", wantCalls: []string{"list", "prepare", "activate"}},
+		{name: "active partition", activeID: 2, wantCalls: []string{"list"}},
+		{name: "disjoint active partition", activeID: 3, wantCalls: []string{"list", "prepare", "activate"}},
+		{name: "overlapping partition", activeID: 8, wantCalls: []string{"list"}, wantError: true},
+		{name: "unknown partition", unknown: true, wantError: true},
+		{name: "partition disappeared", missing: true, wantCalls: []string{"list"}, wantError: true},
+		{name: "query failure", listErr: errors.New("query failed"), wantCalls: []string{"list"}, wantError: true},
+		{name: "preparation failure", prepareErr: errors.New("prepare failed"), wantCalls: []string{"list", "prepare"}, wantError: true},
+		{name: "activation failure", fmErr: errors.New("activation failed"), wantCalls: []string{"list", "prepare", "activate"}, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &fakeClient{partitions: designDocPartitions()}
+			m, err := Open(client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			client.setActive(tc.activeID, true)
+			if tc.missing {
+				client.partitions = nil
+			}
+			client.listErr = tc.listErr
+			client.activateErr = tc.fmErr
+			client.calls = nil
+			id := 2
+			if tc.unknown {
+				id = 999
+			}
+			err = m.ActivatePartition(id, func() error {
+				client.calls = append(client.calls, "prepare")
+				return tc.prepareErr
+			})
+			if (err != nil) != tc.wantError {
+				t.Fatalf("ActivatePartition error = %v, want error %t", err, tc.wantError)
+			}
+			if !reflect.DeepEqual(client.calls, tc.wantCalls) {
+				t.Fatalf("calls = %v, want %v", client.calls, tc.wantCalls)
+			}
+			if tc.prepareErr != nil && !errors.Is(err, tc.prepareErr) {
+				t.Fatalf("preparation error not preserved: %v", err)
+			}
+		})
 	}
 }
