@@ -101,9 +101,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		pulock: flock.NewFlock(puLockPath),
 	}
 
-	helper, err := kubeletplugin.Start(
-		ctx,
-		driver,
+	opts := []kubeletplugin.Option{
 		kubeletplugin.KubeClient(driver.client),
 		kubeletplugin.NodeName(config.flags.nodeName),
 		kubeletplugin.DriverName(DriverName),
@@ -119,7 +117,15 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		// This plugin does not report device health (KEP-4680), so don't
 		// advertise the DRAResourceHealth service to the kubelet.
 		kubeletplugin.HealthService(false),
-	)
+	}
+	if podUID := config.flags.podUID; podUID != "" {
+		// Per-pod socket names let the kubelet reach two instances during a
+		// rolling update. pu.lock serializes each Prepare and Unprepare
+		// attempt across the instances.
+		klog.Infof("Using per-pod socket names for rolling updates (pod UID %s)", podUID)
+		opts = append(opts, kubeletplugin.RollingUpdate(types.UID(podUID)))
+	}
+	helper, err := kubeletplugin.Start(ctx, driver, opts...)
 	if err != nil {
 		return nil, err
 	}
