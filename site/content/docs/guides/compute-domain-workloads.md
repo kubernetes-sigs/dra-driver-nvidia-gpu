@@ -113,11 +113,12 @@ The controller forces the generated workload claim to `Single`, so a requested
 By default, the IMEX channel device on a node can be allocated to only one claim.
 Each pod that references the ComputeDomain's `ResourceClaimTemplate` gets its own claim, so only one such pod can run on each node.
 
-To run several pods of the same ComputeDomain on one node, enable the Alpha `ConsumableShares` feature gate and set `resources.computeDomains.consumableShares`:
+To run several pods of the same ComputeDomain on one node, enable the Alpha `ConsumableShares` and `ComputeDomainChannelReservations` feature gates and set `resources.computeDomains.consumableShares`:
 
 ```yaml
 featureGates:
   ConsumableShares: true
+  ComputeDomainChannelReservations: true
 resources:
   computeDomains:
     consumableShares: "unlimited"
@@ -130,10 +131,41 @@ The channel is then published as multi-allocatable, using Kubernetes DRA [consum
 On Kubernetes v1.34 and v1.35, also enable the upstream `DRAConsumableCapacity` feature gate on the kube-apiserver, kube-controller-manager, kube-scheduler, and kubelet.
 
 Sharing is limited to claims of the same ComputeDomain.
-The kubelet plugin rejects a claim for a different ComputeDomain on a channel that is already in use, which preserves IMEX isolation between ComputeDomains.
+Channel reservations keep the scheduler from placing claims of different ComputeDomains on one shared channel, so the kubelet plugin refuses to start with `consumableShares` set unless `ComputeDomainChannelReservations` is enabled.
+As a backstop, the kubelet plugin rejects a claim for a different ComputeDomain on a channel that is already in use with a permanent error, which preserves IMEX isolation between ComputeDomains.
 The first claim on a node starts the ComputeDomain's IMEX daemon (in `hostManaged` mode, it checks host IMEX readiness), and later claims only inject the channel.
 The IMEX daemon stays on the node until the last claim of that ComputeDomain is unprepared.
 The ComputeDomain daemon device itself is never shared.
+
+### Use several claim templates per ComputeDomain
+
+With the Alpha `ComputeDomainChannelReservations` feature gate, a ComputeDomain can generate several `ResourceClaimTemplate` objects, each backed by its own IMEX channel:
+
+```yaml
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: my-compute-domain
+spec:
+  channel:
+    resourceClaimTemplate:
+      name: imex-channel
+      count: 2
+```
+
+This creates `imex-channel-0` and `imex-channel-1`.
+Pods using different templates run in the same ComputeDomain, can share a node, and are isolated from each other.
+Pods using the same template get the same channel on every node.
+Inspect `status.channels` to find the channel behind each template (index `i` backs template `imex-channel-i`), and check `/dev/nvidia-caps-imex-channels/channel<N>` in the workload instead of `channel0`:
+
+```bash
+kubectl get computedomain my-compute-domain -o jsonpath='{.status.channels}'
+```
+
+`allocationMode: All` requires `count: 1`.
+It is a compatibility mode that exposes all channels of the ComputeDomain's IMEX domain to each workload, not only the allocated one.
+Do not use it when workloads of a ComputeDomain must be isolated from each other.
+Several pods using the same template on one node also need [consumable shares](#run-several-workload-pods-per-node).
 
 ## Check status
 
