@@ -17,7 +17,11 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -25,6 +29,7 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	cperrors "k8s.io/kubernetes/pkg/kubelet/checkpointmanager/errors"
 	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
@@ -660,6 +665,80 @@ func TestValidateAdminAccessRequest(t *testing.T) {
 	}
 }
 
+func TestOwnedStatusKeepsOnlyOurResults(t *testing.T) {
+	statusWith := func(results ...resourceapi.DeviceRequestAllocationResult) resourceapi.ResourceClaimStatus {
+		return resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
+			Devices: resourceapi.DeviceAllocationResult{Results: results},
+		}}
+	}
+
+	t.Run("an unallocated claim is left alone", func(t *testing.T) {
+		require.Nil(t, ownedStatus(resourceapi.ResourceClaimStatus{}).Allocation)
+	})
+
+	t.Run("results of other drivers are dropped", func(t *testing.T) {
+		in := statusWith(
+			resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: "foreign-0"},
+			resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: "gpu-0"},
+		)
+
+		got := ownedStatus(in)
+
+		require.Equal(t,
+			[]resourceapi.DeviceRequestAllocationResult{{Driver: DriverName, Device: "gpu-0"}},
+			got.Allocation.Devices.Results)
+	})
+
+	// claim.Status comes from the informer cache, so neither the filtering nor
+	// anything done to the result afterwards may reach it.
+	t.Run("the claim we were handed is not modified", func(t *testing.T) {
+		in := statusWith(
+			resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: "foreign-0"},
+			resourceapi.DeviceRequestAllocationResult{
+				Driver:            DriverName,
+				Device:            "gpu-0",
+				AdminAccess:       ptr.To(false),
+				BindingConditions: []string{"condition"},
+			},
+		)
+
+		got := ownedStatus(in)
+		*got.Allocation.Devices.Results[0].AdminAccess = true
+		got.Allocation.Devices.Results[0].BindingConditions[0] = "rewritten"
+
+		require.Len(t, in.Allocation.Devices.Results, 2)
+		require.False(t, *in.Allocation.Devices.Results[1].AdminAccess)
+		require.Equal(t, []string{"condition"}, in.Allocation.Devices.Results[1].BindingConditions)
+	})
+
+	// Every claim a single-driver node sees takes this path, so it must not pay
+	// for a copy of the status.
+	t.Run("a claim that is all ours is handed straight back", func(t *testing.T) {
+		in := statusWith(resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: "gpu-0"})
+
+		got := ownedStatus(in)
+
+		require.Same(t, in.Allocation, got.Allocation)
+	})
+
+	t.Run("an allocation with no results keeps having none", func(t *testing.T) {
+		in := resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{}}
+
+		got := ownedStatus(in)
+
+		require.Nil(t, got.Allocation.Devices.Results)
+	})
+
+	t.Run("a claim with nothing of ours ends up empty", func(t *testing.T) {
+		in := statusWith(resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: "foreign-0"})
+
+		got := ownedStatus(in)
+
+		require.Empty(t, got.Allocation.Devices.Results)
+	})
+}
+
+// An upgrade converts the checkpoint on read, which is a write of our own.
 func TestIsAdminAccessIgnoresOtherDrivers(t *testing.T) {
 	results := []resourceapi.DeviceRequestAllocationResult{
 		{Driver: "other.driver.com", AdminAccess: ptr.To(true)},
@@ -936,5 +1015,240 @@ func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
 
 		require.NoError(t, err)
 		require.Zero(t, nvmllib.deviceGetHandleByUUIDCalls, "a device held by a completed claim must not reach MIG teardown")
+	})
+}
+
+// A checkpoint written before ownedStatus existed still holds other drivers'
+// results, and its readers cannot tell them from devices we placed.
+func TestOwnedCheckpointDropsOtherDriversResults(t *testing.T) {
+	claim := func(results ...resourceapi.DeviceRequestAllocationResult) PreparedClaim {
+		return PreparedClaim{
+			CheckpointState: ClaimCheckpointStatePrepareCompleted,
+			Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{Results: results},
+			}},
+		}
+	}
+	cp := &CheckpointV2{PreparedClaims: PreparedClaimsByUID{
+		"mixed": claim(
+			resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: "gpu-1-mig-foreign-14-4"},
+			resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: "gpu-0-mig-1g10gb-19-0"},
+		),
+		"ours":        claim(resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: "gpu-2"}),
+		"unallocated": {CheckpointState: ClaimCheckpointStatePrepareCompleted},
+	}}
+
+	ownedCheckpoint(cp)
+
+	require.Equal(t,
+		[]resourceapi.DeviceRequestAllocationResult{{Driver: DriverName, Device: "gpu-0-mig-1g10gb-19-0"}},
+		cp.PreparedClaims["mixed"].Status.Allocation.Devices.Results)
+	require.Len(t, cp.PreparedClaims["ours"].Status.Allocation.Devices.Results, 1)
+	require.Nil(t, cp.PreparedClaims["unallocated"].Status.Allocation)
+}
+
+// A checkpoint written by an earlier version keeps other drivers' results
+// until something filters them on the way back in.
+func TestCheckpointReadDropsOtherDriversResults(t *testing.T) {
+	tests := map[string]struct {
+		checkpoint *Checkpoint
+		write      func(*testing.T, string)
+	}{
+		"a V2 checkpoint": {
+			checkpoint: &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{
+				"mixed": mixedClaim(),
+			}}},
+		},
+		// A V1 checkpoint predates the filter by two releases. Writing one
+		// through MarshalCheckpoint() would upgrade it on the way out, so the
+		// bytes of that era go to the file directly.
+		"a V1 checkpoint": {
+			write: writeLegacyCheckpoint,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			state, dir := newCleanupTestDeviceStateInDir(t, tc.checkpoint)
+			if tc.write != nil {
+				tc.write(t, dir)
+			}
+			checkpointReadDropsOtherDriversResults(t, state)
+		})
+	}
+
+	// Filtering runs on what the checksum covered, so a file that fails
+	// verification is still refused rather than read as whatever survived it.
+	t.Run("a checkpoint the checksum rejects", func(t *testing.T) {
+		state, dir := newCleanupTestDeviceStateInDir(t, nil)
+		state.config = &Config{flags: &Flags{}}
+		writeLegacyCheckpoint(t, dir)
+
+		path := filepath.Join(dir, DriverPluginCheckpointFileBasename)
+		raw, err := os.ReadFile(path)
+		require.NoError(t, err)
+		tampered := bytes.Replace(raw, []byte(DriverName), []byte("tampered.com"), 1)
+		require.NotEqual(t, raw, tampered, "the file has to be changed for the checksum to reject it")
+		require.NoError(t, os.WriteFile(path, tampered, 0o600))
+
+		_, err = state.getCheckpoint(context.Background())
+		require.ErrorIs(t, err, cperrors.CorruptCheckpointError{})
+	})
+}
+
+// writeLegacyCheckpoint puts a V1-only checkpoint at the path the plugin reads,
+// as one written before V2 existed would be: no V2 object, and the checksum
+// that era's writer set.
+func writeLegacyCheckpoint(t *testing.T, dir string) {
+	t.Helper()
+
+	legacy := &Checkpoint{V1: &CheckpointV1{PreparedClaims: PreparedClaimsByUIDV1{
+		"mixed": {Status: mixedClaim().Status},
+	}}}
+	require.NoError(t, legacy.SetChecksumV1())
+
+	raw, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), `"v2"`, "the read under test is the one that converts V1")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, DriverPluginCheckpointFileBasename), raw, 0o600))
+}
+
+func mixedClaim() PreparedClaim {
+	return PreparedClaim{
+		CheckpointState: ClaimCheckpointStatePrepareCompleted,
+		Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
+			Devices: resourceapi.DeviceAllocationResult{Results: []resourceapi.DeviceRequestAllocationResult{
+				{Driver: "other.driver.com", Device: "gpu-1-mig-foreign-14-4"},
+				{Driver: DriverName, Device: "gpu-0-mig-1g10gb-19-0"},
+			}},
+		}},
+	}
+}
+
+func checkpointReadDropsOtherDriversResults(t *testing.T, state *DeviceState) {
+	t.Helper()
+
+	ours := []resourceapi.DeviceRequestAllocationResult{{Driver: DriverName, Device: "gpu-0-mig-1g10gb-19-0"}}
+	state.config = &Config{flags: &Flags{}} // updateCheckpoint reports a gauge per node
+	ctx := context.Background()
+
+	cp, err := state.getCheckpoint(ctx)
+	require.NoError(t, err)
+	require.Equal(t, ours, cp.V2.PreparedClaims["mixed"].Status.Allocation.Devices.Results)
+
+	// A write has to persist what the read returned, or every restart filters
+	// the same results again, and a claim this write adds must be filtered too.
+	require.NoError(t, state.updateCheckpoint(ctx, func(cp *Checkpoint) {
+		cp.V2.PreparedClaims["added"] = mixedClaim()
+	}))
+
+	ondisk := &Checkpoint{}
+	require.NoError(t, state.checkpointManager.GetCheckpoint(DriverPluginCheckpointFileBasename, ondisk))
+	claims := ondisk.ToLatestVersion().V2.PreparedClaims
+	require.Equal(t, ours, claims["mixed"].Status.Allocation.Devices.Results)
+	require.Equal(t, ours, claims["added"].Status.Allocation.Devices.Results)
+}
+
+// A completed claim whose allocation is missing from the checkpoint still
+// holds whatever it was prepared with, so nothing may be torn down on its
+// behalf until that can be told apart from holding nothing.
+func TestCheckpointedClaimThatCannotBeAccountedFor(t *testing.T) {
+	enableDynamicMIGForTest(t)
+
+	const owned = "gpu-0-mig-1g10gb-19-0"
+	preparedWith := func(name DeviceName) PreparedDevices {
+		return PreparedDevices{{Devices: PreparedDeviceList{newPreparedMigDevice(name, "MIG-0000")}}}
+	}
+	completed := func(claim PreparedClaim) PreparedClaimsByUID {
+		claim.CheckpointState = ClaimCheckpointStatePrepareCompleted
+		return PreparedClaimsByUID{"completed": claim}
+	}
+
+	// The device under test sits on GPU-0, whose parent resolves by PCI bus ID
+	// as well as by minor. The UUID that reaches NVML is then the evidence for
+	// how far the scan got, and it is a specific one.
+	target := &MigSpecTuple{ParentMinor: 0, ParentPCIBusID: "0000:01:00.0", ProfileID: 19}
+	lookingUp := func() (*DeviceState, *mockNVMLLibrary) {
+		nvmllib := &mockNVMLLibrary{deviceGetHandleByUUIDFunc: func(string) (nvml.Device, nvml.Return) {
+			return nil, nvml.ERROR_NOT_FOUND
+		}}
+		return &DeviceState{nvdevlib: &deviceLib{
+			nvmllib: nvmllib,
+			gpuInfosByUUID: map[string]*GpuInfo{
+				"GPU-0": {UUID: "GPU-0", minor: 0, pciBusID: "0000:01:00.0"},
+				"GPU-1": {UUID: "GPU-1", minor: 1, pciBusID: "0000:02:00.0"},
+			},
+			gpuUUIDbyPCIBusID: map[PCIBusID]string{"0000:01:00.0": "GPU-0", "0000:02:00.0": "GPU-1"},
+			devhandleByUUID:   map[string]nvml.Device{},
+		}}, nvmllib
+	}
+
+	t.Run("the teardown routine leaves the GPUs alone", func(t *testing.T) {
+		visited := 0
+		state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{
+			PreparedClaims: completed(PreparedClaim{}),
+		}})
+		state.nvdevlib = &deviceLib{Interface: fakeNVMLDeviceLib{visited: &visited}}
+
+		state.DestroyUnknownMIGDevices(context.Background())
+
+		require.Zero(t, visited, "a keep-list that cannot be completed MUST NOT reach the device walk")
+	})
+
+	t.Run("the device stays when the claim holding it cannot be read", func(t *testing.T) {
+		state, nvmllib := lookingUp()
+
+		err := state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(target, owned, completed(PreparedClaim{}))
+
+		require.NoError(t, err)
+		require.Empty(t, nvmllib.deviceGetHandleByUUIDArgs, "teardown MUST NOT be attempted")
+	})
+
+	t.Run("prepared devices answer for a claim with no allocation", func(t *testing.T) {
+		state, nvmllib := lookingUp()
+
+		err := state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(
+			target, owned, completed(PreparedClaim{PreparedDevices: preparedWith(owned)}))
+
+		require.NoError(t, err)
+		require.Empty(t, nvmllib.deviceGetHandleByUUIDArgs, "the device is in use, teardown MUST NOT be attempted")
+	})
+
+	// Without this the two cases above would pass just as well if the scan
+	// never told the two apart and kept every device.
+	t.Run("a device no prepared claim names reaches the teardown lookup", func(t *testing.T) {
+		state, nvmllib := lookingUp()
+
+		err := state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(
+			target, owned, completed(PreparedClaim{PreparedDevices: preparedWith("gpu-1-mig-1g10gb-19-0")}))
+
+		require.Error(t, err, "the lookup is attempted and the stubbed NVML refuses it")
+		require.Equal(t, []string{"GPU-0"}, nvmllib.deviceGetHandleByUUIDArgs, "the parent of the device under test")
+	})
+
+	// Reading a prepared device through CanonicalName() would panic on an entry
+	// this malformed, and the readable device beside it is what let a partial
+	// keep-list pass for a complete one.
+	t.Run("a readable device beside an unreadable one", func(t *testing.T) {
+		visited := 0
+		state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{
+			PreparedClaims: completed(PreparedClaim{PreparedDevices: PreparedDevices{
+				{Devices: PreparedDeviceList{newPreparedMigDevice(owned, "MIG-0000"), {}, {Mig: &PreparedMigDevice{}}}},
+			}}),
+		}})
+		state.nvdevlib = &deviceLib{Interface: fakeNVMLDeviceLib{visited: &visited}}
+
+		require.NotPanics(t, func() { state.DestroyUnknownMIGDevices(context.Background()) })
+		require.Zero(t, visited, "a claim we still cannot read MUST NOT reach the device walk")
+	})
+
+	t.Run("partial rollback has nothing left to derive", func(t *testing.T) {
+		state := &DeviceState{}
+
+		err := state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", PreparedClaim{},
+			&Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
+
+		require.NoError(t, err)
 	})
 }
