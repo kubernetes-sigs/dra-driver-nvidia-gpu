@@ -37,6 +37,7 @@ import (
 
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 )
 
 const (
@@ -57,6 +58,8 @@ type ResourceClaimTemplateTemplateData struct {
 	ChannelConfig           *nvapi.ComputeDomainChannelConfig
 	DaemonConfig            *nvapi.ComputeDomainDaemonConfig
 	ChannelSelector         string
+	OwnerTolerationKey      string
+	OwnerTolerationValue    string
 }
 
 type BaseResourceClaimTemplateManager struct {
@@ -479,6 +482,11 @@ func (m *WorkloadResourceClaimTemplateManager) create(ctx context.Context, cd *n
 	if channel >= 0 {
 		templateData.DeviceClassName = computeDomainChannelDeviceClass
 		templateData.ChannelSelector = channelSelectorExpression(channel)
+		// Tolerate the taints keeping other ComputeDomains off its channels.
+		if hostManaged {
+			templateData.OwnerTolerationKey = imex.ChannelOwnerTaintKey
+			templateData.OwnerTolerationValue = string(cd.UID)
+		}
 	}
 
 	if _, err := m.BaseResourceClaimTemplateManager.Create(ctx, WorkloadResourceClaimTemplateTemplatePath, &templateData); err != nil {
@@ -488,13 +496,26 @@ func (m *WorkloadResourceClaimTemplateManager) create(ctx context.Context, cd *n
 }
 
 // upToDate reports whether an existing template requests its reserved
-// channel. Legacy host-managed templates keep requesting the shared channel
-// through the default channel DeviceClass.
+// channel and tolerates its taints. Legacy host-managed templates keep
+// requesting the shared channel through the default channel DeviceClass.
 func (m *WorkloadResourceClaimTemplateManager) upToDate(rct *resourceapi.ResourceClaimTemplate, cd *nvapi.ComputeDomain, channel int) bool {
-	if m.config.imexConfig.EffectiveHostManaged() && channel == legacySharedChannel && isLegacyWorkloadTemplate(rct) {
+	hostManaged := m.config.imexConfig.EffectiveHostManaged()
+	if hostManaged && channel == legacySharedChannel && isLegacyWorkloadTemplate(rct) {
 		return true
 	}
-	return resourceClaimTemplatePinnedToChannel(rct, channel)
+	if !resourceClaimTemplatePinnedToChannel(rct, channel) {
+		return false
+	}
+	return !hostManaged || resourceClaimTemplateToleratesOwner(rct, string(cd.UID))
+}
+
+func resourceClaimTemplateToleratesOwner(rct *resourceapi.ResourceClaimTemplate, uid string) bool {
+	return slices.ContainsFunc(rct.Spec.Spec.Devices.Requests, func(r resourceapi.DeviceRequest) bool {
+		return r.Exactly != nil && slices.ContainsFunc(r.Exactly.Tolerations, func(t resourceapi.DeviceToleration) bool {
+			return t.Key == imex.ChannelOwnerTaintKey && t.Operator == resourceapi.DeviceTolerationOpEqual &&
+				t.Value == uid && t.Effect == resourceapi.DeviceTaintEffectNoSchedule
+		})
+	})
 }
 
 // HasLegacyTemplate reports whether a ComputeDomain has a workload template

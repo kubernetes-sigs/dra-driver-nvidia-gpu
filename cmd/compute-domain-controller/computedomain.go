@@ -460,6 +460,9 @@ func (m *ComputeDomainManager) onAddOrUpdateHostManaged(ctx context.Context, cd 
 			if err := m.channelReservationManager.AssertNoClaimsReferenceComputeDomain(ctx, string(cd.UID)); err != nil {
 				return err
 			}
+			if err := m.channelReservationManager.DeleteTaintRules(ctx, string(cd.UID)); err != nil {
+				return err
+			}
 		}
 		m.channelReservationManager.Release(string(cd.UID))
 
@@ -491,6 +494,9 @@ func (m *ComputeDomainManager) onAddOrUpdateHostManaged(ctx context.Context, cd 
 			return fmt.Errorf("error reserving IMEX channels: %w", err)
 		}
 		cd = reservedCD
+		if err := m.channelReservationManager.EnsureChannelTaintRules(ctx, cd); err != nil {
+			return fmt.Errorf("error tainting reserved IMEX channels: %w", err)
+		}
 	}
 
 	// Create the workload ResourceClaimTemplates. Their manager adds and

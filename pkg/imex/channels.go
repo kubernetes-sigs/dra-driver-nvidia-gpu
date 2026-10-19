@@ -25,6 +25,10 @@ const (
 
 	// MaxChannels is the number of IMEX channels the GPU driver supports.
 	MaxChannels = 2048
+
+	// ChannelOwnerTaintKey is the device taint key whose value is the UID of
+	// the ComputeDomain allowed to use the device.
+	ChannelOwnerTaintKey = "compute-domain.nvidia.com/owner"
 )
 
 // ValidateMaxChannels validates the imex-max-channels flag.
