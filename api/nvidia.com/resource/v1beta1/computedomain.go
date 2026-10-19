@@ -93,6 +93,7 @@ type ComputeDomainSpec struct {
 }
 
 // ComputeDomainChannelSpec provides the spec for a channel used to run a workload inside a ComputeDomain.
+// +kubebuilder:validation:XValidation:rule="!has(self.resourceClaimTemplate.count) || self.resourceClaimTemplate.count <= 1 || !has(self.allocationMode) || self.allocationMode != 'All'", message="allocationMode All requires resourceClaimTemplate.count to be 1"
 type ComputeDomainChannelSpec struct {
 	ResourceClaimTemplate ComputeDomainResourceClaimTemplate `json:"resourceClaimTemplate"`
 	// Allows for requesting all IMEX channels (the maximum per IMEX domain) or
@@ -106,6 +107,15 @@ type ComputeDomainChannelSpec struct {
 // ComputeDomainResourceClaimTemplate provides the details of the ResourceClaimTemplate to generate.
 type ComputeDomainResourceClaimTemplate struct {
 	Name string `json:"name"`
+	// Number of workload ResourceClaimTemplates to generate, each backed by
+	// its own IMEX channel. A single template is named `name`, multiple ones
+	// `name-0` to `name-<count-1>`. Values above 1 require the
+	// ComputeDomainChannelReservations feature gate.
+	// +kubebuilder:default:=1
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=128
+	// +kubebuilder:validation:Optional
+	Count int `json:"count,omitempty"`
 }
 
 // ComputeDomainStatus provides the status for a ComputeDomain.
@@ -116,6 +126,12 @@ type ComputeDomainStatus struct {
 	// +listType=map
 	// +listMapKey=name
 	Nodes []*ComputeDomainNode `json:"nodes,omitempty"`
+	// IMEX channels reserved for this ComputeDomain, where Channels[i] backs
+	// ResourceClaimTemplate i. Set with the ComputeDomainChannelReservations
+	// feature gate.
+	// +listType=atomic
+	// +kubebuilder:validation:Optional
+	Channels []int `json:"channels,omitempty"`
 }
 
 // ComputeDomainNode provides information about each node added to a ComputeDomain.

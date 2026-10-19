@@ -57,6 +57,16 @@ spec:
                     description: ComputeDomainResourceClaimTemplate provides the details
                       of the ResourceClaimTemplate to generate.
                     properties:
+                      count:
+                        default: 1
+                        description: |-
+                          Number of workload ResourceClaimTemplates to generate, each backed by
+                          its own IMEX channel. A single template is named `name`, multiple ones
+                          `name-0` to `name-<count-1>`. Values above 1 require the
+                          ComputeDomainChannelReservations feature gate.
+                        maximum: 128
+                        minimum: 1
+                        type: integer
                       name:
                         type: string
                     required:
@@ -65,6 +75,11 @@ spec:
                 required:
                 - resourceClaimTemplate
                 type: object
+                x-kubernetes-validations:
+                - message: allocationMode All requires resourceClaimTemplate.count
+                    to be 1
+                  rule: '!has(self.resourceClaimTemplate.count) || self.resourceClaimTemplate.count
+                    <= 1 || !has(self.allocationMode) || self.allocationMode != ''All'''
               numNodes:
                 default: 0
                 description: |-
@@ -106,6 +121,15 @@ spec:
               Workload however should not rely on inspecting this field at any point
               during its lifecycle.
             properties:
+              channels:
+                description: |-
+                  IMEX channels reserved for this ComputeDomain, where Channels[i] backs
+                  ResourceClaimTemplate i. Set with the ComputeDomainChannelReservations
+                  feature gate.
+                items:
+                  type: integer
+                type: array
+                x-kubernetes-list-type: atomic
               nodes:
                 items:
                   description: ComputeDomainNode provides information about each node

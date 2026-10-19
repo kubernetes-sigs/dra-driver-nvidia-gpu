@@ -134,6 +134,7 @@ resources:
 #   HostManagedIMEXDaemon: false       # Gate allowing resources.computeDomains.imex.mode=hostManaged
 #   DRAListTypeAttributes: false       # Publish list-valued DRA device attributes
 #   ConsumableShares: false            # Publish consumable capacity and multi-allocation support for devices
+#   ComputeDomainChannelReservations: false # Reserve IMEX channels per ComputeDomain
 featureGates: {}
 
 # Log verbosity for all components. Zero or greater, higher number means higher
