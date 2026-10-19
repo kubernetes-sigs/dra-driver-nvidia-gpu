@@ -311,14 +311,14 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 
 	switch pc.CheckpointState {
 	case ClaimCheckpointStatePrepareCompleted:
-		if err := s.unprepareDevices(ctx, &pc.Status); err != nil {
+		if err := s.unprepareDevices(ctx, claimUID, &pc.Status, checkpoint); err != nil {
 			return fmt.Errorf("unprepare devices failed: %w", err)
 		}
 		if err := s.deleteClaimFromCheckpoint(claimRef); err != nil {
 			return fmt.Errorf("error deleting completed claim from checkpoint: %w", err)
 		}
 	case ClaimCheckpointStatePrepareStarted:
-		if err := s.unprepareDevices(ctx, &pc.Status); err != nil {
+		if err := s.unprepareDevices(ctx, claimUID, &pc.Status, checkpoint); err != nil {
 			return fmt.Errorf("unprepare devices failed: %w", err)
 		}
 		// Keep a short-lived PrepareAborted entry so stale prepare retries for the
@@ -579,7 +579,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 	return preparedDevices, nil
 }
 
-func (s *DeviceState) unprepareDevices(ctx context.Context, cs *resourceapi.ResourceClaimStatus) error {
+func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, cs *resourceapi.ResourceClaimStatus, checkpoint *Checkpoint) error {
 	// Generate a mapping of each OpaqueDeviceConfigs to the Device.Results it
 	// applies to. Non-strict decoding: do not error out on unknown fields (data
 	// source is checkpointed JSON written by potentially newer versions of this
@@ -596,6 +596,12 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, cs *resourceapi.Reso
 			// Host-managed mode never adds the ComputeDomain node label, so
 			// there is nothing to remove here.
 			if s.config.imexConfig.EffectiveHostManaged() {
+				continue
+			}
+			// The node label keeps the ComputeDomain's IMEX daemon on this
+			// node, so keep it while other claims still share the channel.
+			if isConsumableSharesEnabled(s.config) && s.isComputeDomainChannelInUseByOtherClaims(checkpoint, claimUID, config.DomainID) {
+				klog.V(4).Infof("Unprepare: ComputeDomain %s still in use by other claims, keeping Node label", config.DomainID)
 				continue
 			}
 			// If a channel type, remove the ComputeDomain label from the node
@@ -655,7 +661,14 @@ func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Con
 	}
 	channelID := device.Channel.ID
 
-	if err := s.assertImexChannelNotAllocated(channelID); err != nil {
+	sharedWithDomain := false
+	if isConsumableSharesEnabled(s.config) {
+		shared, err := s.assertImexChannelSharableByComputeDomain(channelID, config.DomainID)
+		if err != nil {
+			return nil, fmt.Errorf("allocation failed: %w", err)
+		}
+		sharedWithDomain = shared
+	} else if err := s.assertImexChannelNotAllocated(channelID); err != nil {
 		return nil, fmt.Errorf("allocation failed: %w", err)
 	}
 
@@ -674,7 +687,11 @@ func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Con
 		return &configState, nil
 	}
 
-	if err := s.nvdevlib.checkHostIMEXReady(s.config.flags.imexHostSocketPath); err != nil {
+	// The first claim sharing this channel already validated host IMEX
+	// readiness.
+	if sharedWithDomain {
+		klog.V(4).Infof("Channel %d already prepared for ComputeDomain %s, skipping host IMEX readiness check", channelID, config.DomainID)
+	} else if err := s.nvdevlib.checkHostIMEXReady(s.config.flags.imexHostSocketPath); err != nil {
 		return nil, fmt.Errorf("host nvidia-imex daemon readiness check failed: %w", err)
 	}
 
@@ -706,7 +723,14 @@ func (s *DeviceState) applyComputeDomainChannelConfigDriverManaged(ctx context.C
 
 	// Treat each request as a request for channel zero, even if
 	// AllocationModeAll.
-	if err := s.assertImexChannelNotAllocated(0); err != nil {
+	sharedWithDomain := false
+	if isConsumableSharesEnabled(s.config) {
+		shared, err := s.assertImexChannelSharableByComputeDomain(0, config.DomainID)
+		if err != nil {
+			return nil, fmt.Errorf("allocation failed: %w", err)
+		}
+		sharedWithDomain = shared
+	} else if err := s.assertImexChannelNotAllocated(0); err != nil {
 		return nil, fmt.Errorf("allocation failed: %w", err)
 	}
 
@@ -715,12 +739,19 @@ func (s *DeviceState) applyComputeDomainChannelConfigDriverManaged(ctx context.C
 		return nil, permanentError{fmt.Errorf("error asserting ComputeDomain's namespace: %w", err)}
 	}
 
-	if err := s.computeDomainManager.AddNodeLabel(ctx, config.DomainID); err != nil {
-		return nil, fmt.Errorf("error adding Node label for ComputeDomain: %w", err)
-	}
+	// Only the first claim of a ComputeDomain on this node bootstraps the IMEX
+	// daemon (node label) and waits for it to become ready. Claims sharing the
+	// channel afterwards only need the channel injected.
+	if sharedWithDomain {
+		klog.V(4).Infof("Channel 0 already prepared for ComputeDomain %s, skipping IMEX daemon bootstrap", config.DomainID)
+	} else {
+		if err := s.computeDomainManager.AddNodeLabel(ctx, config.DomainID); err != nil {
+			return nil, fmt.Errorf("error adding Node label for ComputeDomain: %w", err)
+		}
 
-	if err := s.computeDomainManager.AssertComputeDomainReady(ctx, config.DomainID); err != nil {
-		return nil, fmt.Errorf("error asserting ComputeDomain Ready: %w", err)
+		if err := s.computeDomainManager.AssertComputeDomainReady(ctx, config.DomainID); err != nil {
+			return nil, fmt.Errorf("error asserting ComputeDomain Ready: %w", err)
+		}
 	}
 
 	if s.computeDomainManager.CliqueID() == "" {
@@ -880,8 +911,8 @@ func (s *DeviceState) getConfigResultsMap(rcs *resourceapi.ResourceClaimStatus, 
 // resource are processed in the correct order (this prevents for example
 // unprepare-after-prepare, cf. issue 641).
 //
-// The implementation may become more involved when the same IMEX channel may be
-// shared across pods on the same node).
+// With consumable shares, assertImexChannelSharableByComputeDomain() is used
+// instead.
 func (s *DeviceState) assertImexChannelNotAllocated(id int) error {
 	cp, err := s.getCheckpoint()
 	if err != nil {
@@ -1055,6 +1086,14 @@ func (s *DeviceState) validateNoOverlappingPreparedDevices(checkpoint *Checkpoin
 		// Check for overlaps between requested devices from the current claim and others.
 		for device := range requestedDevices {
 			if _, found := preparedDevices[device]; found {
+				// A shared channel is only valid within one ComputeDomain. That is
+				// enforced by assertImexChannelSharableByComputeDomain() once the
+				// claim's config has been resolved.
+				if isConsumableSharesEnabled(s.config) {
+					if dev, ok := s.allocatable[device]; ok && dev.Type() == ComputeDomainChannelType {
+						continue
+					}
+				}
 				return fmt.Errorf(
 					"requested device %s is already allocated to different claim %s",
 					device, existingClaimUID,

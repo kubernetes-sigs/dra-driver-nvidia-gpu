@@ -108,6 +108,33 @@ In `hostManaged` mode, domain isolation shares channel 0 among workloads.
 The controller forces the generated workload claim to `Single`, so a requested
 `All` is equivalent to `Single` when using host-managed mode and does not expose additional channels.
 
+### Run several workload pods per node
+
+By default, the IMEX channel device on a node can be allocated to only one claim.
+Each pod that references the ComputeDomain's `ResourceClaimTemplate` gets its own claim, so only one such pod can run on each node.
+
+To run several pods of the same ComputeDomain on one node, enable the Alpha `ConsumableShares` feature gate and set `resources.computeDomains.consumableShares`:
+
+```yaml
+featureGates:
+  ConsumableShares: true
+resources:
+  computeDomains:
+    consumableShares: "unlimited"
+```
+
+- `unlimited` lets any number of claims share the channel.
+- A positive integer, such as `"4"`, caps the number of claims per channel on each node.
+
+The channel is then published as multi-allocatable, using Kubernetes DRA [consumable capacity](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#consumable-capacity).
+On Kubernetes v1.34 and v1.35, also enable the upstream `DRAConsumableCapacity` feature gate on the kube-apiserver, kube-controller-manager, kube-scheduler, and kubelet.
+
+Sharing is limited to claims of the same ComputeDomain.
+The kubelet plugin rejects a claim for a different ComputeDomain on a channel that is already in use, which preserves IMEX isolation between ComputeDomains.
+The first claim on a node starts the ComputeDomain's IMEX daemon (in `hostManaged` mode, it checks host IMEX readiness), and later claims only inject the channel.
+The IMEX daemon stays on the node until the last claim of that ComputeDomain is unprepared.
+The ComputeDomain daemon device itself is never shared.
+
 ## Check status
 
 ```bash

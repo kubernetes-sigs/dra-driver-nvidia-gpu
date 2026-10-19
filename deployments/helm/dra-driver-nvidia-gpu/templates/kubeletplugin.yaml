@@ -176,6 +176,10 @@ spec:
           value: "{{ .Values.resources.computeDomains.imex.isolation }}"
         - name: IMEX_HOST_SOCKET_PATH
           value: "{{ .Values.resources.computeDomains.imex.hostSocketPath }}"
+        {{- if .Values.resources.computeDomains.consumableShares }}
+        - name: CONSUMABLE_SHARES
+          value: "{{ .Values.resources.computeDomains.consumableShares }}"
+        {{- end }}
         - name: KUBELET_REGISTRAR_DIRECTORY_PATH
           value: {{ .Values.kubeletPlugin.kubeletRegistrarDirectoryPath | quote }}
         - name: KUBELET_PLUGINS_DIRECTORY_PATH

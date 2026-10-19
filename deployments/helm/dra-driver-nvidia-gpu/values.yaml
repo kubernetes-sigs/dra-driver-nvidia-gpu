@@ -115,6 +115,12 @@ resources:
       #   config:
       #     IMEX_NODE_DISCONNECTED_GRACE_TIME: "60"
       config: {}
+    # consumableShares lets multiple ResourceClaims of the same ComputeDomain
+    # (e.g. one per pod from its ResourceClaimTemplate) share the IMEX channel
+    # on a node: "disabled", "unlimited", or a positive integer capping the
+    # claims per channel. Empty leaves sharing disabled.
+    # Requires featureGates.ConsumableShares=true.
+    consumableShares: ""
 
 # Feature gates configuration following Kubernetes patterns
 # Configure feature gates as key-value pairs (feature_name: true/false)

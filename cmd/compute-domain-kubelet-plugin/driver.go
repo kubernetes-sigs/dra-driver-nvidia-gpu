@@ -41,9 +41,12 @@ import (
 // advertise in its node ResourceSlice. IMEX channel devices other than
 // channel 0 are never advertised here (they are advertised as a network
 // resource from the control plane instead). ComputeDomain daemon devices are
-// additionally omitted when hostManaged is true, since daemon claims are
-// never valid in that mode (see applyComputeDomainDaemonConfig).
-func computeDomainPublishedDevices(allocatable AllocatableDevices, hostManaged bool) []resourceapi.Device {
+// additionally omitted when host-managed IMEX is used, since daemon claims are
+// never valid in that mode (see applyComputeDomainDaemonConfig). Only channel
+// devices are shareable with consumable shares: a daemon device backs exactly
+// one IMEX daemon per node.
+func computeDomainPublishedDevices(allocatable AllocatableDevices, config *Config) []resourceapi.Device {
+	hostManaged := config.imexConfig.EffectiveHostManaged()
 	var devices []resourceapi.Device
 	for _, device := range allocatable {
 		if device.Type() == ComputeDomainChannelType && device.Channel.ID != 0 {
@@ -52,7 +55,11 @@ func computeDomainPublishedDevices(allocatable AllocatableDevices, hostManaged b
 		if hostManaged && device.Type() == ComputeDomainDaemonType {
 			continue
 		}
-		devices = append(devices, device.GetDevice())
+		dev := device.GetDevice()
+		if device.Type() == ComputeDomainChannelType {
+			applyConsumableShares(&dev, config)
+		}
+		devices = append(devices, dev)
 	}
 	return devices
 }
@@ -127,7 +134,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 
 	// Enumerate the set of ComputeDomain devices to publish.
 	var resourceSlice resourceslice.Slice
-	resourceSlice.Devices = computeDomainPublishedDevices(state.allocatable, config.imexConfig.EffectiveHostManaged())
+	resourceSlice.Devices = computeDomainPublishedDevices(state.allocatable, config)
 
 	resources := resourceslice.DriverResources{
 		Pools: map[string]resourceslice.Pool{
