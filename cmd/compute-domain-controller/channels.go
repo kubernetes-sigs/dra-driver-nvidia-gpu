@@ -74,6 +74,10 @@ type ChannelReservationManager struct {
 	sync.Mutex
 	// pending holds reservations the informer cache may not reflect yet.
 	pending map[string][]int
+
+	// claimsForComputeDomain returns cached ResourceClaims referencing a
+	// ComputeDomain, if available.
+	claimsForComputeDomain func(uid string) []*resourceapi.ResourceClaim
 }
 
 func NewChannelReservationManager(config *ManagerConfig, list ListComputeDomainsFunc, updateStatus UpdateComputeDomainStatusFunc) *ChannelReservationManager {
@@ -207,14 +211,26 @@ func (m *ChannelReservationManager) Release(uid string) {
 }
 
 // AssertNoClaimsReferenceComputeDomain holds back releasing a ComputeDomain's
-// channels while claims, and thus workloads, may still use them.
-func (m *ChannelReservationManager) AssertNoClaimsReferenceComputeDomain(ctx context.Context, uid string) error {
-	claims, err := m.config.clientsets.Core.ResourceV1().ResourceClaims("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("error listing ResourceClaims: %w", err)
+// channels while claims, and thus workloads, may still use them. The cache
+// answers while claims remain, and a list of the ComputeDomain's namespace
+// covers claims it has not seen yet. Claims from other namespaces are never
+// admitted.
+func (m *ChannelReservationManager) AssertNoClaimsReferenceComputeDomain(ctx context.Context, namespace, uid string) error {
+	var claims []*resourceapi.ResourceClaim
+	if m.claimsForComputeDomain != nil {
+		claims = m.claimsForComputeDomain(uid)
 	}
-	for _, claim := range claims.Items {
-		if claimReferencesComputeDomain(&claim, uid) {
+	if len(claims) == 0 {
+		list, err := m.config.clientsets.Core.ResourceV1().ResourceClaims(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return fmt.Errorf("error listing ResourceClaims: %w", err)
+		}
+		for i := range list.Items {
+			claims = append(claims, &list.Items[i])
+		}
+	}
+	for _, claim := range claims {
+		if claimReferencesComputeDomain(claim, uid) {
 			return fmt.Errorf("waiting for ResourceClaim %s/%s to be removed before releasing IMEX channels", claim.Namespace, claim.Name)
 		}
 	}
@@ -222,6 +238,11 @@ func (m *ChannelReservationManager) AssertNoClaimsReferenceComputeDomain(ctx con
 }
 
 func claimReferencesComputeDomain(claim *resourceapi.ResourceClaim, uid string) bool {
+	return uid != "" && slices.Contains(claimDomainIDs(claim), uid)
+}
+
+// claimDomainIDs returns the domain IDs of the claim's channel configs.
+func claimDomainIDs(claim *resourceapi.ResourceClaim) []string {
 	var configs []resourceapi.DeviceConfiguration
 	for _, c := range claim.Spec.Devices.Config {
 		configs = append(configs, c.DeviceConfiguration)
@@ -231,9 +252,13 @@ func claimReferencesComputeDomain(claim *resourceapi.ResourceClaim, uid string) 
 			configs = append(configs, c.DeviceConfiguration)
 		}
 	}
-	return uid != "" && slices.ContainsFunc(configs, func(c resourceapi.DeviceConfiguration) bool {
-		return opaqueChannelConfigDomainID(c.Opaque) == uid
-	})
+	var ids []string
+	for _, c := range configs {
+		if id := opaqueChannelConfigDomainID(c.Opaque); id != "" && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // opaqueChannelConfigDomainID returns the domain ID of a ComputeDomainChannelConfig

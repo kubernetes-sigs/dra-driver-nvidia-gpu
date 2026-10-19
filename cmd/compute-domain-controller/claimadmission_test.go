@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -31,6 +32,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	draclient "k8s.io/dynamic-resource-allocation/client"
+	"k8s.io/utils/ptr"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -43,7 +45,7 @@ import (
 
 // allocatedChannelClaim returns a claim of a ComputeDomain whose channel was
 // allocated on a node with the ChannelAdmitted binding condition pending.
-func allocatedChannelClaim(t *testing.T, name, namespace, domainID, node, device string) *resourceapi.ResourceClaim {
+func allocatedChannelClaim(t testing.TB, name, namespace, domainID, node, device string) *resourceapi.ResourceClaim {
 	t.Helper()
 	config := nvapi.DefaultComputeDomainChannelConfig()
 	config.DomainID = domainID
@@ -80,7 +82,7 @@ type admissionFixture struct {
 	client *fake.Clientset
 }
 
-func newAdmissionFixture(t *testing.T, mode imex.Mode, cds ...*nvapi.ComputeDomain) *admissionFixture {
+func newAdmissionFixture(t testing.TB, mode imex.Mode, cds ...*nvapi.ComputeDomain) *admissionFixture {
 	t.Helper()
 	client := fake.NewSimpleClientset()
 	config := &ManagerConfig{
@@ -101,22 +103,22 @@ func newAdmissionFixture(t *testing.T, mode imex.Mode, cds ...*nvapi.ComputeDoma
 
 // add makes a claim visible to both the API (for status updates) and the
 // informer cache.
-func (f *admissionFixture) add(t *testing.T, claim *resourceapi.ResourceClaim) {
+func (f *admissionFixture) add(t testing.TB, claim *resourceapi.ResourceClaim) {
 	t.Helper()
 	_, err := f.client.ResourceV1().ResourceClaims(claim.Namespace).Create(context.Background(), claim, metav1.CreateOptions{})
 	require.NoError(t, err)
 	require.NoError(t, f.m.informer.GetStore().Add(claim))
 }
 
-func (f *admissionFixture) remove(t *testing.T, claim *resourceapi.ResourceClaim) {
+func (f *admissionFixture) remove(t testing.TB, claim *resourceapi.ResourceClaim) {
 	t.Helper()
 	require.NoError(t, f.m.informer.GetStore().Delete(claim))
 }
 
 // admit runs admission and returns the condition the controller set.
-func (f *admissionFixture) admit(t *testing.T, claim *resourceapi.ResourceClaim) *metav1.Condition {
+func (f *admissionFixture) admit(t testing.TB, claim *resourceapi.ResourceClaim) *metav1.Condition {
 	t.Helper()
-	require.NoError(t, f.m.admit(context.Background(), claim))
+	require.NoError(t, f.m.admitKey(context.Background(), claim.Namespace+"/"+claim.Name))
 	updated, err := f.client.ResourceV1().ResourceClaims(claim.Namespace).Get(context.Background(), claim.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	require.Len(t, updated.Status.Devices, 1)
@@ -128,7 +130,20 @@ func (f *admissionFixture) admit(t *testing.T, claim *resourceapi.ResourceClaim)
 	return meta.FindStatusCondition(status.Conditions, imex.ChannelRejectedCondition)
 }
 
-func (f *admissionFixture) nodeOwner(t *testing.T, node string) string {
+// labelNode sets the node label the kubelet plugin keeps while a
+// ComputeDomain's IMEX daemon runs on the node.
+func (f *admissionFixture) labelNode(t testing.TB, node, domainID string) {
+	t.Helper()
+	n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node, Labels: map[string]string{computeDomainLabelKey: domainID}}}
+	require.NoError(t, f.m.nodeInformer.GetStore().Add(n))
+}
+
+func (f *admissionFixture) unlabelNode(t testing.TB, node string) {
+	t.Helper()
+	require.NoError(t, f.m.nodeInformer.GetStore().Delete(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node}}))
+}
+
+func (f *admissionFixture) nodeOwner(t testing.TB, node string) string {
 	t.Helper()
 	rule, err := f.client.ResourceV1().DeviceTaintRules().Get(context.Background(), nodeOwnershipRuleName(node), metav1.GetOptions{})
 	if errors.IsNotFound(err) {
@@ -185,12 +200,12 @@ func TestClaimAdmissionDriverManaged(t *testing.T) {
 
 	// The node stays owned while any claim of the owner remains on it.
 	f.remove(t, a0)
-	require.NoError(t, f.m.releaseNode(context.Background(), "node-1"))
+	require.NoError(t, f.m.syncNode(context.Background(), "node-1"))
 	assert.Equal(t, "cd-a", f.nodeOwner(t, "node-1"))
 
 	f.remove(t, a1)
 	f.remove(t, b1) // the rejected claim gets reallocated elsewhere
-	require.NoError(t, f.m.releaseNode(context.Background(), "node-1"))
+	require.NoError(t, f.m.syncNode(context.Background(), "node-1"))
 	assert.Empty(t, f.nodeOwner(t, "node-1"), "the node is free again")
 
 	// Now cd-b can take node-1.
@@ -341,7 +356,7 @@ func TestClaimAdmissionWithV1beta2DeviceTaintRules(t *testing.T) {
 	assert.Equal(t, "cd-a", rule.Spec.Taint.Value)
 }
 
-func setChannelReservationsGate(t *testing.T, enabled bool) {
+func setChannelReservationsGate(t testing.TB, enabled bool) {
 	t.Helper()
 	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
 		string(featuregates.ComputeDomainChannelReservations): enabled,
@@ -412,4 +427,199 @@ func TestClaimAdmissionRejectsUnattributableClaims(t *testing.T) {
 		assert.Contains(t, c.Message, tc.message, tc.claim.Name)
 	}
 	assert.Equal(t, "cd-a", f.nodeOwner(t, "node-1"))
+}
+
+func TestSyncNodeWaitsForIMEXDaemonTeardown(t *testing.T) {
+	setChannelReservationsGate(t, true)
+	f := newAdmissionFixture(t, imex.ModeDriverManaged, cdInNamespace("cd-a", "team-a", 0), cdInNamespace("cd-b", "team-b", 0))
+	a := allocatedChannelClaim(t, "a", "team-a", "cd-a", "node-1", "channel-0")
+	f.add(t, a)
+	f.admit(t, a)
+	f.labelNode(t, "node-1", "cd-a")
+
+	// A force-deleted pod's claim can go away before Unprepare.
+	f.remove(t, a)
+	require.NoError(t, f.m.syncNode(context.Background(), "node-1"))
+	assert.Equal(t, "cd-a", f.nodeOwner(t, "node-1"), "the IMEX daemon of cd-a still runs")
+
+	b := allocatedChannelClaim(t, "b", "team-b", "cd-b", "node-1", "channel-0")
+	f.add(t, b)
+	assert.Equal(t, imex.ChannelRejectedCondition, f.admit(t, b).Type)
+
+	f.unlabelNode(t, "node-1")
+	require.NoError(t, f.m.syncNode(context.Background(), "node-1"))
+	assert.Empty(t, f.nodeOwner(t, "node-1"))
+}
+
+func TestSyncNodeRevertsChangedRule(t *testing.T) {
+	setChannelReservationsGate(t, true)
+	f := newAdmissionFixture(t, imex.ModeDriverManaged, cdInNamespace("cd-a", "team-a", 0))
+	a := allocatedChannelClaim(t, "a", "team-a", "cd-a", "node-1", "channel-0")
+	f.add(t, a)
+	f.admit(t, a)
+	rules := f.client.ResourceV1().DeviceTaintRules()
+
+	rule, err := rules.Get(context.Background(), nodeOwnershipRuleName("node-1"), metav1.GetOptions{})
+	require.NoError(t, err)
+	rule.Spec.Taint.Value = "cd-b"
+	rule.Spec.DeviceSelector.Pool = ptr.To("node-2")
+	_, err = rules.Update(context.Background(), rule, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, f.m.syncNode(context.Background(), "node-1"))
+	assert.Equal(t, "cd-a", f.nodeOwner(t, "node-1"))
+	reverted, err := rules.Get(context.Background(), nodeOwnershipRuleName("node-1"), metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "node-1", *reverted.Spec.DeviceSelector.Pool)
+
+	require.NoError(t, rules.Delete(context.Background(), nodeOwnershipRuleName("node-1"), metav1.DeleteOptions{}))
+	require.NoError(t, f.m.syncNode(context.Background(), "node-1"))
+	assert.Equal(t, "cd-a", f.nodeOwner(t, "node-1"), "a deleted rule is re-created")
+}
+
+func TestSyncNodeNeedsNoAPICallForCachedRule(t *testing.T) {
+	setChannelReservationsGate(t, true)
+	f := newAdmissionFixture(t, imex.ModeDriverManaged, cdInNamespace("cd-a", "team-a", 0))
+	a := allocatedChannelClaim(t, "a", "team-a", "cd-a", "node-1", "channel-0")
+	f.add(t, a)
+	f.admit(t, a)
+	require.NoError(t, f.m.ruleInformer.GetStore().Add(nodeOwnershipRule("node-1", "cd-a")))
+	f.client.ClearActions()
+
+	require.NoError(t, f.m.syncNode(context.Background(), "node-1"))
+
+	assert.Empty(t, f.client.Actions())
+}
+
+func TestSweepSeedsOwnersFromRules(t *testing.T) {
+	setChannelReservationsGate(t, true)
+	f := newAdmissionFixture(t, imex.ModeDriverManaged, cdInNamespace("cd-a", "team-a", 0), cdInNamespace("cd-b", "team-b", 0))
+	// Left by a previous controller.
+	_, err := f.client.ResourceV1().DeviceTaintRules().Create(context.Background(), nodeOwnershipRule("node-1", "cd-a"), metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, f.m.ruleInformer.GetStore().Add(nodeOwnershipRule("node-1", "cd-a")))
+
+	require.NoError(t, f.m.sweepDeviceTaintRules(context.Background()))
+
+	b := allocatedChannelClaim(t, "b", "team-b", "cd-b", "node-1", "channel-0")
+	f.add(t, b)
+	assert.Equal(t, imex.ChannelRejectedCondition, f.admit(t, b).Type)
+	assert.Equal(t, 1, f.m.queue.Len(), "the seeded node is rechecked")
+}
+
+// TestReleaseWithUncachedClaim covers a claim allocated on a node while the
+// node is released on a cache that does not show it yet.
+func TestReleaseWithUncachedClaim(t *testing.T) {
+	setChannelReservationsGate(t, true)
+	f := newAdmissionFixture(t, imex.ModeDriverManaged, cdInNamespace("cd-a", "team-a", 0), cdInNamespace("cd-b", "team-b", 0))
+	a0 := allocatedChannelClaim(t, "a0", "team-a", "cd-a", "node-1", "channel-0")
+	f.add(t, a0)
+	f.admit(t, a0)
+	a1 := allocatedChannelClaim(t, "a1", "team-a", "cd-a", "node-1", "channel-0")
+	_, err := f.client.ResourceV1().ResourceClaims("team-a").Create(context.Background(), a1, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	f.remove(t, a0)
+	require.NoError(t, f.m.syncNode(context.Background(), "node-1"))
+	b := allocatedChannelClaim(t, "b", "team-b", "cd-b", "node-1", "channel-0")
+	f.add(t, b)
+	assert.Equal(t, imex.ChannelAdmittedCondition, f.admit(t, b).Type)
+
+	// a1 still waits for its binding condition, so it cannot run on node-1.
+	require.NoError(t, f.m.informer.GetStore().Add(a1))
+	c := f.admit(t, a1)
+	assert.Equal(t, imex.ChannelRejectedCondition, c.Type)
+	assert.Equal(t, "NodeOwnedByOtherComputeDomain", c.Reason)
+}
+
+func TestClaimAdmissionStatusUpdateFailure(t *testing.T) {
+	setChannelReservationsGate(t, true)
+
+	tests := map[string]struct {
+		dealloc   bool
+		wantOwner string
+	}{
+		"retried":                            {wantOwner: "cd-a"},
+		"claim deallocated before the retry": {dealloc: true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			f := newAdmissionFixture(t, imex.ModeDriverManaged, cdInNamespace("cd-a", "team-a", 0))
+			a := allocatedChannelClaim(t, "a", "team-a", "cd-a", "node-1", "channel-0")
+			f.add(t, a)
+			failed := false
+			f.client.PrependReactor("update", "resourceclaims", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				if action.GetSubresource() != "status" || failed {
+					return false, nil, nil
+				}
+				failed = true
+				return true, nil, errors.NewConflict(resourceapi.Resource("resourceclaims"), "a", nil)
+			})
+
+			require.Error(t, f.m.admitKey(context.Background(), "team-a/a"))
+			assert.Equal(t, "cd-a", f.nodeOwner(t, "node-1"), "ownership is taken before the status update")
+
+			if tc.dealloc {
+				f.remove(t, a)
+				require.NoError(t, f.m.admitKey(context.Background(), "team-a/a"))
+				require.NoError(t, f.m.syncNode(context.Background(), "node-1"))
+			} else {
+				assert.Equal(t, imex.ChannelAdmittedCondition, f.admit(t, a).Type)
+			}
+			assert.Equal(t, tc.wantOwner, f.nodeOwner(t, "node-1"))
+		})
+	}
+}
+
+func TestClaimsForComputeDomain(t *testing.T) {
+	f := newAdmissionFixture(t, imex.ModeDriverManaged)
+	a := allocatedChannelClaim(t, "a", "team-a", "cd-a", "node-1", "channel-0")
+	b := allocatedChannelClaim(t, "b", "team-b", "cd-b", "node-1", "channel-0")
+	f.add(t, a)
+	f.add(t, b)
+
+	claims := f.m.claimsForComputeDomain("cd-a")
+	require.Len(t, claims, 1)
+	assert.Equal(t, "a", claims[0].Name)
+	assert.True(t, f.m.nodeInUseByComputeDomain("node-1", "cd-b"))
+	assert.False(t, f.m.nodeInUseByComputeDomain("node-2", "cd-b"))
+}
+
+func TestAdmittedClaimKeepsNodeAfterLabelRemoval(t *testing.T) {
+	setChannelReservationsGate(t, true)
+	f := newAdmissionFixture(t, imex.ModeDriverManaged, cdInNamespace("cd-a", "team-a", 0), cdInNamespace("cd-b", "team-b", 0))
+	a0 := allocatedChannelClaim(t, "a0", "team-a", "cd-a", "node-1", "channel-0")
+	a1 := allocatedChannelClaim(t, "a1", "team-a", "cd-a", "node-1", "channel-0")
+	f.add(t, a0)
+	f.admit(t, a0)
+	f.add(t, a1)
+	f.admit(t, a1)
+	f.labelNode(t, "node-1", "cd-a")
+
+	// a0's pod ends and Unprepare removes the label before a1 is prepared.
+	f.remove(t, a0)
+	f.unlabelNode(t, "node-1")
+	require.NoError(t, f.m.syncNode(context.Background(), "node-1"))
+
+	assert.Equal(t, "cd-a", f.nodeOwner(t, "node-1"), "a1 was admitted from the cache, so it is still counted")
+	b := allocatedChannelClaim(t, "b", "team-b", "cd-b", "node-1", "channel-0")
+	f.add(t, b)
+	assert.Equal(t, imex.ChannelRejectedCondition, f.admit(t, b).Type)
+}
+
+func TestSyncNodeRetriesDeletingRule(t *testing.T) {
+	setChannelReservationsGate(t, true)
+	f := newAdmissionFixture(t, imex.ModeDriverManaged, cdInNamespace("cd-a", "team-a", 0))
+	a := allocatedChannelClaim(t, "a", "team-a", "cd-a", "node-1", "channel-0")
+	f.add(t, a)
+	f.admit(t, a)
+	deleting := nodeOwnershipRule("node-1", "cd-a")
+	deleting.DeletionTimestamp = &metav1.Time{}
+	deleting.Finalizers = []string{"example.com/hold"}
+	require.NoError(t, f.client.Tracker().Update(resourceapi.SchemeGroupVersion.WithResource("devicetaintrules"), deleting, ""))
+	require.NoError(t, f.m.ruleInformer.GetStore().Add(deleting))
+
+	err := f.m.syncNode(context.Background(), "node-1")
+
+	require.Error(t, err, "a rule being deleted does not enforce ownership for long")
+	assert.Contains(t, err.Error(), "is being deleted")
 }

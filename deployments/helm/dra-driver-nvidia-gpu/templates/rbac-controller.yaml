@@ -28,7 +28,7 @@ rules:
   verbs: ["arbitrary-node:update"]
 - apiGroups: ["resource.k8s.io"]
   resources: ["devicetaintrules"]
-  verbs: ["get", "create", "list", "delete", "deletecollection"]
+  verbs: ["get", "list", "watch", "create", "update", "delete", "deletecollection"]
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
   verbs: ["get", "create", "update"]

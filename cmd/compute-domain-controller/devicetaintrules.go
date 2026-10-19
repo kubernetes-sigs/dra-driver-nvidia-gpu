@@ -19,12 +19,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 
 	resourceapi "k8s.io/api/resource/v1"
 	resourcev1beta2 "k8s.io/api/resource/v1beta2"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	coreclientset "k8s.io/client-go/kubernetes"
 	resourcev1client "k8s.io/client-go/kubernetes/typed/resource/v1"
 	resourcev1beta2client "k8s.io/client-go/kubernetes/typed/resource/v1beta2"
@@ -48,8 +51,8 @@ func channelTaintRuleName(uid string, channel int) string {
 
 // EnsureChannelTaintRules taints a host-managed ComputeDomain's reserved
 // channels on all nodes, so that only its claims, which tolerate the taint,
-// can be allocated them. Existing rules are kept, so this is safe to repeat.
-// The legacy shared channel is never tainted.
+// can be allocated them. Changed rules are reverted, so this is safe to
+// repeat. The legacy shared channel is never tainted.
 func (m *ChannelReservationManager) EnsureChannelTaintRules(ctx context.Context, cd *nvapi.ComputeDomain) error {
 	uid := string(cd.UID)
 	for _, channel := range cd.Status.Channels {
@@ -76,11 +79,57 @@ func (m *ChannelReservationManager) EnsureChannelTaintRules(ctx context.Context,
 				},
 			},
 		}
-		if _, err := m.config.deviceTaintRules.Create(ctx, rule); err != nil && !errors.IsAlreadyExists(err) {
-			return fmt.Errorf("error creating DeviceTaintRule for channel %d: %w", channel, err)
+		if err := ensureDeviceTaintRule(ctx, m.config.deviceTaintRules, rule); err != nil {
+			return fmt.Errorf("error ensuring DeviceTaintRule for channel %d: %w", channel, err)
 		}
 	}
 	return nil
+}
+
+// ensureDeviceTaintRule creates a rule or reverts changes made to it. A rule
+// being deleted fails, so that it is retried once the rule is gone.
+func ensureDeviceTaintRule(ctx context.Context, client deviceTaintRuleClient, rule *resourceapi.DeviceTaintRule) error {
+	_, err := client.Create(ctx, rule)
+	if !errors.IsAlreadyExists(err) {
+		return err
+	}
+	existing, err := client.Get(ctx, rule.Name)
+	if err != nil {
+		return err
+	}
+	if existing.GetDeletionTimestamp() != nil {
+		return fmt.Errorf("DeviceTaintRule %s is being deleted", rule.Name)
+	}
+	if deviceTaintRuleMatches(existing, rule) {
+		return nil
+	}
+	updated := existing.DeepCopy()
+	if updated.Labels == nil {
+		updated.Labels = make(map[string]string)
+	}
+	maps.Copy(updated.Labels, rule.Labels)
+	updated.Spec.DeviceSelector = rule.Spec.DeviceSelector
+	updated.Spec.Taint.Key = rule.Spec.Taint.Key
+	updated.Spec.Taint.Value = rule.Spec.Taint.Value
+	updated.Spec.Taint.Effect = rule.Spec.Taint.Effect
+	if _, err := client.Update(ctx, updated); err != nil {
+		return err
+	}
+	klog.Infof("Reverted changes to DeviceTaintRule %s", rule.Name)
+	return nil
+}
+
+// deviceTaintRuleMatches ignores fields set by the API server.
+func deviceTaintRuleMatches(existing, rule *resourceapi.DeviceTaintRule) bool {
+	for k, v := range rule.Labels {
+		if existing.Labels[k] != v {
+			return false
+		}
+	}
+	return equality.Semantic.DeepEqual(existing.Spec.DeviceSelector, rule.Spec.DeviceSelector) &&
+		existing.Spec.Taint.Key == rule.Spec.Taint.Key &&
+		existing.Spec.Taint.Value == rule.Spec.Taint.Value &&
+		existing.Spec.Taint.Effect == rule.Spec.Taint.Effect
 }
 
 // DeleteTaintRules deletes all DeviceTaintRules of a ComputeDomain.
@@ -101,7 +150,9 @@ func (m *ChannelReservationManager) DeleteTaintRules(ctx context.Context, uid st
 type deviceTaintRuleClient interface {
 	Create(ctx context.Context, rule *resourceapi.DeviceTaintRule) (*resourceapi.DeviceTaintRule, error)
 	Get(ctx context.Context, name string) (*resourceapi.DeviceTaintRule, error)
-	List(ctx context.Context, opts metav1.ListOptions) ([]resourceapi.DeviceTaintRule, error)
+	Update(ctx context.Context, rule *resourceapi.DeviceTaintRule) (*resourceapi.DeviceTaintRule, error)
+	List(ctx context.Context, opts metav1.ListOptions) (*resourceapi.DeviceTaintRuleList, error)
+	Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error)
 	Delete(ctx context.Context, name string, opts metav1.DeleteOptions) error
 	DeleteCollection(ctx context.Context, opts metav1.DeleteOptions, listOpts metav1.ListOptions) error
 }
@@ -144,12 +195,16 @@ func (c *v1DeviceTaintRuleClient) Get(ctx context.Context, name string) (*resour
 	return c.client.Get(ctx, name, metav1.GetOptions{})
 }
 
-func (c *v1DeviceTaintRuleClient) List(ctx context.Context, opts metav1.ListOptions) ([]resourceapi.DeviceTaintRule, error) {
-	list, err := c.client.List(ctx, opts)
-	if err != nil {
-		return nil, err
-	}
-	return list.Items, nil
+func (c *v1DeviceTaintRuleClient) Update(ctx context.Context, rule *resourceapi.DeviceTaintRule) (*resourceapi.DeviceTaintRule, error) {
+	return c.client.Update(ctx, rule, metav1.UpdateOptions{})
+}
+
+func (c *v1DeviceTaintRuleClient) List(ctx context.Context, opts metav1.ListOptions) (*resourceapi.DeviceTaintRuleList, error) {
+	return c.client.List(ctx, opts)
+}
+
+func (c *v1DeviceTaintRuleClient) Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+	return c.client.Watch(ctx, opts)
 }
 
 func (c *v1DeviceTaintRuleClient) Delete(ctx context.Context, name string, opts metav1.DeleteOptions) error {
@@ -180,16 +235,37 @@ func (c *v1beta2DeviceTaintRuleClient) Get(ctx context.Context, name string) (*r
 	return deviceTaintRuleFromV1beta2(rule), nil
 }
 
-func (c *v1beta2DeviceTaintRuleClient) List(ctx context.Context, opts metav1.ListOptions) ([]resourceapi.DeviceTaintRule, error) {
+func (c *v1beta2DeviceTaintRuleClient) Update(ctx context.Context, rule *resourceapi.DeviceTaintRule) (*resourceapi.DeviceTaintRule, error) {
+	updated, err := c.client.Update(ctx, deviceTaintRuleToV1beta2(rule), metav1.UpdateOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return deviceTaintRuleFromV1beta2(updated), nil
+}
+
+func (c *v1beta2DeviceTaintRuleClient) List(ctx context.Context, opts metav1.ListOptions) (*resourceapi.DeviceTaintRuleList, error) {
 	list, err := c.client.List(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	rules := make([]resourceapi.DeviceTaintRule, 0, len(list.Items))
+	rules := &resourceapi.DeviceTaintRuleList{ListMeta: list.ListMeta, Items: make([]resourceapi.DeviceTaintRule, 0, len(list.Items))}
 	for i := range list.Items {
-		rules = append(rules, *deviceTaintRuleFromV1beta2(&list.Items[i]))
+		rules.Items = append(rules.Items, *deviceTaintRuleFromV1beta2(&list.Items[i]))
 	}
 	return rules, nil
+}
+
+func (c *v1beta2DeviceTaintRuleClient) Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+	w, err := c.client.Watch(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return watch.Filter(w, func(e watch.Event) (watch.Event, bool) {
+		if rule, ok := e.Object.(*resourcev1beta2.DeviceTaintRule); ok {
+			e.Object = deviceTaintRuleFromV1beta2(rule)
+		}
+		return e, true
+	}), nil
 }
 
 func (c *v1beta2DeviceTaintRuleClient) Delete(ctx context.Context, name string, opts metav1.DeleteOptions) error {

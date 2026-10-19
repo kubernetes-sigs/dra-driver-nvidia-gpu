@@ -24,6 +24,7 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	resourcev1beta2 "k8s.io/api/resource/v1beta2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -96,8 +97,22 @@ func TestV1beta2DeviceTaintRuleClient(t *testing.T) {
 
 	rules, err := c.List(context.Background(), metav1.ListOptions{})
 	require.NoError(t, err)
-	require.Len(t, rules, 1)
-	assert.Equal(t, rule.Spec, rules[0].Spec)
+	require.Len(t, rules.Items, 1)
+	assert.Equal(t, rule.Spec, rules.Items[0].Spec)
+
+	w, err := c.Watch(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	defer w.Stop()
+	got.Spec.Taint.Value = "cd-b"
+	_, err = c.Update(context.Background(), got)
+	require.NoError(t, err)
+	event := <-w.ResultChan()
+	for event.Type != watch.Modified {
+		event = <-w.ResultChan()
+	}
+	watched, ok := event.Object.(*resourceapi.DeviceTaintRule)
+	require.True(t, ok, "watch events are converted to v1")
+	assert.Equal(t, "cd-b", watched.Spec.Taint.Value)
 
 	require.NoError(t, c.Delete(context.Background(), rule.Name, metav1.DeleteOptions{}))
 	_, err = c.Get(context.Background(), rule.Name)
@@ -127,6 +142,19 @@ func TestEnsureTaintRules(t *testing.T) {
 	require.NoError(t, m.EnsureChannelTaintRules(context.Background(), cd))
 	_, err := client.ResourceV1().DeviceTaintRules().Get(context.Background(), channelTaintRuleName("a", 3), metav1.GetOptions{})
 	require.NoError(t, err)
+
+	// Changed rules are reverted.
+	changed, err := client.ResourceV1().DeviceTaintRules().Get(context.Background(), channelTaintRuleName("a", 5), metav1.GetOptions{})
+	require.NoError(t, err)
+	changed.Spec.Taint.Value = "b"
+	changed.Spec.DeviceSelector.Device = ptr.To("channel-6")
+	_, err = client.ResourceV1().DeviceTaintRules().Update(context.Background(), changed, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, m.EnsureChannelTaintRules(context.Background(), cd))
+	reverted, err := client.ResourceV1().DeviceTaintRules().Get(context.Background(), channelTaintRuleName("a", 5), metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "a", reverted.Spec.Taint.Value)
+	assert.Equal(t, "channel-5", *reverted.Spec.DeviceSelector.Device)
 
 	// Deletion removes all of the ComputeDomain's rules by label.
 	require.NoError(t, m.DeleteTaintRules(context.Background(), "a"))

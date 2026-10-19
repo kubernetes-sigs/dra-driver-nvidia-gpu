@@ -254,6 +254,11 @@ controller:
     enabled: false
     # minAvailable: 1
     # maxUnavailable: 1
+  # kubeAPI sets the controller's API client rate limits. Admitting the IMEX
+  # channels of ComputeDomain workloads writes once per pod.
+  kubeAPI:
+    qps: 100
+    burst: 200
   leaderElection:
     enabled: false
     leaseDuration: "15s"

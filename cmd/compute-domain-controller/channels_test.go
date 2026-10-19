@@ -272,11 +272,11 @@ func TestAssertNoClaimsReferenceComputeDomain(t *testing.T) {
 	claim := channelClaim(t, "a", true)
 	m, _ := testReservationManagerWithClient(t, &claim)
 
-	err := m.AssertNoClaimsReferenceComputeDomain(context.Background(), "a")
+	err := m.AssertNoClaimsReferenceComputeDomain(context.Background(), "default", "a")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "waiting for ResourceClaim default/claim-a")
 
-	require.NoError(t, m.AssertNoClaimsReferenceComputeDomain(context.Background(), "b"))
+	require.NoError(t, m.AssertNoClaimsReferenceComputeDomain(context.Background(), "default", "b"))
 }
 
 func renderWorkloadTemplate(t *testing.T, data *ResourceClaimTemplateTemplateData) *resourceapi.ResourceClaimTemplate {

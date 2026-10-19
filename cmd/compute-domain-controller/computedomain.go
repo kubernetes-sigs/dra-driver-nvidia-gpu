@@ -103,6 +103,7 @@ func NewComputeDomainManager(config *ManagerConfig) *ComputeDomainManager {
 	m.resourceClaimTemplateManager = NewWorkloadResourceClaimTemplateManager(config, m.Get)
 	m.channelReservationManager = NewChannelReservationManager(config, m.List, m.UpdateStatus)
 	m.claimAdmissionManager = NewClaimAdmissionManager(config, m.Get)
+	m.channelReservationManager.claimsForComputeDomain = m.claimAdmissionManager.claimsForComputeDomain
 
 	return m
 }
@@ -402,7 +403,7 @@ func (m *ComputeDomainManager) onAddOrUpdateDriverManaged(ctx context.Context, c
 
 		// Its channels are free right away, its nodes once its claims are gone.
 		if len(cd.Status.Channels) > 0 {
-			if err := m.channelReservationManager.AssertNoClaimsReferenceComputeDomain(ctx, string(cd.UID)); err != nil {
+			if err := m.channelReservationManager.AssertNoClaimsReferenceComputeDomain(ctx, cd.Namespace, string(cd.UID)); err != nil {
 				return err
 			}
 			if err := m.channelReservationManager.DeleteTaintRules(ctx, string(cd.UID)); err != nil {
@@ -475,7 +476,7 @@ func (m *ComputeDomainManager) onAddOrUpdateHostManaged(ctx context.Context, cd 
 
 		// Its channels are free once its claims are gone.
 		if len(cd.Status.Channels) > 0 {
-			if err := m.channelReservationManager.AssertNoClaimsReferenceComputeDomain(ctx, string(cd.UID)); err != nil {
+			if err := m.channelReservationManager.AssertNoClaimsReferenceComputeDomain(ctx, cd.Namespace, string(cd.UID)); err != nil {
 				return err
 			}
 			if err := m.channelReservationManager.DeleteTaintRules(ctx, string(cd.UID)); err != nil {
