@@ -345,7 +345,17 @@ func (m *DaemonSetResourceClaimTemplateManager) Create(ctx context.Context, cd *
 		return nil, fmt.Errorf("more than one ResourceClaimTemplate found with same ComputeDomain UID")
 	}
 	if len(rcts) == 1 {
-		return rcts[0], nil
+		// Templates created before reservations lack the toleration.
+		if !channelReservationsEnabled() || resourceClaimTemplateToleratesOwner(rcts[0], string(cd.UID)) {
+			return rcts[0], nil
+		}
+		gone, err := m.replace(ctx, rcts[0])
+		if err != nil {
+			return nil, err
+		}
+		if !gone {
+			return nil, fmt.Errorf("waiting for outdated ResourceClaimTemplate %s/%s to be deleted", rcts[0].Namespace, rcts[0].Name)
+		}
 	}
 
 	daemonConfig := nvapi.DefaultComputeDomainDaemonConfig()
@@ -362,6 +372,11 @@ func (m *DaemonSetResourceClaimTemplateManager) Create(ctx context.Context, cd *
 		DeviceClassName:         computeDomainDaemonDeviceClass,
 		DriverName:              DriverName,
 		DaemonConfig:            daemonConfig,
+	}
+	// Tolerate the ownership taint of the ComputeDomain's nodes.
+	if channelReservationsEnabled() {
+		templateData.OwnerTolerationKey = imex.ChannelOwnerTaintKey
+		templateData.OwnerTolerationValue = string(cd.UID)
 	}
 
 	rct, err := m.BaseResourceClaimTemplateManager.Create(ctx, DaemonSetResourceClaimTemplateTemplatePath, &templateData)
@@ -482,11 +497,9 @@ func (m *WorkloadResourceClaimTemplateManager) create(ctx context.Context, cd *n
 	if channel >= 0 {
 		templateData.DeviceClassName = computeDomainChannelDeviceClass
 		templateData.ChannelSelector = channelSelectorExpression(channel)
-		// Tolerate the taints keeping other ComputeDomains off its channels.
-		if hostManaged {
-			templateData.OwnerTolerationKey = imex.ChannelOwnerTaintKey
-			templateData.OwnerTolerationValue = string(cd.UID)
-		}
+		// Tolerate the taints keeping other ComputeDomains off its devices.
+		templateData.OwnerTolerationKey = imex.ChannelOwnerTaintKey
+		templateData.OwnerTolerationValue = string(cd.UID)
 	}
 
 	if _, err := m.BaseResourceClaimTemplateManager.Create(ctx, WorkloadResourceClaimTemplateTemplatePath, &templateData); err != nil {
@@ -499,14 +512,10 @@ func (m *WorkloadResourceClaimTemplateManager) create(ctx context.Context, cd *n
 // channel and tolerates its taints. Legacy host-managed templates keep
 // requesting the shared channel through the default channel DeviceClass.
 func (m *WorkloadResourceClaimTemplateManager) upToDate(rct *resourceapi.ResourceClaimTemplate, cd *nvapi.ComputeDomain, channel int) bool {
-	hostManaged := m.config.imexConfig.EffectiveHostManaged()
-	if hostManaged && channel == legacySharedChannel && isLegacyWorkloadTemplate(rct) {
+	if m.config.imexConfig.EffectiveHostManaged() && channel == legacySharedChannel && isLegacyWorkloadTemplate(rct) {
 		return true
 	}
-	if !resourceClaimTemplatePinnedToChannel(rct, channel) {
-		return false
-	}
-	return !hostManaged || resourceClaimTemplateToleratesOwner(rct, string(cd.UID))
+	return resourceClaimTemplatePinnedToChannel(rct, channel) && resourceClaimTemplateToleratesOwner(rct, string(cd.UID))
 }
 
 func resourceClaimTemplateToleratesOwner(rct *resourceapi.ResourceClaimTemplate, uid string) bool {

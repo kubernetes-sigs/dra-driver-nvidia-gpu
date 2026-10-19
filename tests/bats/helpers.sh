@@ -401,6 +401,13 @@ get_current_controller_pod_name() {
 }
 
 
+cd_channel_reservations_enabled() {
+  kubectl get pods -n dra-driver-nvidia-gpu \
+    -l dra-driver-nvidia-gpu-component=kubelet-plugin \
+    -o jsonpath='{..env[?(@.name=="FEATURE_GATES")].value}' | \
+    grep -q "ComputeDomainChannelReservations=true"
+}
+
 get_one_kubelet_plugin_pod_name() {
   kubectl get pod \
     -l dra-driver-nvidia-gpu-component=kubelet-plugin \

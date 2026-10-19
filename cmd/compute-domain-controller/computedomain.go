@@ -80,6 +80,7 @@ type ComputeDomainManager struct {
 	resourceClaimTemplateManager *WorkloadResourceClaimTemplateManager
 	nodeManager                  *NodeManager
 	channelReservationManager    *ChannelReservationManager
+	claimAdmissionManager        *ClaimAdmissionManager
 }
 
 // NewComputeDomainManager creates a new ComputeDomainManager.
@@ -101,6 +102,7 @@ func NewComputeDomainManager(config *ManagerConfig) *ComputeDomainManager {
 	}
 	m.resourceClaimTemplateManager = NewWorkloadResourceClaimTemplateManager(config, m.Get)
 	m.channelReservationManager = NewChannelReservationManager(config, m.List, m.UpdateStatus)
+	m.claimAdmissionManager = NewClaimAdmissionManager(config, m.Get)
 
 	return m
 }
@@ -173,10 +175,17 @@ func (m *ComputeDomainManager) Start(ctx context.Context) (rerr error) {
 		}
 	}
 
+	if err := m.claimAdmissionManager.Start(ctx); err != nil {
+		return fmt.Errorf("error starting ClaimAdmission manager: %w", err)
+	}
+
 	return nil
 }
 
 func (m *ComputeDomainManager) Stop() error {
+	if err := m.claimAdmissionManager.Stop(); err != nil {
+		return fmt.Errorf("error stopping ClaimAdmission manager: %w", err)
+	}
 	if m.daemonSetManager != nil {
 		if err := m.daemonSetManager.Stop(); err != nil {
 			return fmt.Errorf("error stopping DaemonSet manager: %w", err)
@@ -391,6 +400,15 @@ func (m *ComputeDomainManager) onAddOrUpdateDriverManaged(ctx context.Context, c
 			return fmt.Errorf("error asserting removal of DaemonSet: %w", err)
 		}
 
+		// Its channels are free right away, its nodes once its claims are gone.
+		if len(cd.Status.Channels) > 0 {
+			if err := m.channelReservationManager.AssertNoClaimsReferenceComputeDomain(ctx, string(cd.UID)); err != nil {
+				return err
+			}
+			if err := m.channelReservationManager.DeleteTaintRules(ctx, string(cd.UID)); err != nil {
+				return err
+			}
+		}
 		m.channelReservationManager.Release(string(cd.UID))
 
 		if err := m.RemoveFinalizer(ctx, string(cd.UID)); err != nil {

@@ -327,6 +327,12 @@ func TestWorkloadTemplateUpToDate(t *testing.T) {
 		DeviceClassName: computeDomainChannelDeviceClass,
 		ChannelSelector: channelSelectorExpression(0),
 	})
+	tolerated := renderWorkloadTemplate(t, &ResourceClaimTemplateTemplateData{
+		DeviceClassName:      computeDomainChannelDeviceClass,
+		ChannelSelector:      channelSelectorExpression(0),
+		OwnerTolerationKey:   imex.ChannelOwnerTaintKey,
+		OwnerTolerationValue: "a",
+	})
 	cd := testComputeDomain("a", 1, 0)
 	newManager := func(mode imex.Mode) *WorkloadResourceClaimTemplateManager {
 		return &WorkloadResourceClaimTemplateManager{BaseResourceClaimTemplateManager: &BaseResourceClaimTemplateManager{
@@ -339,8 +345,9 @@ func TestWorkloadTemplateUpToDate(t *testing.T) {
 
 	driver := newManager(imex.ModeDriverManaged)
 	assert.False(t, driver.upToDate(legacy, cd, 0), "driver-managed legacy templates are replaced")
-	assert.True(t, driver.upToDate(pinned, cd, 0))
-	assert.False(t, driver.upToDate(pinned, cd, 1))
+	assert.False(t, driver.upToDate(pinned, cd, 0), "the owner toleration is missing")
+	assert.True(t, driver.upToDate(tolerated, cd, 0))
+	assert.False(t, driver.upToDate(tolerated, cd, 1))
 
 	host := newManager(imex.ModeHostManaged)
 	assert.True(t, host.upToDate(legacy, cd, legacySharedChannel), "host-managed legacy templates keep the shared channel")

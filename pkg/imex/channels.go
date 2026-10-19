@@ -29,6 +29,11 @@ const (
 	// ChannelOwnerTaintKey is the device taint key whose value is the UID of
 	// the ComputeDomain allowed to use the device.
 	ChannelOwnerTaintKey = "compute-domain.nvidia.com/owner"
+
+	// ChannelAdmittedCondition and ChannelRejectedCondition are the binding
+	// (failure) conditions of channel devices, set by the controller.
+	ChannelAdmittedCondition = "compute-domain.nvidia.com/ChannelAdmitted"
+	ChannelRejectedCondition = "compute-domain.nvidia.com/ChannelRejected"
 )
 
 // ValidateMaxChannels validates the imex-max-channels flag.

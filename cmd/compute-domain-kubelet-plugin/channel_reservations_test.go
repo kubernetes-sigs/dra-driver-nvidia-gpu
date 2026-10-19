@@ -29,6 +29,7 @@ import (
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/common"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 )
 
 func setChannelReservationsGate(t *testing.T, enabled bool) {
@@ -65,6 +66,14 @@ func TestComputeDomainPublishedDevicesChannelReservations(t *testing.T) {
 
 	assert.Len(t, devices, 131, "channels 0..129 plus the daemon device")
 	assert.NotContains(t, deviceNames(devices), "channel-130")
+	for _, d := range devices {
+		if d.Name == "daemon-0" {
+			assert.Empty(t, d.BindingConditions, "daemon claims are not gated by the controller")
+			continue
+		}
+		assert.Equal(t, []string{imex.ChannelAdmittedCondition}, d.BindingConditions)
+		assert.Equal(t, []string{imex.ChannelRejectedCondition}, d.BindingFailureConditions)
+	}
 	require.Len(t, slices, 2, "a ResourceSlice holds at most 128 devices")
 	assert.Len(t, slices[0].Devices, resourceapi.ResourceSliceMaxDevices)
 	assert.Len(t, slices[1].Devices, 3)

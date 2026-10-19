@@ -35,6 +35,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 	drametrics "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/workqueue"
 )
@@ -63,6 +64,11 @@ func computeDomainPublishedDevices(allocatable AllocatableDevices, config *Confi
 		dev := device.GetDevice()
 		if device.Type() == ComputeDomainChannelType {
 			applyConsumableShares(&dev, config)
+			// The controller admits allocated channels before pods bind.
+			if channelReservationsEnabled() {
+				dev.BindingConditions = []string{imex.ChannelAdmittedCondition}
+				dev.BindingFailureConditions = []string{imex.ChannelRejectedCondition}
+			}
 		}
 		devices = append(devices, dev)
 	}
