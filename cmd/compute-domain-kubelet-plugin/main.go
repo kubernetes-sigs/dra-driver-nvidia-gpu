@@ -72,6 +72,7 @@ type Flags struct {
 	imexIsolation                 string
 	imexHostSocketPath            string
 	consumableShares              string
+	imexMaxChannels               int
 }
 
 type Config struct {
@@ -208,6 +209,13 @@ func newApp() *cli.App {
 			Destination: &flags.consumableShares,
 			EnvVars:     []string{"CONSUMABLE_SHARES"},
 		},
+		&cli.IntFlag{
+			Name:        "imex-max-channels",
+			Usage:       "IMEX channel IDs [0, N) to publish, capped by the node (ComputeDomainChannelReservations feature gate). Must match the controller.",
+			Value:       imex.DefaultMaxChannels,
+			Destination: &flags.imexMaxChannels,
+			EnvVars:     []string{"IMEX_MAX_CHANNELS"},
+		},
 	}
 	cliFlags = append(cliFlags, flags.kubeClientConfig.Flags()...)
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)
@@ -245,6 +253,10 @@ func newApp() *cli.App {
 			}
 
 			if err := validateConsumableSharesFlag(flags.consumableShares); err != nil {
+				return err
+			}
+
+			if err := imex.ValidateMaxChannels(flags.imexMaxChannels); err != nil {
 				return err
 			}
 

@@ -45,6 +45,11 @@ func validateConsumableSharesFlag(value string) error {
 	if !featuregates.Enabled(featuregates.ConsumableShares) {
 		return fmt.Errorf("--consumable-shares requires feature gate %s to be enabled", featuregates.ConsumableShares)
 	}
+	// Only channel reservations keep the scheduler from sharing a channel
+	// between ComputeDomains on a node (node ownership, channel taints).
+	if !featuregates.Enabled(featuregates.ComputeDomainChannelReservations) {
+		return fmt.Errorf("--consumable-shares requires feature gate %s to be enabled", featuregates.ComputeDomainChannelReservations)
+	}
 	if value == consumableSharesUnlimited {
 		return nil
 	}
@@ -103,16 +108,13 @@ func applyConsumableShares(dev *resourceapi.Device, config *Config) {
 // assertImexChannelSharableByComputeDomain is the consumable-shares variant of
 // assertImexChannelNotAllocated(). A channel may be shared between claims of
 // the same ComputeDomain only, as sharing it with another ComputeDomain would
-// break IMEX isolation. It reports whether another completed claim of the same
-// ComputeDomain already holds the channel, in which case the per-node IMEX
-// bootstrap was already done by that claim.
-func (s *DeviceState) assertImexChannelSharableByComputeDomain(id int, domainID string) (bool, error) {
+// break IMEX isolation.
+func (s *DeviceState) assertImexChannelSharableByComputeDomain(id int, domainID string) error {
 	cp, err := s.getCheckpoint()
 	if err != nil {
-		return false, fmt.Errorf("unable to get checkpoint: %w", err)
+		return fmt.Errorf("unable to get checkpoint: %w", err)
 	}
 
-	sharedWithDomain := false
 	for claimUID, claim := range cp.V2.PreparedClaims {
 		// See assertImexChannelNotAllocated() for why non-completed
 		// preparations are ignored.
@@ -127,13 +129,12 @@ func (s *DeviceState) assertImexChannelSharableByComputeDomain(id int, domainID 
 				// Permanent, so that a pod placed on another ComputeDomain's
 				// node fails fast instead of retrying until that one leaves.
 				if group.ConfigState.ComputeDomain != domainID {
-					return false, permanentError{fmt.Errorf("channel %d already allocated by claim %s for a different ComputeDomain %q (according to checkpoint)", id, claimUID, group.ConfigState.ComputeDomain)}
+					return permanentError{fmt.Errorf("channel %d already allocated by claim %s for a different ComputeDomain %q (according to checkpoint)", id, claimUID, group.ConfigState.ComputeDomain)}
 				}
-				sharedWithDomain = true
 			}
 		}
 	}
-	return sharedWithDomain, nil
+	return nil
 }
 
 // isComputeDomainChannelInUseByOtherClaims reports whether any claim other

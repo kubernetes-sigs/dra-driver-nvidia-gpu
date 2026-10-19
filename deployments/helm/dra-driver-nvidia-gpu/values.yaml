@@ -123,7 +123,8 @@ resources:
     # (e.g. one per pod from its ResourceClaimTemplate) share the IMEX channel
     # on a node: "disabled", "unlimited", or a positive integer capping the
     # claims per channel. Empty leaves sharing disabled.
-    # Requires featureGates.ConsumableShares=true.
+    # Requires featureGates.ConsumableShares=true and
+    # featureGates.ComputeDomainChannelReservations=true.
     consumableShares: ""
 
 # Feature gates configuration following Kubernetes patterns

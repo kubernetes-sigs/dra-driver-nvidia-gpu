@@ -54,23 +54,26 @@ func consumableSharesConfig(base *Config, option string) *Config {
 
 func TestValidateConsumableSharesFlag(t *testing.T) {
 	tests := map[string]struct {
-		gate    bool
-		value   string
-		wantErr string
+		gate         bool
+		reservations bool
+		value        string
+		wantErr      string
 	}{
 		"disabled without gate":   {value: "disabled"},
 		"empty without gate":      {value: ""},
-		"unlimited requires gate": {value: "unlimited", wantErr: "requires feature gate"},
-		"unlimited with gate":     {gate: true, value: "unlimited"},
-		"integer with gate":       {gate: true, value: "8"},
-		"memory is not a CD mode": {gate: true, value: "memory", wantErr: "invalid value"},
-		"zero rejected":           {gate: true, value: "0", wantErr: "invalid value"},
-		"negative rejected":       {gate: true, value: "-1", wantErr: "invalid value"},
+		"unlimited requires gate": {value: "unlimited", wantErr: "requires feature gate ConsumableShares"},
+		"requires reservations":   {gate: true, value: "unlimited", wantErr: "requires feature gate ComputeDomainChannelReservations"},
+		"unlimited with gates":    {gate: true, reservations: true, value: "unlimited"},
+		"integer with gates":      {gate: true, reservations: true, value: "8"},
+		"memory is not a CD mode": {gate: true, reservations: true, value: "memory", wantErr: "invalid value"},
+		"zero rejected":           {gate: true, reservations: true, value: "0", wantErr: "invalid value"},
+		"negative rejected":       {gate: true, reservations: true, value: "-1", wantErr: "invalid value"},
 	}
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			setConsumableSharesGate(t, tc.gate)
+			setChannelReservationsGate(t, tc.reservations)
 
 			err := validateConsumableSharesFlag(tc.value)
 
@@ -142,7 +145,6 @@ func preparedChannelClaim(domainID string, channelID int) PreparedClaim {
 func TestAssertImexChannelSharableByComputeDomain(t *testing.T) {
 	tests := map[string]struct {
 		checkpoint *Checkpoint
-		wantShared bool
 		wantErr    string
 	}{
 		"no prior claim": {
@@ -152,7 +154,6 @@ func TestAssertImexChannelSharableByComputeDomain(t *testing.T) {
 			checkpoint: checkpointWithClaims(map[string]PreparedClaim{
 				"existing-uid": preparedChannelClaim("cd-a", 0),
 			}),
-			wantShared: true,
 		},
 		"different ComputeDomain rejected": {
 			checkpoint: checkpointWithClaims(map[string]PreparedClaim{
@@ -180,7 +181,7 @@ func TestAssertImexChannelSharableByComputeDomain(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			state := &DeviceState{checkpointManager: &fakeCheckpointManager{checkpoint: tc.checkpoint}}
 
-			shared, err := state.assertImexChannelSharableByComputeDomain(0, "cd-a")
+			err := state.assertImexChannelSharableByComputeDomain(0, "cd-a")
 
 			if tc.wantErr != "" {
 				require.Error(t, err)
@@ -189,7 +190,6 @@ func TestAssertImexChannelSharableByComputeDomain(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantShared, shared)
 		})
 	}
 }
@@ -225,10 +225,11 @@ func TestValidateNoOverlappingPreparedDevicesConsumableShares(t *testing.T) {
 	})
 }
 
-func testCDInformer(t *testing.T) cache.SharedIndexInformer {
+func testCDInformer(t *testing.T, reservedChannels ...int) cache.SharedIndexInformer {
 	t.Helper()
 	cd := &configapi.ComputeDomain{
 		ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "cd-a"},
+		Status:     configapi.ComputeDomainStatus{Channels: reservedChannels},
 	}
 	factory := nvinformers.NewSharedInformerFactory(nvfake.NewSimpleClientset(), 0)
 	informer := factory.Resource().V1beta1().ComputeDomains().Informer()
