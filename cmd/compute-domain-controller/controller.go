@@ -52,6 +52,9 @@ type ManagerConfig struct {
 	// through to dynamically rendered compute-domain-daemon DaemonSets.
 	imexConfigOverrides map[string]string
 
+	// imexMaxChannels bounds the reserved IMEX channel IDs.
+	imexMaxChannels int
+
 	// clientsets provides access to various Kubernetes API client interfaces
 	clientsets flags.ClientSets
 
@@ -105,6 +108,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		maxNodesPerIMEXDomain:     c.config.flags.maxNodesPerIMEXDomain,
 		imexConfig:                c.config.imexConfig,
 		imexConfigOverrides:       c.config.imexConfigOverrides,
+		imexMaxChannels:           c.config.flags.imexMaxChannels,
 		clientsets:                c.config.clientsets,
 		workQueue:                 workQueue,
 		logVerbosityCDDaemon:      c.config.flags.logVerbosityCDDaemon,

@@ -105,6 +105,10 @@ resources:
       # Requires the host's /etc/nvidia-imex/config.cfg to set IMEX_CMD_ENABLED to 1 and
       # IMEX_CMD_UNIX_DOMAIN_PATH to this same path.
       hostSocketPath: "/etc/nvidia-imex/imex_ctrl.sock"
+      # maxChannels bounds the IMEX channel IDs [0, maxChannels) published and
+      # reserved for ComputeDomains, at most 2048 (the GPU driver limit).
+      # Requires featureGates.ComputeDomainChannelReservations=true.
+      maxChannels: 128
       # config lets you override, or add, arbitrary nvidia-imex daemon
       # config file settings as a map of setting name to value (see NVIDIA's
       # IMEX documentation for available settings). Applied on top of the

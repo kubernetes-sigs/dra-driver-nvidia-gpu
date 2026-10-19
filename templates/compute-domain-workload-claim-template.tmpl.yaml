@@ -16,6 +16,11 @@ spec:
       - name: channel
         exactly:
           deviceClassName: {{ .DeviceClassName }}
+{{- if .ChannelSelector }}
+          selectors:
+          - cel:
+              expression: "{{ .ChannelSelector }}"
+{{- end }}
       config:
       - requests: ["channel"]
         opaque:

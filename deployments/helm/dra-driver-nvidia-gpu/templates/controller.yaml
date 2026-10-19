@@ -108,6 +108,8 @@ spec:
         {{- end }}
         - name: IMEX_MODE
           value: "{{ .Values.resources.computeDomains.imex.mode }}"
+        - name: IMEX_MAX_CHANNELS
+          value: "{{ .Values.resources.computeDomains.imex.maxChannels }}"
         - name: IMEX_ISOLATION
           value: "{{ .Values.resources.computeDomains.imex.isolation }}"
         {{- if .Values.resources.computeDomains.imex.config }}
