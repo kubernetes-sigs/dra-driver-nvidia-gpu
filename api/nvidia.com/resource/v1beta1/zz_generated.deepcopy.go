@@ -511,6 +511,11 @@ func (in *TimeSlicingConfig) DeepCopy() *TimeSlicingConfig {
 func (in *VfioDeviceConfig) DeepCopyInto(out *VfioDeviceConfig) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
+	if in.DriverOverride != nil {
+		in, out := &in.DriverOverride, &out.DriverOverride
+		*out = new(PassthroughDriver)
+		**out = **in
+	}
 	if in.Iommu != nil {
 		in, out := &in.Iommu, &out.Iommu
 		*out = new(IOMMUConfig)

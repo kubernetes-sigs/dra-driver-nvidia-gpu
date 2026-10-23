@@ -73,6 +73,41 @@ func TestCheckIommuEnabled(t *testing.T) {
 	}
 }
 
+func TestGetVfioModuleName(t *testing.T) {
+	tests := map[string]struct {
+		vfioDriver string
+		want       string
+	}{
+		"empty name": {},
+		"name without separators": {
+			vfioDriver: "vfiopci",
+			want:       "vfiopci",
+		},
+		"underscores unchanged": {
+			vfioDriver: "nvgrace_gpu_vfio_pci",
+			want:       "nvgrace_gpu_vfio_pci",
+		},
+		"standard vfio driver": {
+			vfioDriver: "vfio-pci",
+			want:       "vfio_pci",
+		},
+		"multiple dashes": {
+			vfioDriver: "nvgrace-gpu-vfio-pci",
+			want:       "nvgrace_gpu_vfio_pci",
+		},
+		"mixed dashes and underscores": {
+			vfioDriver: "nvgrace-gpu-vfio_pci",
+			want:       "nvgrace_gpu_vfio_pci",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.want, getVfioModuleName(tc.vfioDriver))
+		})
+	}
+}
+
 func TestGetDriver(t *testing.T) {
 	t.Run("returns empty driver", func(t *testing.T) {
 		pciDevicesPath := t.TempDir()

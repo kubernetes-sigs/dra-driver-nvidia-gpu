@@ -1396,7 +1396,7 @@ func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configa
 	}
 
 	for i, r := range results {
-		if err := s.vfioPciManager.Configure(ctx, infos[i]); err != nil {
+		if err := s.vfioPciManager.Configure(ctx, config, infos[i]); err != nil {
 			return nil, fmt.Errorf("error configuring vfio device %q: %w", r.Device, err)
 		}
 	}
