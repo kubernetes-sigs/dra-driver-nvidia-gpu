@@ -67,6 +67,51 @@ func DetectGPU(ctx context.Context, cs *kubernetes.Clientset) (*GPUDetails, erro
 	return nil, fmt.Errorf("no gpu.nvidia.com ResourceSlice with a device found")
 }
 
+// HasDeviceType reports whether the NVIDIA GPU driver currently advertises a
+// device with the requested type (for example, "gpu" or "mig").
+func HasDeviceType(ctx context.Context, cs *kubernetes.Clientset, deviceType string) (bool, error) {
+	slices, err := cs.ResourceV1().ResourceSlices().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, fmt.Errorf("list ResourceSlices: %w", err)
+	}
+	for _, s := range slices.Items {
+		if s.Spec.Driver != "gpu.nvidia.com" {
+			continue
+		}
+		for _, d := range s.Spec.Devices {
+			attr, ok := d.Attributes["type"]
+			if ok && attr.StringValue != nil && *attr.StringValue == deviceType {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// CountDevicesByType returns the number of devices of the requested type that
+// the NVIDIA GPU driver currently publishes. Common types are "gpu" and
+// "mig". The count is an inventory check, not an allocation guarantee.
+func CountDevicesByType(ctx context.Context, cs *kubernetes.Clientset, deviceType string) (int, error) {
+	slices, err := cs.ResourceV1().ResourceSlices().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("list ResourceSlices: %w", err)
+	}
+
+	count := 0
+	for _, s := range slices.Items {
+		if s.Spec.Driver != "gpu.nvidia.com" {
+			continue
+		}
+		for _, d := range s.Spec.Devices {
+			attr, ok := d.Attributes["type"]
+			if ok && attr.StringValue != nil && *attr.StringValue == deviceType {
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
 // StripSemverLeadingZeros normalizes "580.105.04" to "580.105.4" so CEL's
 // semver() parser accepts it (it rejects leading zeros).
 func StripSemverLeadingZeros(v string) string {
