@@ -17,6 +17,8 @@ limitations under the License.
 package main
 
 import (
+	"maps"
+	"slices"
 	"testing"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
@@ -25,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
 
+	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
@@ -288,6 +291,72 @@ func TestPerGPUAddAllocatableDevice(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, "GPU-d", got.UUID())
 	assert.Nil(t, p.GetAllocatableDevice("does-not-exist"))
+}
+
+func TestPerGPUApplyDriverConfig(t *testing.T) {
+	const bus0, bus1 = "0000:01:00.0", "0000:02:00.0"
+	newInventory := func() *PerGPUAllocatableDevices {
+		return &PerGPUAllocatableDevices{allocatablesMap: map[PCIBusID]AllocatableDevices{
+			bus0: {
+				"gpu-0":      {Gpu: &GpuInfo{minor: 0, UUID: "GPU-0", pciBusID: bus0}},
+				"gpu-vfio-0": {Vfio: &VfioDeviceInfo{index: 0, UUID: "VF-0", PciBusID: bus0}},
+			},
+			bus1: {
+				"gpu-1-mig-1g5gb-19-0": {MigStatic: &MigDeviceInfo{Profile: "1g.5gb", ParentMinor: 1, GiProfileID: 19}},
+			},
+		}}
+	}
+
+	tests := map[string]struct {
+		advertisement  configapi.GpuAdvertisement
+		wantAdvertised []DeviceName
+		wantExcluded   []DeviceName
+		wantDroppedBus PCIBusID
+	}{
+		"full GPU only": {
+			advertisement:  configapi.GpuAdvertisement{Gpu: true},
+			wantAdvertised: []DeviceName{"gpu-0"},
+			wantExcluded:   []DeviceName{"gpu-vfio-0", "gpu-1-mig-1g5gb-19-0"},
+			wantDroppedBus: bus1,
+		},
+		"VFIO only": {
+			advertisement:  configapi.GpuAdvertisement{Vfio: true},
+			wantAdvertised: []DeviceName{"gpu-vfio-0"},
+			wantExcluded:   []DeviceName{"gpu-0", "gpu-1-mig-1g5gb-19-0"},
+			wantDroppedBus: bus1,
+		},
+		"MIG only": {
+			advertisement:  configapi.GpuAdvertisement{Mig: true},
+			wantAdvertised: []DeviceName{"gpu-1-mig-1g5gb-19-0"},
+			wantExcluded:   []DeviceName{"gpu-0", "gpu-vfio-0"},
+			wantDroppedBus: bus0,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			p := newInventory()
+			p.ApplyDriverConfig(&DriverConfig{Advertisement: tc.advertisement})
+
+			assert.ElementsMatch(t, tc.wantAdvertised, slices.Collect(maps.Keys(p.GetAllDevices())))
+			assert.NotContains(t, p.allocatablesMap, tc.wantDroppedBus)
+			for _, name := range tc.wantExcluded {
+				assert.Nil(t, p.GetAllocatableDevice(name), name)
+				assert.NotNil(t, p.GetFilteredDevice(name), name)
+				assert.NotNil(t, p.GetDeviceForUnprepare(name), name)
+			}
+
+			// VFIO Unprepare rediscovers the parent GPU after startup.
+			rediscovered := &AllocatableDevice{Gpu: &GpuInfo{minor: 0, UUID: "GPU-0", pciBusID: bus0}}
+			require.NoError(t, p.AddAllocatableDevice(rediscovered))
+			if tc.advertisement.Gpu {
+				assert.Same(t, rediscovered, p.GetAllocatableDevice("gpu-0"))
+			} else {
+				assert.Nil(t, p.GetAllocatableDevice("gpu-0"))
+				assert.Same(t, rediscovered, p.GetFilteredDevice("gpu-0"))
+			}
+		})
+	}
 }
 
 func TestPerGPUGetAllDevicesMerges(t *testing.T) {

@@ -287,6 +287,11 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        {{- /* Keep the default pod environment unchanged until the Alpha feature is enabled. */}}
+        {{- if and .Values.featureGates (and (hasKey .Values.featureGates "PerNodeGPUConfig") .Values.featureGates.PerNodeGPUConfig) }}
+        - name: DEFAULT_CONFIG
+          value: {{ .Values.gpuDriverConfig.default | quote }}
+        {{- end }}
         - name: SERVICE_ACCOUNT_NAME
           valueFrom:
             fieldRef:
@@ -335,6 +340,11 @@ spec:
         - name: driver-root
           mountPath: /driver-root
           mountPropagation: HostToContainer
+        {{- if and .Values.featureGates (and (hasKey .Values.featureGates "PerNodeGPUConfig") .Values.featureGates.PerNodeGPUConfig) }}
+        - name: gpu-driver-config
+          mountPath: /available-configs
+          readOnly: true
+        {{- end }}
         {{- if and .Values.featureGates (and (hasKey .Values.featureGates "PassthroughSupport") .Values.featureGates.PassthroughSupport) }}
         - name: host-root
           mountPath: /host-root
@@ -362,6 +372,12 @@ spec:
       - name: cdi
         hostPath:
           path: /var/run/cdi
+      {{- /* Avoid an unused ConfigMap dependency when no GPU container consumes it. */}}
+      {{- if and .Values.resources.gpus.enabled (and .Values.featureGates (and (hasKey .Values.featureGates "PerNodeGPUConfig") .Values.featureGates.PerNodeGPUConfig)) }}
+      - name: gpu-driver-config
+        configMap:
+          name: {{ include "dra-driver-nvidia-gpu.gpuDriverConfigMapName" . }}
+      {{- end }}
       - name: driver-root-parent
         hostPath:
           # If nvidiaDriverRoot == "/" then its parent is itself. Otherwise, get
