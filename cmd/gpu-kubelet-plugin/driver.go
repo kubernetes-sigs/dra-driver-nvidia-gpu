@@ -53,6 +53,9 @@ type deviceHealthMonitor interface {
 	Unhealthy() <-chan *DeviceHealthEvent
 	// Allows the driver to query the HealthMonitor's health policy
 	IsEventNonFatal(event *DeviceHealthEvent) bool
+	// LastHeartbeat returns when the monitor last heard from NVML, so that
+	// health is not reported as Healthy by a monitor that has stopped working.
+	LastHeartbeat() time.Time
 }
 
 type driver struct {
@@ -63,6 +66,16 @@ type driver struct {
 	healthcheck         *healthcheck
 	deviceHealthMonitor deviceHealthMonitor
 	wg                  sync.WaitGroup
+	// KEP-4680 device health reporting, see device_health_status.go:
+	// one wake-up channel per active WatchHealthStatus call, the interval
+	// at which unchanged health is re-sent to the kubelet, how long the
+	// previous health may be re-sent while the DeviceState lock is busy,
+	// and how soon a busy report is retried after a taint change.
+	healthWatchersMu        sync.Mutex
+	healthWatchers          map[chan struct{}]struct{}
+	healthReportInterval    time.Duration
+	healthReportMaxBusy     time.Duration
+	healthBusyRetryInterval time.Duration
 	// Idicates whether to use separate ResourceSlices for SharedCounters and
 	// Devices (required for k8s 1.35+) or combined SharedCounters and Devices
 	// in the same slice (required for k8s 1.34).
@@ -124,11 +137,16 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	puLockPath := filepath.Join(config.DriverPluginPath(), DriverPrepUprepFlockFileName)
 
 	driver := &driver{
-		client:                 config.clientsets.Core,
-		state:                  state,
-		pulock:                 flock.NewFlock(puLockPath),
-		useSplitResourceSlices: useSplitSlices,
+		client:                  config.clientsets.Core,
+		state:                   state,
+		pulock:                  flock.NewFlock(puLockPath),
+		useSplitResourceSlices:  useSplitSlices,
+		healthReportInterval:    defaultDeviceHealthReportInterval,
+		healthReportMaxBusy:     defaultDeviceHealthMaxBusy,
+		healthBusyRetryInterval: defaultDeviceHealthBusyRetryInterval,
 	}
+	// Any taint change, wherever it originates, wakes the health watchers.
+	state.onTaintsChanged = driver.notifyHealthWatchers
 
 	// Register NVML events before kubeletplugin.Start exposes Prepare/Unprepare.
 	// On plugin restart, previously prepared devices and their workloads can remain
@@ -164,9 +182,11 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 			drametadatav1alpha1.SchemeGroupVersion,
 		}))
 	}
-	// This plugin does not report device health (KEP-4680), so don't
-	// advertise the DRAResourceHealth service to the kubelet.
-	opts = append(opts, kubeletplugin.HealthService(false))
+	// KEP-4680: report device health to the kubelet only when the NVML
+	// health monitor runs, since that is the sole source of health data.
+	// Without it, the DRAResourceHealth service is not advertised and the
+	// kubelet does not subscribe. WatchHealthStatus uses the same predicate.
+	opts = append(opts, kubeletplugin.HealthService(driver.deviceHealthMonitor != nil))
 	helper, err := kubeletplugin.Start(ctx, driver, opts...)
 	if err != nil {
 		return nil, err
@@ -402,10 +422,6 @@ func (d *driver) HandleError(ctx context.Context, err error, msg string) {
 	// For now we just follow the advice documented in the DRAPlugin API docs.
 	// See: https://pkg.go.dev/k8s.io/apimachinery/pkg/util/runtime#HandleErrorWithContext
 	runtime.HandleErrorWithContext(ctx, err, msg)
-}
-
-func (d *driver) WatchHealthStatus(context.Context, chan<- kubeletplugin.DeviceHealthReport) error {
-	return kubeletplugin.ErrHealthNotSupported
 }
 
 func (d *driver) nodePrepareResource(ctx context.Context, claim *resourceapi.ResourceClaim) kubeletplugin.PrepareResult {

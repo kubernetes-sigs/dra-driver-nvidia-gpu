@@ -19,7 +19,9 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -61,11 +63,20 @@ func (m *mockNVMLLibrary) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.
 // mockHealthMonitor implements deviceHealthMonitor for testing healthEventToTaint.
 type mockHealthMonitor struct {
 	nonFatalXids map[uint64]bool
+	// heartbeat is returned by LastHeartbeat; the zero value means the
+	// monitor is working.
+	heartbeat time.Time
 }
 
 func (m *mockHealthMonitor) Start(context.Context) error          { return nil }
 func (m *mockHealthMonitor) Stop()                                {}
 func (m *mockHealthMonitor) Unhealthy() <-chan *DeviceHealthEvent { return nil }
+func (m *mockHealthMonitor) LastHeartbeat() time.Time {
+	if m.heartbeat.IsZero() {
+		return time.Now()
+	}
+	return m.heartbeat
+}
 func (m *mockHealthMonitor) IsEventNonFatal(e *DeviceHealthEvent) bool {
 	if e.EventType == HealthEventXID {
 		return m.nonFatalXids[e.EventData]
@@ -768,4 +779,46 @@ func TestClearDynamicMIGXIDTaint(t *testing.T) {
 
 	require.Len(t, static.Taints(), 1)
 	assert.Equal(t, TaintKeyXID, static.Taints()[0].Key)
+}
+
+// fakeEventSet returns whatever the test's wait function returns.
+type fakeEventSet struct {
+	nvml.EventSet
+	wait func() (nvml.EventData, nvml.Return)
+}
+
+func (f *fakeEventSet) Wait(uint32) (nvml.EventData, nvml.Return) { return f.wait() }
+
+// TestNvmlDeviceHealthMonitor_Heartbeat checks that the heartbeat advances
+// only while NVML actually answers the event wait, so that a monitor whose
+// wait keeps failing stops vouching for healthy devices.
+func TestNvmlDeviceHealthMonitor_Heartbeat(t *testing.T) {
+	var waitRet atomic.Int32
+	waitRet.Store(int32(nvml.ERROR_UNKNOWN))
+	var waits atomic.Int64
+	m := &nvmlDeviceHealthMonitor{
+		eventSet: &fakeEventSet{wait: func() (nvml.EventData, nvml.Return) {
+			waits.Add(1)
+			time.Sleep(time.Millisecond)
+			return nvml.EventData{}, nvml.Return(waitRet.Load())
+		}},
+		unhealthy: make(chan *DeviceHealthEvent, 1),
+	}
+	stale := time.Now().Add(-time.Hour)
+	m.heartbeat.Store(stale.UnixNano())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	require.NoError(t, m.Start(ctx))
+	t.Cleanup(func() {
+		cancel()
+		m.wg.Wait()
+	})
+
+	require.Eventually(t, func() bool { return waits.Load() >= 3 }, 5*time.Second, time.Millisecond)
+	assert.True(t, m.LastHeartbeat().Equal(stale), "failing waits must not advance the heartbeat")
+
+	waitRet.Store(int32(nvml.ERROR_TIMEOUT))
+	require.Eventually(t, func() bool {
+		return time.Since(m.LastHeartbeat()) < time.Minute
+	}, 5*time.Second, time.Millisecond, "a wait that times out normally advances the heartbeat")
 }
