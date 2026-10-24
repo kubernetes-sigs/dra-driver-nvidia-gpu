@@ -103,6 +103,12 @@ const (
 	// via --consumable-shares. Note: MPS sharing is not supported when consumable
 	// shares is enabled.
 	ConsumableShares featuregate.Feature = "ConsumableShares"
+
+	// ComputeDomainChannelReservations reserves IMEX channels per
+	// ComputeDomain and pins each workload ResourceClaimTemplate to one, which
+	// allows several templates per ComputeDomain. Under host-managed IMEX,
+	// ComputeDomains with distinct channels can share a node.
+	ComputeDomainChannelReservations featuregate.Feature = "ComputeDomainChannelReservations"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -203,6 +209,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
 			Version:    version.MajorMinor(0, 5),
+		},
+	},
+	ComputeDomainChannelReservations: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 6),
 		},
 	},
 }

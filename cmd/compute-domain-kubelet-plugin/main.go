@@ -71,6 +71,8 @@ type Flags struct {
 	imexMode                      string
 	imexIsolation                 string
 	imexHostSocketPath            string
+	consumableShares              string
+	imexMaxChannels               int
 }
 
 type Config struct {
@@ -200,6 +202,20 @@ func newApp() *cli.App {
 			Destination: &flags.imexHostSocketPath,
 			EnvVars:     []string{"IMEX_HOST_SOCKET_PATH"},
 		},
+		&cli.StringFlag{
+			Name:        "consumable-shares",
+			Usage:       "Allow multiple claims of the same ComputeDomain to share an IMEX channel on a node ('disabled', 'unlimited', or a positive integer capping the claims per channel).",
+			Value:       consumableSharesDisabled,
+			Destination: &flags.consumableShares,
+			EnvVars:     []string{"CONSUMABLE_SHARES"},
+		},
+		&cli.IntFlag{
+			Name:        "imex-max-channels",
+			Usage:       "IMEX channel IDs [0, N) to publish, capped by the node (ComputeDomainChannelReservations feature gate). Must match the controller.",
+			Value:       imex.DefaultMaxChannels,
+			Destination: &flags.imexMaxChannels,
+			EnvVars:     []string{"IMEX_MAX_CHANNELS"},
+		},
 	}
 	cliFlags = append(cliFlags, flags.kubeClientConfig.Flags()...)
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)
@@ -234,6 +250,14 @@ func newApp() *cli.App {
 			imexConfig := imex.Config{Mode: imex.Mode(flags.imexMode), Isolation: imex.Isolation(flags.imexIsolation)}
 			if err := imexConfig.Validate(featuregates.Enabled(featuregates.HostManagedIMEXDaemon)); err != nil {
 				return fmt.Errorf("imex configuration validation failed: %w", err)
+			}
+
+			if err := validateConsumableSharesFlag(flags.consumableShares); err != nil {
+				return err
+			}
+
+			if err := imex.ValidateMaxChannels(flags.imexMaxChannels); err != nil {
+				return err
 			}
 
 			clientSets, err := flags.kubeClientConfig.NewClientSets()

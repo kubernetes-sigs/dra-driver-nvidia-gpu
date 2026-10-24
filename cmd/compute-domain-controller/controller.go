@@ -52,6 +52,12 @@ type ManagerConfig struct {
 	// through to dynamically rendered compute-domain-daemon DaemonSets.
 	imexConfigOverrides map[string]string
 
+	// imexMaxChannels bounds the reserved IMEX channel IDs.
+	imexMaxChannels int
+
+	// deviceTaintRules is nil if the cluster does not serve DeviceTaintRules.
+	deviceTaintRules deviceTaintRuleClient
+
 	// clientsets provides access to various Kubernetes API client interfaces
 	clientsets flags.ClientSets
 
@@ -105,6 +111,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		maxNodesPerIMEXDomain:     c.config.flags.maxNodesPerIMEXDomain,
 		imexConfig:                c.config.imexConfig,
 		imexConfigOverrides:       c.config.imexConfigOverrides,
+		imexMaxChannels:           c.config.flags.imexMaxChannels,
 		clientsets:                c.config.clientsets,
 		workQueue:                 workQueue,
 		logVerbosityCDDaemon:      c.config.flags.logVerbosityCDDaemon,
@@ -112,6 +119,17 @@ func (c *Controller) Run(ctx context.Context) error {
 		metricsPath:               c.config.flags.metricsPath,
 		imagePullSecretNames:      c.config.imagePullSecretNames,
 		cdDaemonPriorityClassName: c.config.cdDaemonPriorityClassName,
+	}
+
+	// Without the gate, DeviceTaintRules are only needed to clean up.
+	deviceTaintRules, err := newDeviceTaintRuleClient(c.config.clientsets.Core)
+	switch {
+	case err == nil:
+		managerConfig.deviceTaintRules = deviceTaintRules
+	case channelReservationsEnabled():
+		return fmt.Errorf("ComputeDomain channel reservations require DeviceTaintRules: %w", err)
+	default:
+		klog.Infof("Not cleaning up DeviceTaintRules: %v", err)
 	}
 
 	// TODO: log full, nested cliFlags structure.

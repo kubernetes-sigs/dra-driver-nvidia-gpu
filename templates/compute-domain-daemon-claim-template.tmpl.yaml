@@ -16,6 +16,13 @@ spec:
       - name: daemon
         exactly:
           deviceClassName: {{ .DeviceClassName }}
+{{- if .OwnerTolerationValue }}
+          tolerations:
+          - key: {{ .OwnerTolerationKey }}
+            operator: Equal
+            value: "{{ .OwnerTolerationValue }}"
+            effect: NoSchedule
+{{- end }}
       config:
       - requests: ["daemon"]
         opaque:

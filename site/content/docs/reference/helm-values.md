@@ -52,6 +52,8 @@ When GPU allocation is enabled, the chart also creates DeviceClass resources for
 | `resources.computeDomains.imex.isolation` | `domain` | Selects IMEX isolation, where `domain` shares channel 0 among workloads in the same IMEX domain and `channel` is reserved but unsupported. |
 | `resources.computeDomains.imex.hostSocketPath` | `/etc/nvidia-imex/imex_ctrl.sock` | Sets the path under `nvidiaDriverRoot` to the host IMEX command socket that the ComputeDomain kubelet plugin queries for a `READY` response during claim preparation in `hostManaged` mode. |
 | `resources.computeDomains.imex.config` | `{}` | A map of arbitrary `nvidia-imex` daemon config file setting names to values, overriding or adding to the defaults rendered by dynamically launched compute-domain-daemon pods. Only applies in `driverManaged` mode; ignored in `hostManaged` mode. See [NVIDIA's IMEX documentation](https://docs.nvidia.com/multi-node-nvlink-systems/imex-guide/) for the full list of settings. |
+| `resources.computeDomains.imex.maxChannels` | `128` | The number of IMEX channels, starting at channel 0, at most 2048 and capped by what each node has, that kubelet plugins publish and the controller reserves from; only used with the [`ComputeDomainChannelReservations`](feature-gates.md) feature gate. |
+| `resources.computeDomains.consumableShares` | `""` | Lets multiple ResourceClaims of the same ComputeDomain share the IMEX channel on a node; set it to `unlimited` or a positive integer that caps the claims per channel, while an empty value leaves sharing disabled; requires `featureGates.ConsumableShares=true` and `featureGates.ComputeDomainChannelReservations=true`; see [Run several workload pods per node](../guides/compute-domain-workloads.md#run-several-workload-pods-per-node). |
 
 Drain ComputeDomain workload pods and delete existing `ComputeDomain` resources before you change `resources.computeDomains.imex.mode` or `resources.computeDomains.imex.isolation`.
 
@@ -123,7 +125,9 @@ Deployed when `resources.computeDomains.enabled=true`.
 | Value | Default | Description |
 |---|---|---|
 | `controller.replicas` | `1` | Number of controller pod replicas. |
-| `controller.leaderElection.enabled` | `false` | Enable leader election when running multiple replicas. |
+| `controller.leaderElection.enabled` | `false` | Enable leader election when running multiple replicas. Without it, the controller is updated without a surge pod (`maxSurge: 0`). |
+| `controller.kubeAPI.qps` | `100` | Rate limit of the controller's Kubernetes API client. Admitting ComputeDomain channels writes once per pod. |
+| `controller.kubeAPI.burst` | `200` | Burst of the controller's Kubernetes API client. |
 | `controller.leaderElection.leaseDuration` | `15s` | How long the leader holds the lease before renewal is required. |
 | `controller.leaderElection.renewDeadline` | `10s` | How long the leader retries renewal before giving up. |
 | `controller.leaderElection.retryPeriod` | `2s` | Interval between leader-election retries. |

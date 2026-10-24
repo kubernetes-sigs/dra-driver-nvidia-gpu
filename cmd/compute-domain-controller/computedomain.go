@@ -79,6 +79,8 @@ type ComputeDomainManager struct {
 	daemonSetManager             *MultiNamespaceDaemonSetManager
 	resourceClaimTemplateManager *WorkloadResourceClaimTemplateManager
 	nodeManager                  *NodeManager
+	channelReservationManager    *ChannelReservationManager
+	claimAdmissionManager        *ClaimAdmissionManager
 }
 
 // NewComputeDomainManager creates a new ComputeDomainManager.
@@ -99,6 +101,9 @@ func NewComputeDomainManager(config *ManagerConfig) *ComputeDomainManager {
 		m.nodeManager = NewNodeManager(config, m.Get)
 	}
 	m.resourceClaimTemplateManager = NewWorkloadResourceClaimTemplateManager(config, m.Get)
+	m.channelReservationManager = NewChannelReservationManager(config, m.List, m.UpdateStatus)
+	m.claimAdmissionManager = NewClaimAdmissionManager(config, m.Get)
+	m.channelReservationManager.claimsForComputeDomain = m.claimAdmissionManager.claimsForComputeDomain
 
 	return m
 }
@@ -171,10 +176,17 @@ func (m *ComputeDomainManager) Start(ctx context.Context) (rerr error) {
 		}
 	}
 
+	if err := m.claimAdmissionManager.Start(ctx); err != nil {
+		return fmt.Errorf("error starting ClaimAdmission manager: %w", err)
+	}
+
 	return nil
 }
 
 func (m *ComputeDomainManager) Stop() error {
+	if err := m.claimAdmissionManager.Stop(); err != nil {
+		return fmt.Errorf("error stopping ClaimAdmission manager: %w", err)
+	}
 	if m.daemonSetManager != nil {
 		if err := m.daemonSetManager.Stop(); err != nil {
 			return fmt.Errorf("error stopping DaemonSet manager: %w", err)
@@ -389,6 +401,17 @@ func (m *ComputeDomainManager) onAddOrUpdateDriverManaged(ctx context.Context, c
 			return fmt.Errorf("error asserting removal of DaemonSet: %w", err)
 		}
 
+		// Its channels are free right away, its nodes once its claims are gone.
+		if len(cd.Status.Channels) > 0 {
+			if err := m.channelReservationManager.AssertNoClaimsReferenceComputeDomain(ctx, cd.Namespace, string(cd.UID)); err != nil {
+				return err
+			}
+			if err := m.channelReservationManager.DeleteTaintRules(ctx, string(cd.UID)); err != nil {
+				return err
+			}
+		}
+		m.channelReservationManager.Release(string(cd.UID))
+
 		if err := m.RemoveFinalizer(ctx, string(cd.UID)); err != nil {
 			return fmt.Errorf("error removing finalizer: %w", err)
 		}
@@ -410,9 +433,19 @@ func (m *ComputeDomainManager) onAddOrUpdateDriverManaged(ctx context.Context, c
 		return fmt.Errorf("error creating DaemonSet: %w", err)
 	}
 
-	// Create the ResourceClaimTemplateManager.
-	if _, err := m.resourceClaimTemplateManager.Create(ctx, cd.Namespace, cd.Spec.Channel.ResourceClaimTemplate.Name, cd); err != nil {
-		return fmt.Errorf("error creating ResourceClaimTemplate '%s/%s': %w", cd.Namespace, cd.Spec.Channel.ResourceClaimTemplate.Name, err)
+	// Templates created before reservations are replaced by pinned ones, which
+	// request the same channels.
+	if channelReservationsEnabled() {
+		reservedCD, err := m.channelReservationManager.Reserve(ctx, cd, false)
+		if err != nil {
+			return fmt.Errorf("error reserving IMEX channels: %w", err)
+		}
+		cd = reservedCD
+	}
+
+	// Create the workload ResourceClaimTemplates.
+	if err := m.resourceClaimTemplateManager.Create(ctx, cd); err != nil {
+		return fmt.Errorf("error creating workload ResourceClaimTemplates: %w", err)
 	}
 
 	// Change the global Status to reflect the number of ComputeDomain daemons connected.
@@ -441,6 +474,17 @@ func (m *ComputeDomainManager) onAddOrUpdateHostManaged(ctx context.Context, cd 
 			return fmt.Errorf("error asserting removal of ResourceClaimTemplate: %w", err)
 		}
 
+		// Its channels are free once its claims are gone.
+		if len(cd.Status.Channels) > 0 {
+			if err := m.channelReservationManager.AssertNoClaimsReferenceComputeDomain(ctx, cd.Namespace, string(cd.UID)); err != nil {
+				return err
+			}
+			if err := m.channelReservationManager.DeleteTaintRules(ctx, string(cd.UID)); err != nil {
+				return err
+			}
+		}
+		m.channelReservationManager.Release(string(cd.UID))
+
 		if err := m.RemoveFinalizer(ctx, string(cd.UID)); err != nil {
 			return fmt.Errorf("error removing finalizer: %w", err)
 		}
@@ -454,10 +498,30 @@ func (m *ComputeDomainManager) onAddOrUpdateHostManaged(ctx context.Context, cd 
 		return fmt.Errorf("error adding finalizer: %w", err)
 	}
 
-	// Create the workload ResourceClaimTemplate. Its manager adds and tracks
-	// its own finalizer on the template.
-	if _, err := m.resourceClaimTemplateManager.Create(ctx, cd.Namespace, cd.Spec.Channel.ResourceClaimTemplate.Name, cd); err != nil {
-		return fmt.Errorf("error creating ResourceClaimTemplate '%s/%s': %w", cd.Namespace, cd.Spec.Channel.ResourceClaimTemplate.Name, err)
+	// ComputeDomains share the host IMEX domain, so each gets its own channels.
+	// Legacy ones keep sharing the channel their running workloads use.
+	if channelReservationsEnabled() {
+		legacy := false
+		if len(cd.Status.Channels) == 0 {
+			var err error
+			if legacy, err = m.resourceClaimTemplateManager.HasLegacyTemplate(ctx, cd); err != nil {
+				return err
+			}
+		}
+		reservedCD, err := m.channelReservationManager.Reserve(ctx, cd, legacy)
+		if err != nil {
+			return fmt.Errorf("error reserving IMEX channels: %w", err)
+		}
+		cd = reservedCD
+		if err := m.channelReservationManager.EnsureChannelTaintRules(ctx, cd); err != nil {
+			return fmt.Errorf("error tainting reserved IMEX channels: %w", err)
+		}
+	}
+
+	// Create the workload ResourceClaimTemplates. Their manager adds and
+	// tracks its own finalizer on each template.
+	if err := m.resourceClaimTemplateManager.Create(ctx, cd); err != nil {
+		return fmt.Errorf("error creating workload ResourceClaimTemplates: %w", err)
 	}
 
 	// Mark the ComputeDomain Ready. Under host-managed IMEX this only means

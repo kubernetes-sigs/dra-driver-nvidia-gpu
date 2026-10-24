@@ -16,6 +16,18 @@ spec:
       - name: channel
         exactly:
           deviceClassName: {{ .DeviceClassName }}
+{{- if .ChannelSelector }}
+          selectors:
+          - cel:
+              expression: "{{ .ChannelSelector }}"
+{{- end }}
+{{- if .OwnerTolerationValue }}
+          tolerations:
+          - key: {{ .OwnerTolerationKey }}
+            operator: Equal
+            value: "{{ .OwnerTolerationValue }}"
+            effect: NoSchedule
+{{- end }}
       config:
       - requests: ["channel"]
         opaque:
