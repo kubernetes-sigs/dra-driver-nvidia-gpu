@@ -19,6 +19,7 @@ package fabricmanager
 import (
 	"fmt"
 	"os"
+	"slices"
 
 	"k8s.io/klog/v2"
 )
@@ -250,20 +251,48 @@ func (m *Manager) FindPartitionByPhysicalIDs(physicalIDs []int) (int, bool) {
 }
 
 // ActivatePartition asks Fabric Manager to program the NVSwitch fabric for the
-// given partition. It is idempotent: if FM already reports the partition as
-// active (e.g. on a retried Prepare, or after a driver restart), it returns
-// nil without re-activating.
-func (m *Manager) ActivatePartition(partitionID int) error {
+// given partition. If it is inactive and does not overlap an active partition,
+// prepare (when non-nil) runs before activation. A preparation error prevents
+// activation. Already-active partitions skip both preparation and activation.
+// The caller must serialize partition lifecycle operations.
+func (m *Manager) ActivatePartition(partitionID int, prepare func() error) error {
 	if err := m.checkKnownPartition(partitionID); err != nil {
 		return err
 	}
-	activated, err := m.isPartitionActivated(partitionID)
+	partitions, err := m.client.GetSupportedFabricPartitions()
 	if err != nil {
 		return fmt.Errorf("fabricmanager: resolving partition %d activation state: %w", partitionID, err)
 	}
-	if activated {
+	var target *Partition
+	for i := range partitions {
+		if partitions[i].ID == partitionID {
+			target = &partitions[i]
+			break
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("fabricmanager: partition %d is no longer supported", partitionID)
+	}
+	if target.IsActive {
 		klog.V(4).Infof("fabricmanager: partition %d already active; skipping activation", partitionID)
 		return nil
+	}
+	// Preparation may change GPU state, so reject conflicts before invoking it.
+	physicalIDs := target.GPUPhysicalIDs()
+	for _, partition := range partitions {
+		if !partition.IsActive {
+			continue
+		}
+		for _, gpu := range partition.GPUs {
+			if slices.Contains(physicalIDs, gpu.PhysicalID) {
+				return fmt.Errorf("fabricmanager: partition %d overlaps active partition %d", partitionID, partition.ID)
+			}
+		}
+	}
+	if prepare != nil {
+		if err := prepare(); err != nil {
+			return fmt.Errorf("fabricmanager: preparing partition %d: %w", partitionID, err)
+		}
 	}
 	if err := m.client.ActivateFabricPartition(partitionID); err != nil {
 		return fmt.Errorf("fabricmanager: fmActivateFabricPartition(%d): %w", partitionID, err)

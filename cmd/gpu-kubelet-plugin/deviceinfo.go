@@ -238,6 +238,19 @@ func (d *GpuInfo) addFabricManagerAttributes(attrs map[resourceapi.QualifiedName
 	}
 }
 
+// requiresResetBeforeFabricActivation reports whether this GPU must be reset
+// before every Fabric Manager partition activation. On HGX-2 and HGX A100, FM
+// trains GPU NVLinks in software and they only train from reset. Hopper and
+// later train NVLinks in hardware.
+func (d *GpuInfo) requiresResetBeforeFabricActivation() bool {
+	switch d.architecture {
+	case "Volta", "Ampere":
+		return true
+	default:
+		return false
+	}
+}
+
 func (d *GpuInfo) GetDevice() resourceapi.Device {
 	device := resourceapi.Device{
 		Name:       d.CanonicalName(),

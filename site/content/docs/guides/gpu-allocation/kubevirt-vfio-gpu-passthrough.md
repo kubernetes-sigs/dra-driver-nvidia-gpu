@@ -259,6 +259,9 @@ devices:
 The scheduler selects two VFIO GPUs with the same `partition2` value.
 Claim preparation fails if the selected GPU set does not exactly match a
 partition reported by Fabric Manager.
+On HGX A100 and HGX-2, VFIO claims for multi-GPU partitions are not supported;
+refer to
+[GPU reset on HGX A100 and HGX-2](fabric-manager-partitioning.md#gpu-reset-on-hgx-a100-and-hgx-2).
 Keep a single `VfioDeviceConfig` block for all VFIO requests in the claim.
 For why the count and constraint must be used together, refer to
 [Request a VFIO partition](fabric-manager-partitioning.md#request-a-vfio-partition).

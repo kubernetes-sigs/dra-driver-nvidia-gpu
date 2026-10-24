@@ -562,8 +562,14 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 		}
 	}
 	if s.fabricManagerPartitioningEnabled() {
-		if err := s.deactivateFabricPartition(claimUID, &pc, checkpoint); err != nil {
+		deactivated, err := s.deactivateFabricPartition(claimUID, &pc, checkpoint)
+		if err != nil {
 			return false, fmt.Errorf("error deactivating fabric partition: %w", err)
+		}
+		if deactivated {
+			if err := s.enableFabricPartitionPersistence(claimUID, &pc); err != nil {
+				return false, fmt.Errorf("error restoring persistence after fabric partition deactivation: %w", err)
+			}
 		}
 	}
 
@@ -656,8 +662,14 @@ func (s *DeviceState) unpreparePartiallyPreparedClaim(ctx context.Context, cuid 
 	// itself is idempotent so even if the partitions were never
 	// activated, its safe to call this function and it'll be a no-op.
 	if s.fabricManagerPartitioningEnabled() {
-		if err := s.deactivateFabricPartition(cuid, &pc, checkpoint); err != nil {
+		deactivated, err := s.deactivateFabricPartition(cuid, &pc, checkpoint)
+		if err != nil {
 			return fmt.Errorf("error deactivating fabric partition: %w", err)
+		}
+		if deactivated {
+			if err := s.enableFabricPartitionPersistence(cuid, &pc); err != nil {
+				return fmt.Errorf("error restoring persistence after fabric partition deactivation: %w", err)
+			}
 		}
 	}
 
@@ -778,9 +790,9 @@ func (s *DeviceState) rollbackPartiallyPreparedVFIODevices(ctx context.Context, 
 		}
 
 		info := device.Vfio
-		// Unconfigure() is idempotent and is expected to revert any
+		// Unconfiguring is idempotent and is expected to revert any
 		// changes from the past Configure() call.
-		if err := s.vfioPciManager.Unconfigure(ctx, info); err != nil {
+		if err := s.unconfigureVfioDevice(ctx, info); err != nil {
 			return fmt.Errorf("error unconfiguring vfio device %q: %w", info.CanonicalName(), err)
 		}
 
@@ -1221,11 +1233,21 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 		if vfioAllocatable == nil {
 			return fmt.Errorf("allocatable not found for vfio device %q", device.Vfio.Device.DeviceName)
 		}
-		if err := s.vfioPciManager.Unconfigure(ctx, vfioAllocatable.Vfio); err != nil {
+		if err := s.unconfigureVfioDevice(ctx, vfioAllocatable.Vfio); err != nil {
 			return fmt.Errorf("error unconfiguring vfio device %q: %w", vfioAllocatable.Vfio.CanonicalName(), err)
 		}
 	}
 	return nil
+}
+
+// unconfigureVfioDevice rebinds the GPU to the nvidia driver. With FM
+// partitioning, persistence stays disabled until deactivateFabricPartition
+// has released the partition, as for full GPUs.
+func (s *DeviceState) unconfigureVfioDevice(ctx context.Context, info *VfioDeviceInfo) error {
+	if s.fabricManagerPartitioningEnabled() {
+		return s.vfioPciManager.UnconfigureDriver(ctx, info)
+	}
+	return s.vfioPciManager.Unconfigure(ctx, info)
 }
 
 // Discover all sibling devices on the parent GPU of the given device.
@@ -1457,33 +1479,52 @@ func (s *DeviceState) gpuInfosFromPreparedClaim(results []resourceapi.DeviceRequ
 // GPUs backing the claim's allocation results. It is a no-op when Fabric
 // Manager partitioning is disabled or when the claim has no allocation.
 // Callers that include VFIO devices must first rebind those GPUs to the nvidia
-// driver and rediscover so each VFIO device's parent is repopulated.
-func (s *DeviceState) deactivateFabricPartition(claimUID string, pc *PreparedClaim, checkpoint *Checkpoint) error {
+// driver and rediscover so each VFIO device's parent is repopulated. It
+// reports whether the partition was deactivated; only then may the caller
+// call enableFabricPartitionPersistence.
+func (s *DeviceState) deactivateFabricPartition(claimUID string, pc *PreparedClaim, checkpoint *Checkpoint) (bool, error) {
 	if !s.fabricManagerPartitioningEnabled() || pc.Status.Allocation == nil || isAdminAccess(pc.Status.Allocation.Devices.Results) {
-		return nil
+		return false, nil
 	}
 	gpus := s.gpuInfosFromPreparedClaim(pc.Status.Allocation.Devices.Results)
 	if len(gpus) == 0 {
-		return nil
+		return false, nil
 	}
 	if isConsumableSharesEnabled(s.config) {
 		for _, gpu := range gpus {
 			if gpu != nil && isGpuUUIDInUseByOtherClaims(checkpoint, claimUID, gpu.UUID) {
 				klog.V(4).Infof("Fabric Manager: GPU %s still in use by other claims, skipping partition deactivation", gpu.UUID)
-				return nil
+				return false, nil
 			}
 		}
 	}
 	partitionID, err := s.resolveFabricPartition(gpus)
 	if err != nil {
 		klog.Warningf("%v; skipping partition deactivation", err)
-		return nil
+		return false, nil
 	}
 	// DeactivatePartition is idempotent: an already-inactive partition is a
 	// no-op.
 	klog.V(2).Infof("Fabric Manager: deactivating partition %d for %d-GPU claim %s/%s", partitionID, len(gpus), pc.Namespace, pc.Name)
 	if err := s.fmManager.DeactivatePartition(partitionID); err != nil {
-		return fmt.Errorf("deactivating fabric partition %d: %w", partitionID, err)
+		return false, fmt.Errorf("deactivating fabric partition %d: %w", partitionID, err)
+	}
+	return true, nil
+}
+
+func (s *DeviceState) enableFabricPartitionPersistence(claimUID string, pc *PreparedClaim) error {
+	for _, device := range s.getAllocatableDevicesForClaim(claimUID, *pc) {
+		switch device.Type() {
+		case GpuDeviceType:
+			gpu := device.Gpu
+			if err := s.nvdevlib.enableGPUPersistenceMode(gpu.pciBusID); err != nil {
+				return fmt.Errorf("enabling persistence for GPU %s (PCI %s): %w", gpu.UUID, gpu.pciBusID, err)
+			}
+		case VfioDeviceType:
+			if err := s.vfioPciManager.EnablePersistence(device.Vfio); err != nil {
+				return fmt.Errorf("enabling persistence for VFIO device %s: %w", device.Vfio.CanonicalName(), err)
+			}
+		}
 	}
 	return nil
 }
@@ -1516,6 +1557,45 @@ func (s *DeviceState) fabricManagerPartitioningEnabled() bool {
 	return featuregates.Enabled(featuregates.FabricManagerPartitioning) && s.fmManager != nil
 }
 
+// rejectVFIOFMPartitionForMultiAmpereGPUs rejects VFIO passthrough of a multi-GPU
+// partition whose NVLinks only train from reset (HGX-2 and HGX A100). After
+// activation, vfio-pci runtime-suspends the GPU and resets it when the device
+// is opened, and the VMM resets it again at VM start, falling back to a bus
+// reset when function reset is unavailable. Each leaves the guest's NVLinks
+// inactive. A single-GPU partition has no active NVLinks to lose.
+func (s *DeviceState) rejectVFIOFMPartitionForMultiAmpereGPUs(claim *resourceapi.ResourceClaim, partitionID, partitionSize int) error {
+	if partitionSize < 2 {
+		return nil
+	}
+	for _, r := range claim.Status.Allocation.Devices.Results {
+		if r.Driver != DriverName {
+			continue
+		}
+		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
+		if device == nil || device.Type() != VfioDeviceType || device.Vfio.parent == nil {
+			continue
+		}
+		if device.Vfio.parent.requiresResetBeforeFabricActivation() {
+			return fmt.Errorf("VFIO passthrough of %d-GPU fabric partition %d is not supported on %s GPUs: the GPU resets performed after binding to vfio-pci leave its NVLinks inactive",
+				partitionSize, partitionID, device.Vfio.parent.architecture)
+		}
+	}
+	return nil
+}
+
+func (s *DeviceState) claimHasVfioDevice(claim *resourceapi.ResourceClaim) bool {
+	for _, r := range claim.Status.Allocation.Devices.Results {
+		if r.Driver != DriverName {
+			continue
+		}
+		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
+		if device != nil && device.Type() == VfioDeviceType {
+			return true
+		}
+	}
+	return false
+}
+
 // activateFabricPartition activates the FM partition formed by the physical
 // GPUs backing the claim's allocation results. The caller must ensure
 // fabricManagerPartitioningEnabled() is true and that the claim is allocated.
@@ -1532,11 +1612,49 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 	if err != nil {
 		return fmt.Errorf("failed to resolve fabric partition activation: %w", err)
 	}
+	if err := s.rejectVFIOFMPartitionForMultiAmpereGPUs(claim, partitionID, len(gpus)); err != nil {
+		return err
+	}
 	// ActivatePartition is idempotent: a retried Prepare (e.g. after a later
 	// step failed) that hits an already-active partition is a no-op rather than
 	// an FM in-use error.
 	klog.V(2).Infof("Fabric Manager: activating partition %d for %d-GPU claim %s", partitionID, len(gpus), ResourceClaimToString(claim))
-	if err := s.fmManager.ActivatePartition(partitionID); err != nil {
+	if err := s.fmManager.ActivatePartition(partitionID, func() error {
+		// FM can fail with NV_ERR_IN_USE while persistence keeps a GPU
+		// initialized. VFIO Configure disables persistence too, but runs
+		// after activation and does not cover full-GPU container claims.
+		for _, gpu := range gpus {
+			// Use nvidia-smi even without a persistenced socket: VFIO cleanup
+			// can enable legacy persistence directly through NVML.
+			if err := s.nvdevlib.disableGPUPersistenceMode(gpu.pciBusID); err != nil {
+				return fmt.Errorf("disabling persistence for GPU %s (PCI %s): %w", gpu.UUID, gpu.pciBusID, err)
+			}
+		}
+		// A single-GPU partition has no NVLinks to train, and vfio-pci
+		// resets the GPU after activation regardless.
+		if len(gpus) == 1 && s.claimHasVfioDevice(claim) {
+			return nil
+		}
+		// HGX-2 and HGX A100 NVLinks only train from reset, and a reset
+		// after activation leaves them inactive. Preparation runs only for
+		// an inactive partition, so a retry never resets an active one.
+		// HGX-2 GPUs must be reset together, so reset the whole partition
+		// in one call; GPUs outside it are not touched.
+		var resetPCI []string
+		for _, gpu := range gpus {
+			if gpu.requiresResetBeforeFabricActivation() {
+				resetPCI = append(resetPCI, gpu.pciBusID)
+			}
+		}
+		if len(resetPCI) == 0 {
+			return nil
+		}
+		klog.V(2).Infof("Fabric Manager: resetting GPUs %v before activating partition %d", resetPCI, partitionID)
+		if err := s.nvdevlib.resetGPUs(resetPCI); err != nil {
+			return fmt.Errorf("resetting GPUs %v: %w", resetPCI, err)
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("activating fabric partition %d: %w", partitionID, err)
 	}
 	return nil

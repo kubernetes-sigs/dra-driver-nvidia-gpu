@@ -136,13 +136,15 @@ func TestFabricPartitionLifecycleGPUIdentity(t *testing.T) {
 			if vfio {
 				device = &AllocatableDevice{Vfio: &VfioDeviceInfo{UUID: "synthetic-vfio-uuid", parent: gpu}}
 			}
-			state := &DeviceState{fmManager: manager, config: &Config{flags: &Flags{}}, perGPUAllocatable: &PerGPUAllocatableDevices{allocatablesMap: map[PCIBusID]AllocatableDevices{PCIBusID(gpu.pciBusID): {"device": device}}}}
+			state := &DeviceState{nvdevlib: newFakePersistenceSMI(t, 0).lib, fmManager: manager, config: &Config{flags: &Flags{}}, perGPUAllocatable: &PerGPUAllocatableDevices{allocatablesMap: map[PCIBusID]AllocatableDevices{PCIBusID(gpu.pciBusID): {"device": device}}}}
 			claim := &resourceapi.ResourceClaim{Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{Devices: resourceapi.DeviceAllocationResult{Results: []resourceapi.DeviceRequestAllocationResult{{Driver: DriverName, Device: "device"}}}}}}
 			require.NoError(t, state.activateFabricPartition(claim))
 			require.Equal(t, []int{33}, client.activatedIDs)
 			require.NoError(t, state.activateFabricPartition(claim))
 			require.Equal(t, []int{33}, client.activatedIDs, "retry must not reactivate")
-			require.NoError(t, state.deactivateFabricPartition("claim", &PreparedClaim{Status: claim.Status}, nil))
+			deactivated, err := state.deactivateFabricPartition("claim", &PreparedClaim{Status: claim.Status}, nil)
+			require.NoError(t, err)
+			require.True(t, deactivated)
 			require.Equal(t, []int{33}, client.deactivatedIDs)
 		})
 	}
