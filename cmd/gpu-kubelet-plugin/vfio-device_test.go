@@ -99,6 +99,53 @@ func TestGetDriver(t *testing.T) {
 	})
 }
 
+func TestHostRootPersistencedRunning(t *testing.T) {
+	t.Run("socket absent", func(t *testing.T) {
+		vm := &VfioPciManager{nvlib: &deviceLib{hostRoot: t.TempDir()}}
+		require.False(t, vm.hostRootPersistencedRunning())
+	})
+
+	t.Run("socket present", func(t *testing.T) {
+		hostRoot := t.TempDir()
+		socket := filepath.Join(hostRoot, nvidiaPersistencedSocketPath)
+		require.NoError(t, os.MkdirAll(filepath.Dir(socket), 0o755))
+		require.NoError(t, os.WriteFile(socket, nil, 0o600))
+
+		vm := &VfioPciManager{nvlib: &deviceLib{hostRoot: hostRoot}}
+		require.True(t, vm.hostRootPersistencedRunning())
+	})
+}
+
+func TestHostRootBinaryPath(t *testing.T) {
+	t.Run("returns path relative to the host root", func(t *testing.T) {
+		hostRoot := t.TempDir()
+		binary := filepath.Join(hostRoot, "usr/local/bin/nvidia-smi")
+		require.NoError(t, os.MkdirAll(filepath.Dir(binary), 0o755))
+		require.NoError(t, os.WriteFile(binary, nil, 0o755))
+
+		path, err := hostRootBinaryPath(hostRoot, "/usr/local", "nvidia-smi")
+		require.NoError(t, err)
+		require.Equal(t, "/usr/local/bin/nvidia-smi", path)
+	})
+
+	t.Run("binary missing", func(t *testing.T) {
+		_, err := hostRootBinaryPath(t.TempDir(), "/usr/local", "nvidia-smi")
+		require.Error(t, err)
+	})
+
+	t.Run("binary resolves outside the host root", func(t *testing.T) {
+		hostRoot, outside := t.TempDir(), t.TempDir()
+		target := filepath.Join(outside, "nvidia-smi")
+		require.NoError(t, os.WriteFile(target, nil, 0o755))
+		link := filepath.Join(hostRoot, "usr/bin/nvidia-smi")
+		require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+		require.NoError(t, os.Symlink(target, link))
+
+		_, err := hostRootBinaryPath(hostRoot, "/", "nvidia-smi")
+		require.Error(t, err)
+	})
+}
+
 func TestTryChangeDriverWithTimeout(t *testing.T) {
 	vm := &VfioPciManager{
 		nvidiaEnabled: true,
