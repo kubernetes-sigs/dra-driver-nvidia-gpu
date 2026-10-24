@@ -37,15 +37,35 @@ Creating a `ComputeDomain` in `hostManaged` mode uses an existing host `nvidia-i
 1. You run `nvidia-imex` on each participating GPU node and expose its command socket.
 2. The `compute-domain-controller` creates the workload `ResourceClaimTemplate`.
 3. When a workload pod claims a channel, the `compute-domain-kubelet-plugin` queries the host daemon through the daemon's command socket and requires a `READY` response. If the daemon is unavailable or not ready, claim preparation fails and is retried.
-4. After the readiness check succeeds, the plugin injects channel 0 (`/dev/nvidia-caps-imex-channels/channel0`) into the workload container.
-5. Deleting the `ComputeDomain` removes the workload claim template, but it does not stop or reconfigure the host service.
+4. The controller reserves the lowest unused channel ID for the ComputeDomain and pins its workload claim template to that ID. Every worker requests the same channel across nodes.
+5. After the readiness check succeeds, the plugin validates the reservation and injects `/dev/nvidia-caps-imex-channels/channelN` into the workload container.
+6. Deleting the `ComputeDomain` removes the workload claim template and releases its channel reservation after its workload claims have been removed. It does not stop or reconfigure the host service.
 
-Host-managed mode currently supports domain isolation only. All ComputeDomains
-that use the same host IMEX domain share channel 0. Because this mode has no
+Host-managed mode assigns distinct channels to ComputeDomains in the shared host
+IMEX domain. Reservations are stored in the driver's namespace in the
+`compute-domain-imex-channel-reservations` ConfigMap and survive controller
+restarts. Do not delete or edit this ConfigMap while ComputeDomains exist.
+The controller selects from channels advertised by every currently published
+node pool and waits if publication is incomplete or all channels are reserved.
+Because this mode has no
 per-ComputeDomain daemon pods, the controller disables its
 `IMEXDaemonsWithDNSNames` and `ComputeDomainCliques` behaviors and does not create
 `ComputeDomainClique` objects. A `Ready` ComputeDomain therefore does not report
 the health of the host service.
+
+A reservation belongs to the ComputeDomain, not an individual pod. Removing
+one worker does not release it while the ComputeDomain remains. Retained
+ResourceClaims block ComputeDomain finalization until they are removed.
+Separate claims on the same node remain exclusive: workers of the same
+ComputeDomain on one node must share a claim where supported by Kubernetes,
+or use one claim per node.
+
+Before upgrading from the implementation that injected channel 0 for every
+ComputeDomain, drain workloads and remove their claims and ComputeDomains.
+Upgrade the chart, controller, and plugins together, then recreate the domains.
+Existing templates are not silently rewritten. Apply the same drain sequence
+before downgrading; older binaries cannot honor nonzero channel reservations.
+One driver installation manages reservations for the shared host IMEX domain.
 
 For service and socket configuration, see [Host-managed IMEX](../prerequisites.md#host-managed-imex).
 

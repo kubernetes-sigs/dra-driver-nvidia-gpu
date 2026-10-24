@@ -24,10 +24,12 @@ import (
 	"testing"
 	"time"
 
+	coreapi "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	corefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
@@ -37,6 +39,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 	nvfake "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/clientset/versioned/fake"
 	nvinformers "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/informers/externalversions"
@@ -552,7 +555,11 @@ func TestUnprepareMissingClaimIsNoop(t *testing.T) {
 
 func hostManagedConfig() *Config {
 	return &Config{
-		flags:      &Flags{imexHostSocketPath: defaultIMEXHostSocketPath},
+		flags: &Flags{imexHostSocketPath: defaultIMEXHostSocketPath, namespace: "driver"},
+		clientsets: flags.ClientSets{Core: corefake.NewClientset(&coreapi.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: imex.ChannelReservationsConfigMap, Namespace: "driver"},
+			Data:       map[string]string{"cd-uid": "0"},
+		})},
 		imexConfig: imex.Config{Mode: imex.ModeHostManaged, Isolation: imex.IsolationIMEXDomain},
 	}
 }
@@ -560,7 +567,7 @@ func hostManagedConfig() *Config {
 // TestApplyComputeDomainChannelConfigHostManagedIgnoresAllocationMode
 // confirms the kubelet plugin does not (re-)validate AllocationMode under
 // host-managed IMEX: today the controller is the one that always requests
-// AllocationMode Single (channel 0) for host-managed ComputeDomains, so the
+// AllocationMode Single for host-managed ComputeDomains, so the
 // kubelet plugin trusts it rather than duplicating that policy. This leaves
 // room for the controller to later request other channels without needing a
 // matching change here.
@@ -672,8 +679,7 @@ func TestApplyComputeDomainChannelConfigHostManagedNoCliqueSkipsInjection(t *tes
 // TestApplyComputeDomainChannelConfigHostManagedUsesAllocatedChannel confirms
 // that the channel-conflict check operates on whichever channel was actually
 // allocated for the claim (via result.Device), not a hardcoded channel 0.
-// Today the controller only ever requests channel 0, but this proves the
-// kubelet plugin itself imposes no such restriction.
+// The checkpoint conflict check also protects nonzero reserved channels.
 func TestApplyComputeDomainChannelConfigHostManagedUsesAllocatedChannel(t *testing.T) {
 	cd := &configapi.ComputeDomain{
 		ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "cd-uid"},
@@ -716,6 +722,47 @@ func TestApplyComputeDomainChannelConfigHostManagedUsesAllocatedChannel(t *testi
 
 	require.Error(t, err, "channel 2 is already allocated by another claim, so this must fail")
 	assert.Contains(t, err.Error(), "channel 2 already allocated")
+}
+
+func TestHostManagedChannelReservationValidation(t *testing.T) {
+	for name, test := range map[string]struct {
+		reservation string
+		allocated   int
+		wantError   bool
+	}{
+		"nonzero reserved channel": {reservation: "1", allocated: 1},
+		"wrong channel":            {reservation: "1", allocated: 0, wantError: true},
+		"missing reservation":      {allocated: 1, wantError: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			config := hostManagedConfig()
+			registry, err := config.clientsets.Core.CoreV1().ConfigMaps("driver").Get(ctx, imex.ChannelReservationsConfigMap, metav1.GetOptions{})
+			require.NoError(t, err)
+			registry.Data["cd-uid"] = test.reservation
+			_, err = config.clientsets.Core.CoreV1().ConfigMaps("driver").Update(ctx, registry, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			factory := nvinformers.NewSharedInformerFactory(nvfake.NewSimpleClientset(), 0)
+			informer := factory.Resource().V1beta1().ComputeDomains().Informer()
+			require.NoError(t, informer.AddIndexers(cache.Indexers{"computeDomainUID": uidIndexer[*configapi.ComputeDomain]}))
+			require.NoError(t, informer.GetIndexer().Add(&configapi.ComputeDomain{ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "cd-uid"}}))
+			deviceName := "channel-" + strconv.Itoa(test.allocated)
+			state := &DeviceState{
+				config: config, checkpointManager: &fakeCheckpointManager{checkpoint: checkpointWithClaims(nil)},
+				computeDomainManager: &ComputeDomainManager{informer: informer},
+				allocatable:          AllocatableDevices{deviceName: &AllocatableDevice{Channel: &ComputeDomainChannelInfo{ID: test.allocated}}},
+			}
+			result := allocationResult("request", DriverName, deviceName, nil)
+			prepared, err := state.applyComputeDomainChannelConfigHostManaged(ctx, channelConfig("cd-uid"), claimWithResults("claim-uid", result), &result)
+			if test.wantError {
+				require.ErrorContains(t, err, "is not reserved for ComputeDomain")
+				require.True(t, isPermanentError(err))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, "cd-uid", prepared.ComputeDomain)
+		})
+	}
 }
 
 // TestApplyComputeDomainChannelConfigHostManagedRequiresHostIMEXReady confirms

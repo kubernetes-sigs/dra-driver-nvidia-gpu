@@ -54,6 +54,12 @@ metadata:
   name: {{ include "dra-driver-nvidia-gpu.name" $ }}-role-kubeletplugin
   namespace: {{ $namespace }}
 rules:
+{{- if eq $namespace (include "dra-driver-nvidia-gpu.namespace" $) }}
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["compute-domain-imex-channel-reservations"]
+  verbs: ["get"]
+{{- end }}
 - apiGroups: ["resource.nvidia.com"]
   resources: ["computedomaincliques"]
   verbs: ["get"]

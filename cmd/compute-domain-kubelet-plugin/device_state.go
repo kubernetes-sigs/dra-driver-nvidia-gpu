@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,7 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/lookup/root"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/bootid"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 	drametrics "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
 )
 
@@ -654,9 +656,16 @@ func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Con
 		return nil, fmt.Errorf("applyComputeDomainChannelConfigHostManaged: %q is not an allocatable IMEX channel device", result.Device)
 	}
 	channelID := device.Channel.ID
-
 	if err := s.assertImexChannelNotAllocated(channelID); err != nil {
 		return nil, fmt.Errorf("allocation failed: %w", err)
+	}
+	registry, err := s.config.clientsets.Core.CoreV1().ConfigMaps(s.config.flags.namespace).Get(ctx, imex.ChannelReservationsConfigMap, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get host IMEX channel reservations: %w", err)
+	}
+	reservedID, err := strconv.Atoi(registry.Data[config.DomainID])
+	if err != nil || reservedID != channelID {
+		return nil, permanentError{fmt.Errorf("channel %d is not reserved for ComputeDomain %s", channelID, config.DomainID)}
 	}
 
 	if err := s.computeDomainManager.AssertComputeDomainNamespace(ctx, claim.Namespace, config.DomainID); err != nil {
