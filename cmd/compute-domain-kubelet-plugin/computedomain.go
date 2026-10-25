@@ -67,6 +67,10 @@ type ComputeDomainManager struct {
 	factory  nvinformers.SharedInformerFactory
 	informer cache.SharedIndexInformer
 
+	// cddsInformer watches the ComputeDomainDaemonSet of static IMEX
+	// daemons. It is nil unless they are used.
+	cddsInformer cache.SharedIndexInformer
+
 	configFilesRoot string
 
 	cliqueIDMu sync.RWMutex
@@ -102,6 +106,9 @@ func NewComputeDomainManager(config *Config, getCliqueIDFunc func() (string, err
 		configFilesRoot: configFilesRoot,
 		cliqueID:        cliqueID,
 		getCliqueIDFunc: getCliqueIDFunc,
+	}
+	if config.imexConfig.StaticDaemon() {
+		m.cddsInformer = factory.Resource().V1beta1().ComputeDomainDaemonSets().Informer()
 	}
 
 	return m, nil
@@ -164,6 +171,9 @@ func (m *ComputeDomainManager) Start(ctx context.Context) (rerr error) {
 	if !cache.WaitForCacheSync(ctx.Done(), m.informer.HasSynced) {
 		return fmt.Errorf("informer cache sync for ComputeDomains failed")
 	}
+	if m.cddsInformer != nil && !cache.WaitForCacheSync(ctx.Done(), m.cddsInformer.HasSynced) {
+		return fmt.Errorf("informer cache sync for ComputeDomainDaemonSets failed")
+	}
 
 	if m.config.flags.gpuCliqueLabelEnabled {
 		if err := m.SetGPUCliqueLabel(ctx); err != nil {
@@ -189,7 +199,7 @@ func (m *ComputeDomainManager) Stop() error {
 	}
 	m.waitGroup.Wait()
 
-	if m.config.flags.gpuCliqueLabelEnabled {
+	if m.removesGPUCliqueLabelOnStop() {
 		rmCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := m.RemoveGPUCliqueLabel(rmCtx); err != nil {
@@ -198,6 +208,12 @@ func (m *ComputeDomainManager) Stop() error {
 	}
 
 	return nil
+}
+
+// removesGPUCliqueLabelOnStop keeps the label across restarts with static IMEX
+// daemons, as their DaemonSet deletes the daemon of a node without it.
+func (m *ComputeDomainManager) removesGPUCliqueLabelOnStop() bool {
+	return m.config.flags.gpuCliqueLabelEnabled && !m.config.imexConfig.StaticDaemon()
 }
 
 func (m *ComputeDomainManager) NewSettings(domainID string) (*ComputeDomainDaemonSettings, error) {
@@ -225,22 +241,37 @@ func (m *ComputeDomainManager) GetComputeDomainChannelContainerEdits(devRoot str
 // launching the CD Daemon (whether or not it tries to launch an IMEX daemon
 // internally).
 func (s *ComputeDomainDaemonSettings) GetCDIContainerEditsCommon(ctx context.Context) (*cdiapi.ContainerEdits, error) {
-	cd, err := s.manager.GetComputeDomain(ctx, s.domainID)
-	if err != nil {
-		return nil, fmt.Errorf("error getting compute domain %s: %w", s.domainID, err)
-	}
-	if cd == nil {
-		return nil, fmt.Errorf("compute domain not found: %s", s.domainID)
+	env := []string{fmt.Sprintf("CLIQUE_ID=%s", s.manager.CliqueID())}
+	if s.manager.config.imexConfig.StaticDaemon() {
+		cdds, err := s.manager.GetComputeDomainDaemonSet()
+		if err != nil {
+			return nil, err
+		}
+		if cdds == nil || string(cdds.UID) != s.domainID {
+			return nil, fmt.Errorf("ComputeDomainDaemonSet not found: %s", s.domainID)
+		}
+		env = append(env,
+			fmt.Sprintf("COMPUTE_DOMAIN_DAEMONSET_UID=%s", cdds.UID),
+			fmt.Sprintf("COMPUTE_DOMAIN_DAEMONSET_NAME=%s", cdds.Name),
+		)
+	} else {
+		cd, err := s.manager.GetComputeDomain(ctx, s.domainID)
+		if err != nil {
+			return nil, fmt.Errorf("error getting compute domain %s: %w", s.domainID, err)
+		}
+		if cd == nil {
+			return nil, fmt.Errorf("compute domain not found: %s", s.domainID)
+		}
+		env = append(env,
+			fmt.Sprintf("COMPUTE_DOMAIN_UUID=%s", cd.UID),
+			fmt.Sprintf("COMPUTE_DOMAIN_NAME=%s", cd.Name),
+			fmt.Sprintf("COMPUTE_DOMAIN_NAMESPACE=%s", cd.Namespace),
+		)
 	}
 
 	edits := &cdiapi.ContainerEdits{
 		ContainerEdits: &cdispec.ContainerEdits{
-			Env: []string{
-				fmt.Sprintf("CLIQUE_ID=%s", s.manager.CliqueID()),
-				fmt.Sprintf("COMPUTE_DOMAIN_UUID=%s", cd.UID),
-				fmt.Sprintf("COMPUTE_DOMAIN_NAME=%s", cd.Name),
-				fmt.Sprintf("COMPUTE_DOMAIN_NAMESPACE=%s", cd.Namespace),
-			},
+			Env: env,
 			Mounts: []*cdispec.Mount{
 				{
 					// imexDaemonConfigDirPath   = "/imexd"
@@ -332,7 +363,7 @@ func (m *ComputeDomainManager) AssertComputeDomainReady(ctx context.Context, cdU
 // even after the feature gate is enabled.
 func (m *ComputeDomainManager) isCurrentNodeReady(ctx context.Context, cd *nvapi.ComputeDomain) bool {
 	if featuregates.Enabled(featuregates.ComputeDomainCliques) {
-		if m.isCurrentNodeReadyInClique(ctx, cd) {
+		if m.isCurrentNodeReadyInClique(ctx, string(cd.UID)) {
 			return true
 		}
 	}
@@ -349,9 +380,10 @@ func (m *ComputeDomainManager) isCurrentNodeReadyInStatus(cd *nvapi.ComputeDomai
 	return false
 }
 
-// isCurrentNodeReadyInClique checks if the current node is marked as ready in the ComputeDomainClique.
-func (m *ComputeDomainManager) isCurrentNodeReadyInClique(ctx context.Context, cd *nvapi.ComputeDomain) bool {
-	cliqueName := fmt.Sprintf("%s.%s", cd.UID, m.CliqueID())
+// isCurrentNodeReadyInClique checks if the current node is marked as ready in
+// the ComputeDomainClique of a ComputeDomain or ComputeDomainDaemonSet.
+func (m *ComputeDomainManager) isCurrentNodeReadyInClique(ctx context.Context, domainUID string) bool {
+	cliqueName := fmt.Sprintf("%s.%s", domainUID, m.CliqueID())
 
 	clique, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.flags.namespace).Get(ctx, cliqueName, metav1.GetOptions{})
 	if err != nil {
@@ -372,6 +404,59 @@ func (m *ComputeDomainManager) isCurrentNodeReadyInClique(ctx context.Context, c
 		}
 	}
 	return false
+}
+
+// GetComputeDomainDaemonSet returns the ComputeDomainDaemonSet, or nil if it
+// does not exist or static IMEX daemons are not used.
+func (m *ComputeDomainManager) GetComputeDomainDaemonSet() (*nvapi.ComputeDomainDaemonSet, error) {
+	if m.cddsInformer == nil {
+		return nil, nil
+	}
+	obj, exists, err := m.cddsInformer.GetStore().GetByKey(nvapi.ComputeDomainDaemonSetName)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving ComputeDomainDaemonSet: %w", err)
+	}
+	if !exists {
+		return nil, nil
+	}
+	cdds, ok := obj.(*nvapi.ComputeDomainDaemonSet)
+	if !ok {
+		return nil, fmt.Errorf("failed to cast to ComputeDomainDaemonSet")
+	}
+	return cdds, nil
+}
+
+// AssertComputeDomainDaemonSetUID rejects daemon claims of anything but the
+// current ComputeDomainDaemonSet.
+func (m *ComputeDomainManager) AssertComputeDomainDaemonSetUID(uid string) error {
+	cdds, err := m.GetComputeDomainDaemonSet()
+	if err != nil {
+		return err
+	}
+	// Retryable: the informer may not have caught up yet.
+	if cdds == nil {
+		return fmt.Errorf("ComputeDomainDaemonSet %s not found", nvapi.ComputeDomainDaemonSetName)
+	}
+	if string(cdds.UID) != uid {
+		return permanentError{fmt.Errorf("daemon claim for %s, but the ComputeDomainDaemonSet is %s", uid, cdds.UID)}
+	}
+	return nil
+}
+
+// AssertStaticIMEXDaemonReady fails, to be retried, until the static IMEX
+// daemon of this node is ready in its clique.
+func (m *ComputeDomainManager) AssertStaticIMEXDaemonReady(ctx context.Context) error {
+	cdds, err := m.GetComputeDomainDaemonSet()
+	if err != nil {
+		return err
+	}
+	if cdds == nil || cdds.GetDeletionTimestamp() != nil {
+		return fmt.Errorf("ComputeDomainDaemonSet %s not found, create it before running ComputeDomain workloads", nvapi.ComputeDomainDaemonSetName)
+	}
+	if !m.isCurrentNodeReadyInClique(ctx, string(cdds.UID)) {
+		return fmt.Errorf("static IMEX daemon not ready on this node")
+	}
+	return nil
 }
 
 func (m *ComputeDomainManager) AssertComputeDomainNamespace(ctx context.Context, claimNamespace, cdUID string) error {
@@ -601,6 +686,16 @@ func (m *ComputeDomainManager) periodicCleanup(ctx context.Context) {
 
 				// CD still exists, do not clean up
 				if computeDomain != nil {
+					continue
+				}
+
+				// Nor does the static IMEX daemon's ComputeDomainDaemonSet.
+				cdds, err := m.GetComputeDomainDaemonSet()
+				if err != nil {
+					klog.Errorf("error getting ComputeDomainDaemonSet: %v", err)
+					continue
+				}
+				if cdds != nil && string(cdds.UID) == uid {
 					continue
 				}
 
