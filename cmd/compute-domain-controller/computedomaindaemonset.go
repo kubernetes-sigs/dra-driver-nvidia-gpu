@@ -64,6 +64,9 @@ const (
 	cddsSyncDelay = 500 * time.Millisecond
 	// cddsResyncInterval rechecks the cliques and rollout without events.
 	cddsResyncInterval = time.Minute
+	// cliqueRestartTimeout bounds how long a restarted clique counts as in
+	// progress before the informer shows its new daemons.
+	cliqueRestartTimeout = 2 * time.Minute
 )
 
 // StaticDaemonSetTemplateData renders the static IMEX DaemonSet.
@@ -111,6 +114,12 @@ type ComputeDomainDaemonSetManager struct {
 
 	daemonSetTemplatePath string
 	rctTemplatePath       string
+	now                   func() time.Time
+
+	// restarting holds cliques whose daemons were deleted for a rollout,
+	// with when.
+	restartingMu sync.Mutex
+	restarting   map[string]time.Time
 }
 
 func NewComputeDomainDaemonSetManager(config *ManagerConfig, hasChannelClaims func() bool) *ComputeDomainDaemonSetManager {
@@ -142,6 +151,8 @@ func NewComputeDomainDaemonSetManager(config *ManagerConfig, hasChannelClaims fu
 		nodeInf:               nodeFactory.Core().V1().Nodes().Informer(),
 		daemonSetTemplatePath: StaticDaemonSetTemplatePath,
 		rctTemplatePath:       DaemonSetResourceClaimTemplateTemplatePath,
+		now:                   time.Now,
+		restarting:            make(map[string]time.Time),
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
 			workqueue.NewTypedItemExponentialFailureRateLimiter[string](time.Second, time.Minute),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "compute-domain-daemonset"},
@@ -287,11 +298,17 @@ func (m *ComputeDomainDaemonSetManager) sync(ctx context.Context) (time.Duration
 	}
 
 	hash := ds.Spec.Template.Annotations[staticDaemonTemplateHashKey]
-	cliques, _ := groupByClique(m.nodes(), pods, cdds.Spec.NodeSelector)
+	cliques, unclustered := groupByClique(m.nodes(), pods, cdds.Spec.NodeSelector)
+	var requeueAfter time.Duration
+	if cdds.Spec.UpdateStrategy.Type == nvapi.ComputeDomainDaemonSetUpdateStrategyRollingUpdate {
+		if requeueAfter, err = m.rollout(ctx, cdds, cliques, unclustered, hash); err != nil {
+			return 0, err
+		}
+	}
 	if err := m.updateStatus(ctx, cdds, ds, cliques, pods, hash); err != nil {
 		return 0, err
 	}
-	return 0, nil
+	return requeueAfter, nil
 }
 
 func (m *ComputeDomainDaemonSetManager) addFinalizer(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet) (*nvapi.ComputeDomainDaemonSet, error) {
@@ -547,6 +564,61 @@ func (m *ComputeDomainDaemonSetManager) nodes() []*corev1.Node {
 	return nodes
 }
 
+func nodeReadiness(nodes []*corev1.Node) map[string]bool {
+	ready := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		for _, c := range node.Status.Conditions {
+			if c.Type == corev1.NodeReady {
+				ready[node.Name] = c.Status == corev1.ConditionTrue
+			}
+		}
+	}
+	return ready
+}
+
+// rollout restarts the next batch of outdated cliques.
+func (m *ComputeDomainDaemonSetManager) rollout(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, cliques []*staticClique, unclustered []*corev1.Pod, hash string) (time.Duration, error) {
+	now := m.now()
+	plan := planCliqueRollout(cliques, unclustered, hash, cdds.Spec.UpdateStrategy.RollingUpdate, nodeReadiness(m.nodes()), m.restartingCliques(cliques, hash, now), now)
+	if len(plan.cliques) > 0 {
+		klog.Infof("Restarting the static IMEX daemons of cliques %v", plan.cliques)
+	}
+	for _, pod := range plan.pods {
+		err := m.config.clientsets.Core.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &pod.UID},
+		})
+		if err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
+			return 0, fmt.Errorf("error deleting outdated IMEX daemon pod %s: %w", pod.Name, err)
+		}
+	}
+	m.restartingMu.Lock()
+	for _, id := range plan.cliques {
+		m.restarting[id] = now
+	}
+	m.restartingMu.Unlock()
+	return plan.requeueAfter, nil
+}
+
+// restartingCliques returns the cliques restarted recently whose new daemons
+// the informer may not show yet, and forgets the others.
+func (m *ComputeDomainDaemonSetManager) restartingCliques(cliques []*staticClique, hash string, now time.Time) map[string]bool {
+	m.restartingMu.Lock()
+	defer m.restartingMu.Unlock()
+	restarting := make(map[string]bool, len(m.restarting))
+	for _, c := range cliques {
+		started, ok := m.restarting[c.id]
+		if !ok {
+			continue
+		}
+		if !c.hasOutdatedPods(hash) || now.Sub(started) > cliqueRestartTimeout {
+			delete(m.restarting, c.id)
+			continue
+		}
+		restarting[c.id] = true
+	}
+	return restarting
+}
+
 // removeStaleDaemons removes clique entries of daemons whose pod is gone
 // without unregistering, for example with its node. A miss in the informer
 // is confirmed against the API server first.
@@ -622,8 +694,12 @@ func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *
 	if outdated := status.DesiredNumberScheduled - status.UpdatedNumberScheduled; outdated > 0 {
 		rollout.Status = metav1.ConditionTrue
 		switch {
-		default:
+		case cdds.Spec.UpdateStrategy.Type != nvapi.ComputeDomainDaemonSetUpdateStrategyRollingUpdate:
 			rollout.Reason, rollout.Message = "WaitingForPodDeletion", fmt.Sprintf("%d IMEX daemons run an outdated revision, delete their pods to update them", outdated)
+		case cdds.Spec.UpdateStrategy.RollingUpdate != nil && cdds.Spec.UpdateStrategy.RollingUpdate.Paused:
+			rollout.Reason, rollout.Message = "Paused", fmt.Sprintf("%d IMEX daemons run an outdated revision", outdated)
+		default:
+			rollout.Reason, rollout.Message = "RollingUpdate", fmt.Sprintf("%d IMEX daemons run an outdated revision", outdated)
 		}
 	}
 	for _, c := range []metav1.Condition{ready, rollout} {
