@@ -246,6 +246,11 @@ func newApp() *cli.App {
 			}); err != nil {
 				return fmt.Errorf("imex configuration validation failed: %w", err)
 			}
+			// Static IMEX daemons run on the nodes labeled with their clique.
+			if imexConfig.StaticDaemon() && !flags.gpuCliqueLabelEnabled {
+				klog.Infof("Enabling the %s node label for static IMEX daemons", gpuCliqueLabelKey)
+				flags.gpuCliqueLabelEnabled = true
+			}
 
 			clientSets, err := flags.kubeClientConfig.NewClientSets()
 			if err != nil {

@@ -600,9 +600,9 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, cs 
 	for c := range configResultsMap {
 		switch config := c.(type) {
 		case *configapi.ComputeDomainChannelConfig:
-			// Host-managed mode never adds the ComputeDomain node label, so
-			// there is nothing to remove here.
-			if s.config.imexConfig.EffectiveHostManaged() {
+			// A shared IMEX domain never adds the ComputeDomain node label,
+			// so there is nothing to remove here.
+			if s.config.imexConfig.SharedIMEXDomain() {
 				continue
 			}
 			// Keep the IMEX daemon for the ComputeDomain's other claims.
@@ -646,11 +646,19 @@ func (s *DeviceState) applyComputeDomainChannelConfig(ctx context.Context, confi
 		return nil, fmt.Errorf("applyComputeDomainChannelConfig: unexpected results %v", results)
 	}
 
-	// Host-managed IMEX skips daemon bootstrap and readiness bookkeeping entirely,
-	// so the two modes are handled by separate functions instead of threading
-	// hostManaged checks through a shared code path.
-	if s.config.imexConfig.EffectiveHostManaged() {
-		return s.applyComputeDomainChannelConfigHostManaged(ctx, config, claim, results[0])
+	// A shared IMEX domain skips daemon bootstrap and readiness bookkeeping
+	// entirely, so it is handled by separate functions instead of threading
+	// mode checks through a shared code path.
+	switch {
+	case s.config.imexConfig.EffectiveHostManaged():
+		return s.applyComputeDomainChannelConfigSharedDomain(ctx, config, claim, results[0], func(context.Context) error {
+			if err := s.nvdevlib.checkHostIMEXReady(s.config.flags.imexHostSocketPath); err != nil {
+				return fmt.Errorf("host nvidia-imex daemon readiness check failed: %w", err)
+			}
+			return nil
+		})
+	case s.config.imexConfig.StaticDaemon():
+		return s.applyComputeDomainChannelConfigSharedDomain(ctx, config, claim, results[0], s.computeDomainManager.AssertStaticIMEXDaemonReady)
 	}
 	return s.applyComputeDomainChannelConfigDriverManaged(ctx, config, claim, results[0])
 }
@@ -682,15 +690,15 @@ func (s *DeviceState) allocatedChannelID(claim *resourceapi.ResourceClaim, resul
 	return allocation.Channel, nil
 }
 
-// applyComputeDomainChannelConfigHostManaged handles a channel claim when the
-// cluster admin (not the driver) owns the host nvidia-imex daemon. It skips
-// the driver-managed IMEX daemon management entirely, but on fabric nodes
-// still validates that the operator's host nvidia-imex daemon is actually
-// ready before handing out a channel, via checkHostIMEXReady.
-func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Context, config *configapi.ComputeDomainChannelConfig, claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult) (*DeviceConfigState, error) {
+// applyComputeDomainChannelConfigSharedDomain handles a channel claim when
+// ComputeDomains share an IMEX domain, run by the host (host-managed) or by
+// the static ComputeDomainDaemonSet. It skips per-ComputeDomain IMEX daemon
+// management entirely, but on fabric nodes still validates that the IMEX
+// daemon is actually ready before handing out a channel, via assertIMEXReady.
+func (s *DeviceState) applyComputeDomainChannelConfigSharedDomain(ctx context.Context, config *configapi.ComputeDomainChannelConfig, claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult, assertIMEXReady func(context.Context) error) (*DeviceConfigState, error) {
 	channelID, err := s.allocatedChannelID(claim, result)
 	if err != nil {
-		return nil, fmt.Errorf("applyComputeDomainChannelConfigHostManaged: %w", err)
+		return nil, fmt.Errorf("applyComputeDomainChannelConfigSharedDomain: %w", err)
 	}
 
 	if err := s.assertChannelAvailable(channelID, config.DomainID); err != nil {
@@ -718,13 +726,13 @@ func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Con
 		return nil, err
 	}
 	if preparedOnNode {
-		klog.V(4).Infof("ComputeDomain %s already prepared on this node, skipping host IMEX readiness check", config.DomainID)
-	} else if err := s.nvdevlib.checkHostIMEXReady(s.config.flags.imexHostSocketPath); err != nil {
-		return nil, fmt.Errorf("host nvidia-imex daemon readiness check failed: %w", err)
+		klog.V(4).Infof("ComputeDomain %s already prepared on this node, skipping IMEX readiness check", config.DomainID)
+	} else if err := assertIMEXReady(ctx); err != nil {
+		return nil, err
 	}
 
 	if channelID < 0 || channelID >= len(s.nvdevlib.nvCapImexChanDevInfos) {
-		return nil, fmt.Errorf("applyComputeDomainChannelConfigHostManaged: channel %d out of range (node has %d IMEX channels)",
+		return nil, fmt.Errorf("applyComputeDomainChannelConfigSharedDomain: channel %d out of range (node has %d IMEX channels)",
 			channelID, len(s.nvdevlib.nvCapImexChanDevInfos))
 	}
 	edits := s.computeDomainManager.GetComputeDomainChannelContainerEdits(s.cdi.devRoot, s.nvdevlib.nvCapImexChanDevInfos[channelID])
@@ -824,6 +832,13 @@ func (s *DeviceState) applyComputeDomainDaemonConfig(ctx context.Context, config
 
 	if len(allocatableDevices) != 1 {
 		return nil, fmt.Errorf("only expected 1 device for requests '%v' in claim '%v'", requests, claim.UID)
+	}
+
+	// Static IMEX daemons serve the ComputeDomainDaemonSet, not ComputeDomains.
+	if s.config.imexConfig.StaticDaemon() {
+		if err := s.computeDomainManager.AssertComputeDomainDaemonSetUID(config.DomainID); err != nil {
+			return nil, err
+		}
 	}
 
 	// Declare a device group state object to populate.

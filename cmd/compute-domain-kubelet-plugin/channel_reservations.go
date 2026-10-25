@@ -78,7 +78,7 @@ func (s *DeviceState) isComputeDomainPreparedOnNode(domainID string) (bool, erro
 // assertChannelAvailable fails if another claim holds the channel, unless
 // channel reservations let claims of the same ComputeDomain share it.
 func (s *DeviceState) assertChannelAvailable(channelID int, domainID string) error {
-	if channelReservationsEnabled() && channelID == legacySharedChannel && s.config.imexConfig.EffectiveHostManaged() {
+	if channelReservationsEnabled() && channelID == legacySharedChannel && s.config.imexConfig.SharedIMEXDomain() {
 		return nil
 	}
 	if channelReservationsEnabled() {
