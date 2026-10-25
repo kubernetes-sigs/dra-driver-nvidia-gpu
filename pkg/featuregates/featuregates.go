@@ -115,6 +115,11 @@ const (
 	// - ComputeDomains sharing IMEX daemons get distinct channels, so they can
 	//   run on the same node.
 	ComputeDomainChannelReservations featuregate.Feature = "ComputeDomainChannelReservations"
+
+	// ComputeDomainDaemonSet unlocks imex.daemonLifecycle=static: one static
+	// IMEX daemon per node, managed through the ComputeDomainDaemonSet object,
+	// is shared by all ComputeDomains, each with its own IMEX channels.
+	ComputeDomainDaemonSet featuregate.Feature = "ComputeDomainDaemonSet"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -224,6 +229,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(0, 6),
 		},
 	},
+	ComputeDomainDaemonSet: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 6),
+		},
+	},
 }
 
 var (
@@ -272,6 +284,15 @@ func ValidateFeatureGates() error {
 	// ComputeDomainCliques requires IMEXDaemonsWithDNSNames
 	if Enabled(ComputeDomainCliques) && !Enabled(IMEXDaemonsWithDNSNames) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", ComputeDomainCliques, IMEXDaemonsWithDNSNames)
+	}
+
+	// Static IMEX daemons register in cliques and serve reserved channels.
+	if Enabled(ComputeDomainDaemonSet) {
+		for _, required := range []featuregate.Feature{ComputeDomainCliques, ComputeDomainChannelReservations} {
+			if !Enabled(required) {
+				return fmt.Errorf("feature gate %s requires %s to also be enabled", ComputeDomainDaemonSet, required)
+			}
+		}
 	}
 
 	if Enabled(DynamicMIG) && Enabled(PassthroughSupport) {
