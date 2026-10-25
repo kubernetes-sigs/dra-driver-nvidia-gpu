@@ -170,3 +170,11 @@ func TestStaticDaemonKeepsGPUCliqueLabelOnStop(t *testing.T) {
 	perComputeDomain.config.flags.gpuCliqueLabelEnabled = true
 	assert.True(t, perComputeDomain.removesGPUCliqueLabelOnStop())
 }
+
+func TestCliqueIDRefreshInterval(t *testing.T) {
+	static := staticTestState(t, nil).computeDomainManager
+	assert.Equal(t, staticDaemonCliqueRefreshInterval, static.cliqueIDRefreshInterval(), "static IMEX daemons follow partition changes sooner")
+
+	perComputeDomain := &ComputeDomainManager{config: driverManagedConfig()}
+	assert.Equal(t, gpuCliqueLabelRefreshInterval, perComputeDomain.cliqueIDRefreshInterval())
+}

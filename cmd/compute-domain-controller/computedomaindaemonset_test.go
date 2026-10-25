@@ -374,3 +374,40 @@ func BenchmarkComputeDomainDaemonSetSync(b *testing.B) {
 		}
 	}
 }
+
+func TestComputeDomainDaemonSetRealignsMovedDaemons(t *testing.T) {
+	inPartition := func(pod *corev1.Pod, partition string) *corev1.Pod {
+		pod.Labels[computeDomainCliqueLabelKey] = partition
+		return pod
+	}
+	clique := &nvapi.ComputeDomainClique{
+		ObjectMeta: metav1.ObjectMeta{Name: "cdds-uid.c0", Namespace: "driver", Labels: map[string]string{
+			computeDomainDaemonSetLabelKey: "cdds-uid",
+			computeDomainCliqueLabelKey:    "c0",
+		}},
+		Daemons: []*nvapi.ComputeDomainDaemonInfo{
+			{NodeName: "moved", CliqueID: "c0", Index: 0},
+			{NodeName: "unlabeled", CliqueID: "c0", Index: 1},
+		},
+	}
+	f := newCDDSFixture(t, testComputeDomainDaemonSet(), clique,
+		// Re-partitioned from c0 to c1.
+		cliqueNode("moved", "c1", true), inPartition(daemonPod("moved", "h", time.Hour), "c0"),
+		// Its daemon has not joined a partition yet.
+		cliqueNode("starting", "c1", true), daemonPod("starting", "h", time.Hour),
+		cliqueNode("same", "c1", true), inPartition(daemonPod("same", "h", time.Hour), "c1"),
+		// The kubelet plugin removed the label, for example while restarting.
+		cliqueNode("unlabeled", "", true), inPartition(daemonPod("unlabeled", "h", time.Hour), "c0"),
+	)
+
+	f.sync(t)
+
+	assert.Equal(t, []string{"imex-moved"}, f.deletedPods(), "OnDelete does not hold back realigning a moved daemon")
+
+	// Once its pod is gone, the moved daemon leaves the old clique.
+	f.sync(t)
+	got, err := f.nv.ResourceV1beta1().ComputeDomainCliques("driver").Get(context.Background(), clique.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Len(t, got.Daemons, 1)
+	assert.Equal(t, "unlabeled", got.Daemons[0].NodeName)
+}

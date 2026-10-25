@@ -27,6 +27,19 @@ import (
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 )
 
+// nodePartition returns the NVLink partition of a node, today its GPU clique
+// as labeled by the kubelet plugin.
+func nodePartition(node *corev1.Node) string {
+	return node.Labels[gpuCliqueNodeLabelKey]
+}
+
+// daemonPartition returns the NVLink partition whose IMEX domain a daemon
+// joined, as it labels its pod once it starts, or false before.
+func daemonPartition(pod *corev1.Pod) (string, bool) {
+	partition, ok := pod.Labels[computeDomainCliqueLabelKey]
+	return partition, ok
+}
+
 // staticClique holds the static IMEX daemons of one NVLink clique.
 type staticClique struct {
 	id string
@@ -43,7 +56,7 @@ func groupByClique(nodes []*corev1.Node, pods []*corev1.Pod, nodeSelector map[st
 	cliqueOf := make(map[string]string, len(nodes))
 	byID := make(map[string]*staticClique)
 	for _, node := range nodes {
-		id := node.Labels[gpuCliqueNodeLabelKey]
+		id := nodePartition(node)
 		if id == "" {
 			continue
 		}

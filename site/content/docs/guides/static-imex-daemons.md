@@ -92,6 +92,16 @@ kubectl patch computedomaindaemonset default --type merge \
   -p '{"spec":{"image":"registry.k8s.io/dra-driver-nvidia/dra-driver-nvidia-gpu:v0.6.1"}}'
 ```
 
+## NVLink partition changes
+
+When the GPUs of a node are moved to another NVLink partition, the kubelet
+plugin updates the node's `nvidia.com/gpu.clique` label within a minute. The
+controller then restarts the static IMEX daemon of that node right away,
+whatever the update strategy, as the change has already disrupted both IMEX
+domains. The daemon leaves the clique of its old partition and its new pod
+joins the clique of the new one. Workload claims prepared on the node keep
+their channel, but their IMEX domain changed with the partition.
+
 ## Delete the daemons
 
 Deleting the `ComputeDomainDaemonSet` waits, with a `DeletionBlocked`

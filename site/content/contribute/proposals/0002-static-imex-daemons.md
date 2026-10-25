@@ -77,7 +77,16 @@ named `default` by CEL rule):
   updated daemon that has been ready for `minReadySeconds`, or while recently
   restarted cliques do not show their new daemons in the cache yet.
   Unavailable outdated cliques go first. Unready nodes are left out.
-- Clique entries of daemons whose pod is gone are removed after a live check.
+- Clique entries of daemons whose pod is gone, or whose pod joined another
+  partition, are removed after a live check.
+- NVLink partition changes: a daemon labels its pod with the partition it
+  joined. When a node's partition label changes, which the kubelet plugin
+  checks every minute in this mode, the controller restarts the daemon of
+  that node right away, outside the update strategy, as both IMEX domains
+  are disrupted already. Its new daemon claim carries the new partition ID.
+  The partition is read from the node and pod labels through one helper on
+  each side, so moving from clique IDs to NVLink partition IDs changes only
+  those.
 - Deletion waits, with `DeletionBlocked`, until no `ResourceClaim` is
   allocated an IMEX channel.
 - All events map to one queue key with a short delay. A sync of 1,800 daemons
