@@ -29,8 +29,9 @@ const (
 	mutationCacheTTL     = time.Hour
 
 	// Label keys for ComputeDomainClique objects.
-	computeDomainLabelKey       = "resource.nvidia.com/computeDomain"
-	computeDomainCliqueLabelKey = "resource.nvidia.com/computeDomain.cliqueID"
+	computeDomainLabelKey          = "resource.nvidia.com/computeDomain"
+	computeDomainDaemonSetLabelKey = "resource.nvidia.com/computeDomainDaemonSet"
+	computeDomainCliqueLabelKey    = "resource.nvidia.com/computeDomain.cliqueID"
 )
 
 // IPSet is a set of IP addresses.
