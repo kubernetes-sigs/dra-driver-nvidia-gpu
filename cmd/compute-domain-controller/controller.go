@@ -142,8 +142,22 @@ func (c *Controller) Run(ctx context.Context) error {
 		return fmt.Errorf("error starting ComputeDomain manager: %w", err)
 	}
 
+	// Static IMEX daemons are shared by all ComputeDomains.
+	var cddsManager *ComputeDomainDaemonSetManager
+	if managerConfig.imexConfig.StaticDaemon() {
+		cddsManager = NewComputeDomainDaemonSetManager(managerConfig, cdManager.claimAdmissionManager.hasChannelClaims)
+		if err := cddsManager.Start(ctx); err != nil {
+			return fmt.Errorf("error starting ComputeDomainDaemonSet manager: %w", err)
+		}
+	}
+
 	workQueue.Run(ctx)
 
+	if cddsManager != nil {
+		if err := cddsManager.Stop(); err != nil {
+			return fmt.Errorf("error stopping ComputeDomainDaemonSet manager: %w", err)
+		}
+	}
 	if err := cdManager.Stop(); err != nil {
 		return fmt.Errorf("error stopping ComputeDomain manager: %w", err)
 	}
