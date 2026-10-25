@@ -45,6 +45,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&ComputeDomainList{},
 		&ComputeDomainClique{},
 		&ComputeDomainCliqueList{},
+		&ComputeDomainDaemonSet{},
+		&ComputeDomainDaemonSetList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil
