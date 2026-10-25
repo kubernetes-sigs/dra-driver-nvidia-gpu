@@ -378,6 +378,12 @@ func indexClaimByDomain(obj any) ([]string, error) {
 	return claimDomainIDs(claim), nil
 }
 
+// hasChannelClaims reports whether any cached ResourceClaim is allocated an
+// IMEX channel.
+func (m *ClaimAdmissionManager) hasChannelClaims() bool {
+	return len(m.informer.GetIndexer().ListIndexFuncValues(claimNodeIndex)) > 0
+}
+
 // claimsForComputeDomain returns the cached ResourceClaims referencing a
 // ComputeDomain.
 func (m *ClaimAdmissionManager) claimsForComputeDomain(uid string) []*resourceapi.ResourceClaim {
