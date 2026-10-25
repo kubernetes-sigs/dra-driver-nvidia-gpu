@@ -58,6 +58,7 @@ type Flags struct {
 	computeDomainUUID      string
 	computeDomainName      string
 	computeDomainNamespace string
+	computeDomainDaemonSet string
 	nodeName               string
 	podIP                  string
 	podUID                 string
@@ -130,6 +131,12 @@ func newApp() *cli.App {
 			Value:       "default",
 			EnvVars:     []string{"COMPUTE_DOMAIN_NAMESPACE"},
 			Destination: &flags.computeDomainNamespace,
+		},
+		&cli.StringFlag{
+			Name:        "compute-domain-daemonset-uid",
+			Usage:       "The UID of the ComputeDomainDaemonSet whose static IMEX daemon to run, instead of a ComputeDomain's.",
+			EnvVars:     []string{"COMPUTE_DOMAIN_DAEMONSET_UID"},
+			Destination: &flags.computeDomainDaemonSet,
 		},
 		&cli.StringFlag{
 			Name:        "node-name",
@@ -221,10 +228,11 @@ func newApp() *cli.App {
 // Run invokes the IMEX daemon and manages its lifecycle.
 func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	// Verify that CDI container edits were applied by the container runtime by
-	// checking for COMPUTE_DOMAIN_UUID, which is always injected as part of the
-	// CDI edits. If it is missing, CDI is likely disabled and the daemon cannot
-	// function correctly (e.g. the /imexd mount will be missing).
-	if flags.computeDomainUUID == "" {
+	// checking for COMPUTE_DOMAIN_UUID or COMPUTE_DOMAIN_DAEMONSET_UID, one of
+	// which is always injected as part of the CDI edits. If both are missing,
+	// CDI is likely disabled and the daemon cannot function correctly (e.g. the
+	// /imexd mount will be missing).
+	if flags.computeDomainUUID == "" && flags.computeDomainDaemonSet == "" {
 		return fmt.Errorf("CDI container edits did not apply -- is CDI enabled in your container runtime?")
 	}
 
@@ -233,6 +241,16 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	// Validate feature gate dependencies
 	if err := featuregates.ValidateFeatureGates(); err != nil {
 		return fmt.Errorf("feature gate validation failed: %w", err)
+	}
+
+	// A static IMEX daemon forms its IMEX domain per clique from the
+	// cliques of the ComputeDomainDaemonSet, with no ComputeDomain.
+	domainUID, domainLabelKey := flags.computeDomainUUID, computeDomainLabelKey
+	if flags.computeDomainDaemonSet != "" {
+		if !featuregates.Enabled(featuregates.ComputeDomainCliques) {
+			return fmt.Errorf("static IMEX daemons require the %s feature gate", featuregates.ComputeDomainCliques)
+		}
+		domainUID, domainLabelKey = flags.computeDomainDaemonSet, computeDomainDaemonSetLabelKey
 	}
 
 	imexConfigOverrides, err := imex.ParseConfigOverrides(flags.imexConfigOverrides)
@@ -269,7 +287,7 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 		metricsPath:            flags.metricsPath,
 		clientsets:             clientsets,
 		cliqueID:               flags.cliqueID,
-		computeDomainUUID:      flags.computeDomainUUID,
+		computeDomainUUID:      domainUID,
 		computeDomainName:      flags.computeDomainName,
 		computeDomainNamespace: flags.computeDomainNamespace,
 		nodeName:               flags.nodeName,
@@ -278,6 +296,7 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 		podName:                flags.podName,
 		podNamespace:           flags.podNamespace,
 		maxNodesPerIMEXDomain:  flags.maxNodesPerIMEXDomain,
+		domainLabelKey:         domainLabelKey,
 	}
 
 	// Render and write the IMEX daemon config with the current pod IP
@@ -289,7 +308,7 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	var dnsNameManager *DNSNameManager
 	if featuregates.Enabled(featuregates.IMEXDaemonsWithDNSNames) {
 		// Prepare DNS name manager
-		dnsNameManager = NewDNSNameManager(flags.cliqueID, flags.maxNodesPerIMEXDomain, imexDaemonNodesConfigPath, flags.computeDomainUUID)
+		dnsNameManager = NewDNSNameManager(flags.cliqueID, flags.maxNodesPerIMEXDomain, imexDaemonNodesConfigPath, domainUID)
 
 		// Create static nodes config file with DNS names
 		if err := dnsNameManager.WriteNodesConfig(); err != nil {
