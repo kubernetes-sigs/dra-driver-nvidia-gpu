@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -77,6 +78,7 @@ func newCDDSFixture(t testing.TB, objects ...runtime.Object) *cddsFixture {
 	f.m = NewComputeDomainDaemonSetManager(config, func() bool { return f.hasClaims })
 	f.m.daemonSetTemplatePath = "../../templates/compute-domain-static-daemon.tmpl.yaml"
 	f.m.rctTemplatePath = "../../templates/compute-domain-daemon-claim-template.tmpl.yaml"
+	f.m.now = func() time.Time { return rolloutNow }
 	f.refresh(t)
 	return f
 }
@@ -247,6 +249,43 @@ func TestComputeDomainDaemonSetStatus(t *testing.T) {
 	}
 }
 
+// deletedPods returns the names of the pods the controller deleted.
+func (f *cddsFixture) deletedPods() []string {
+	var deleted []string
+	for _, action := range f.core.Actions() {
+		if del, ok := action.(k8stesting.DeleteAction); ok && del.GetResource().Resource == "pods" {
+			deleted = append(deleted, del.GetName())
+		}
+	}
+	return deleted
+}
+
+func TestComputeDomainDaemonSetRollingUpdate(t *testing.T) {
+	nodes, _ := testCliques(3, 2, "")
+	cdds := testComputeDomainDaemonSet()
+	cdds.Spec.UpdateStrategy = nvapi.ComputeDomainDaemonSetUpdateStrategy{
+		Type:          nvapi.ComputeDomainDaemonSetUpdateStrategyRollingUpdate,
+		RollingUpdate: &nvapi.ComputeDomainDaemonSetRollingUpdate{},
+	}
+	objects := []runtime.Object{cdds}
+	for _, node := range nodes {
+		objects = append(objects, node, daemonPod(node.Name, "previous", time.Hour))
+	}
+	f := newCDDSFixture(t, objects...)
+
+	f.sync(t)
+
+	assert.ElementsMatch(t, []string{"imex-c0-n0", "imex-c0-n1"}, f.deletedPods(), "the first clique restarts as a whole")
+
+	// The informer still shows the deleted pods: no second batch.
+	f.core.ClearActions()
+	_, err := f.m.sync(context.Background())
+	require.NoError(t, err)
+	for _, action := range f.core.Actions() {
+		assert.NotEqual(t, "delete", action.GetVerb())
+	}
+}
+
 func TestComputeDomainDaemonSetDeletion(t *testing.T) {
 	cdds := testComputeDomainDaemonSet()
 	clique := &nvapi.ComputeDomainClique{ObjectMeta: metav1.ObjectMeta{
@@ -310,10 +349,14 @@ func TestComputeDomainDaemonSetRemovesStaleDaemons(t *testing.T) {
 }
 
 // BenchmarkComputeDomainDaemonSetSync syncs 1,800 daemons in 100 cliques of
-// NVL72 racks.
+// NVL72 racks, mid rolling update.
 func BenchmarkComputeDomainDaemonSetSync(b *testing.B) {
 	nodes, pods := testCliques(100, 18, "previous")
 	cdds := testComputeDomainDaemonSet()
+	cdds.Spec.UpdateStrategy = nvapi.ComputeDomainDaemonSetUpdateStrategy{
+		Type:          nvapi.ComputeDomainDaemonSetUpdateStrategyRollingUpdate,
+		RollingUpdate: &nvapi.ComputeDomainDaemonSetRollingUpdate{Paused: true},
+	}
 	objects := []runtime.Object{cdds}
 	for i := range nodes {
 		objects = append(objects, nodes[i], pods[i])
