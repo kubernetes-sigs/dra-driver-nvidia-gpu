@@ -86,8 +86,8 @@ resources:
     imex:
       # mode selects the deployment mode of the IMEX daemon in the cluster. It tells
       #   who owns the nvidia-imex daemon lifecycle:
-      #   driverManaged (default): the driver creates and manages a
-      #     per-ComputeDomain nvidia-imex DaemonSet.
+      #   driverManaged (default): the driver creates and manages the
+      #     nvidia-imex daemons, see scope.
       #   hostManaged: the cluster administrator runs nvidia-imex as a host service
       #     and the driver only advertises/injects an IMEX channel device
       #     Requires featureGates.HostManagedIMEXDaemon=true
@@ -98,6 +98,10 @@ resources:
       #     time.
       #   cluster: the IMEX daemon of a node is shared by all ComputeDomains,
       #     isolated by their channels. Always used with mode=hostManaged.
+      #     With mode=driverManaged, one static IMEX daemon per node runs from
+      #     the ComputeDomainDaemonSet object, which you create before running
+      #     workloads, as Helm does not manage it. Requires isolation=channel
+      #     and featureGates.ComputeDomainDaemonSet=true.
       scope: computeDomain
       # isolation selects the IMEX isolation strategy. The value can be one of:
       #   domain (default): In this mode, all workloads running in the
@@ -141,6 +145,7 @@ resources:
 #   DRAListTypeAttributes: false       # Publish list-valued DRA device attributes
 #   ConsumableShares: false            # Publish consumable capacity and multi-allocation support for devices
 #   ComputeDomainChannelReservations: false # Assign IMEX channels per ComputeDomain ResourceClaimTemplate
+#   ComputeDomainDaemonSet: false      # Static IMEX daemons with imex.scope=cluster
 featureGates: {}
 
 # Log verbosity for all components. Zero or greater, higher number means higher

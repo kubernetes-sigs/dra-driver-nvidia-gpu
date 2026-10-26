@@ -251,6 +251,11 @@ on an invalid combination. Produces no output on success.
   {{- fail (printf "unknown resources.computeDomains.imex.scope %q: must be \"computeDomain\" or \"cluster\"" $scope) -}}
 {{- end -}}
 {{- if and (eq $scope "cluster") (eq $mode "driverManaged") -}}
-  {{- fail "resources.computeDomains.imex.scope=cluster is not supported yet with mode=driverManaged" -}}
+  {{- if ne $isolation "channel" -}}
+    {{- fail "resources.computeDomains.imex.scope=cluster requires isolation=channel, as ComputeDomains sharing IMEX daemons are isolated by their channels" -}}
+  {{- end -}}
+  {{- if not (dig "ComputeDomainDaemonSet" false $gates) -}}
+    {{- fail "resources.computeDomains.imex.scope=cluster requires featureGates.ComputeDomainDaemonSet=true" -}}
+  {{- end -}}
 {{- end -}}
 {{- end -}}

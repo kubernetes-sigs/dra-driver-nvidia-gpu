@@ -1,0 +1,26 @@
+# Static IMEX daemons, shared by all ComputeDomains. Requires
+# resources.computeDomains.imex.scope=cluster with isolation=channel, and the
+# ComputeDomainDaemonSet feature gate. Create it before running workloads,
+# and update it to change or upgrade the daemons.
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomainDaemonSet
+metadata:
+  name: default
+spec:
+  # Pins the daemon image. Leave it empty to keep the driver image at
+  # creation, so that driver upgrades do not restart the daemons.
+  # image: registry.k8s.io/dra-driver-nvidia/dra-driver-nvidia-gpu:v0.6.0
+  # nodeSelector:
+  #   nvidia.com/gpu.product: NVIDIA-GB200
+  # priorityClassName: system-node-critical
+  maxNodesPerClique: 18
+  # imexConfig:
+  #   IMEX_SERVER_PORT: "50000"
+  updateStrategy:
+    # OnDelete (default) never restarts daemons. RollingUpdate restarts
+    # whole cliques, maxUnavailableCliques at a time.
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailableCliques: 1
+      minReadySeconds: 30
+      paused: false
