@@ -204,13 +204,15 @@ func (l deviceLib) ensureNVML() (func(), nvml.Return) {
 }
 
 // Discover devices that are allocatable, on this node.
-func (l deviceLib) enumerateAllPossibleDevices() (*PerGPUAllocatableDevices, error) {
-	perGPUAllocatable, err := l.GetPerGpuAllocatableDevices()
+// A nil driverConfig enumerates every type; otherwise discovery for excluded
+// types is skipped so their failures cannot block startup.
+func (l deviceLib) enumerateAllPossibleDevices(driverConfig *DriverConfig) (*PerGPUAllocatableDevices, error) {
+	perGPUAllocatable, err := l.GetPerGpuAllocatableDevices(driverConfig)
 	if err != nil {
 		return nil, fmt.Errorf("error enumerating allocatable devices: %w", err)
 	}
 
-	if featuregates.Enabled(featuregates.PassthroughSupport) && l.IsVfioEnabled() {
+	if featuregates.Enabled(featuregates.PassthroughSupport) && l.IsVfioEnabled() && driverConfig.advertises(VfioDeviceType) {
 		// Discover passthrough devices and insert them into the
 		// `perGPUAllocatable` devices map
 		err = l.enumerateGpuVfioDevices(perGPUAllocatable)
@@ -226,7 +228,7 @@ func (l deviceLib) enumerateAllPossibleDevices() (*PerGPUAllocatableDevices, err
 // discovery, and assembles the set of allocatable devices that will be
 // announced by this DRA driver. A list of GPU indices can optionally be
 // provided to limit the discovery to a set of physical GPUs.
-func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatableDevices, error) {
+func (l deviceLib) GetPerGpuAllocatableDevices(driverConfig *DriverConfig, indices ...int) (*PerGPUAllocatableDevices, error) {
 	klog.Infof("Traverse GPU devices")
 
 	shutdown, ret := l.ensureNVML()
@@ -284,10 +286,15 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 				// For this full device, inspect all MIG profiles and their possible
 				// placements. Side effect: this enriches `gpuInfo` with additional
 				// properties (such as the memory slice count, and the maximum
-				// capacities as reported by individual MIG profiles).
-				migspecs, err := l.inspectMigProfilesAndPlacements(gpuInfo, d)
-				if err != nil {
-					return fmt.Errorf("error getting MIG info for GPU %v: %w", i, err)
+				// capacities as reported by individual MIG profiles). Skipped when
+				// MIG is not advertised: the full GPU is then announced without a
+				// CounterSet, as on GPUs without MIG support.
+				var migspecs map[string]*MigSpec
+				if driverConfig.advertises(MigDynamicDeviceType) {
+					migspecs, err = l.inspectMigProfilesAndPlacements(gpuInfo, d)
+					if err != nil {
+						return fmt.Errorf("error getting MIG info for GPU %v: %w", i, err)
+					}
 				}
 
 				// When migEnabled is true, parentdev is intentionally NOT added

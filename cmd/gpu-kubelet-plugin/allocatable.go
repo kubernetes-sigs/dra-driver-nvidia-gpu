@@ -42,6 +42,9 @@ type PCIBusID = string
 type AllocatableDevices map[DeviceName]*AllocatableDevice
 type PerGPUAllocatableDevices struct {
 	allocatablesMap map[PCIBusID]AllocatableDevices
+	driverConfig    *DriverConfig
+	// unprepareOnlyDevices keeps profile-excluded devices only to tear down claims prepared before a rollout changed the profile.
+	unprepareOnlyDevices AllocatableDevices
 }
 
 // AllocatableDevice represents an individual device that can be allocated.
@@ -276,6 +279,13 @@ func (d *PerGPUAllocatableDevices) AddAllocatableDevice(allocatable *Allocatable
 	if allocatable == nil {
 		return fmt.Errorf("allocatable is nil")
 	}
+	if d.driverConfig != nil && !d.driverConfig.advertises(allocatable.Type()) {
+		if d.unprepareOnlyDevices == nil {
+			d.unprepareOnlyDevices = make(AllocatableDevices)
+		}
+		d.unprepareOnlyDevices[allocatable.CanonicalName()] = allocatable
+		return nil
+	}
 	pciBusID := allocatable.GetGPUPCIBusID()
 	if _, ok := d.allocatablesMap[pciBusID]; !ok {
 		d.allocatablesMap[pciBusID] = make(AllocatableDevices)
@@ -285,6 +295,28 @@ func (d *PerGPUAllocatableDevices) AddAllocatableDevice(allocatable *Allocatable
 	return nil
 }
 
+// ApplyDriverConfig removes disallowed device types from the allocatable
+// inventory while retaining their metadata so Unprepare can finish claims
+// checkpointed before a rollout changed this node's profile.
+func (d *PerGPUAllocatableDevices) ApplyDriverConfig(config *DriverConfig) {
+	d.driverConfig = config
+	if d.unprepareOnlyDevices == nil {
+		d.unprepareOnlyDevices = make(AllocatableDevices)
+	}
+	for pciBusID, devices := range d.allocatablesMap {
+		for name, device := range devices {
+			if config.advertises(device.Type()) {
+				continue
+			}
+			d.unprepareOnlyDevices[name] = device
+			delete(devices, name)
+		}
+		if len(devices) == 0 {
+			delete(d.allocatablesMap, pciBusID)
+		}
+	}
+}
+
 func (d *PerGPUAllocatableDevices) GetAllocatableDevice(deviceName DeviceName) *AllocatableDevice {
 	for _, devices := range d.allocatablesMap {
 		if device, ok := devices[deviceName]; ok {
@@ -292,6 +324,20 @@ func (d *PerGPUAllocatableDevices) GetAllocatableDevice(deviceName DeviceName) *
 		}
 	}
 	return nil
+}
+
+// GetDeviceForUnprepare includes profile-excluded devices so Unprepare can tear down claims prepared before a rollout changed the profile.
+func (d *PerGPUAllocatableDevices) GetDeviceForUnprepare(deviceName DeviceName) *AllocatableDevice {
+	if device := d.GetAllocatableDevice(deviceName); device != nil {
+		return device
+	}
+	return d.unprepareOnlyDevices[deviceName]
+}
+
+// GetFilteredDevice returns metadata retained because the current profile
+// excluded the device from allocation.
+func (d *PerGPUAllocatableDevices) GetFilteredDevice(deviceName DeviceName) *AllocatableDevice {
+	return d.unprepareOnlyDevices[deviceName]
 }
 
 func (d *PerGPUAllocatableDevices) GetAllDevices() AllocatableDevices {

@@ -27,6 +27,8 @@ import (
 	coreclientset "k8s.io/client-go/kubernetes"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
+
+	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 )
 
 // fakeClientWithVersion returns a fake core clientset whose discovery endpoint
@@ -154,6 +156,92 @@ func TestGenerateDriverResources(t *testing.T) {
 		assert.Equal(t, "gpu-0", pool.Slices[0].Devices[0].Name)
 		assert.Equal(t, "gpu-1", pool.Slices[1].Devices[0].Name)
 	})
+}
+
+func TestGenerateDriverResourcesAppliesDriverConfig(t *testing.T) {
+	pciBusID := "0000:01:00.0"
+	parent := newPartTestGpu(PartCapacityMap{"multiprocessors": intcap(132)}, 8)
+	parent.pciBusID = pciBusID
+	mig := newPartTestMigSpec(parent, 0, 1)
+	counterSet := parent.GetSharedCounterSetName()
+
+	type wantSlice struct {
+		counterSets []string
+		devices     []string
+	}
+	tests := map[string]struct {
+		useSplit       bool
+		advertisement  configapi.GpuAdvertisement
+		want           []wantSlice
+		wantAdvertised int
+	}{
+		"combined, MIG only keeps the parent counter set": {
+			advertisement:  configapi.GpuAdvertisement{Mig: true},
+			want:           []wantSlice{{counterSets: []string{counterSet}, devices: []string{mig.CanonicalName()}}},
+			wantAdvertised: 1,
+		},
+		"split, MIG only keeps the parent counter set": {
+			useSplit:      true,
+			advertisement: configapi.GpuAdvertisement{Mig: true},
+			want: []wantSlice{
+				{counterSets: []string{counterSet}},
+				{devices: []string{mig.CanonicalName()}},
+			},
+			wantAdvertised: 1,
+		},
+		"combined, every device excluded publishes no slice": {
+			advertisement: configapi.GpuAdvertisement{Vfio: true},
+		},
+		"split, every device excluded publishes only an empty counters slice": {
+			useSplit:      true,
+			advertisement: configapi.GpuAdvertisement{Vfio: true},
+			want:          []wantSlice{{}},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			config := &Config{
+				flags:        &Flags{},
+				driverConfig: &DriverConfig{Advertisement: tc.advertisement},
+			}
+			perGPUAllocatable := &PerGPUAllocatableDevices{
+				allocatablesMap: map[PCIBusID]AllocatableDevices{pciBusID: {
+					parent.CanonicalName(): {Gpu: parent},
+					mig.CanonicalName():    {MigDynamic: mig},
+				}},
+			}
+			perGPUAllocatable.ApplyDriverConfig(config.driverConfig)
+			d := &driver{
+				useSplitResourceSlices: tc.useSplit,
+				state: &DeviceState{
+					config:            config,
+					perGPUAllocatable: perGPUAllocatable,
+				},
+			}
+
+			slices := d.GenerateDriverResources("node-a").Pools["node-a"].Slices
+
+			require.Len(t, slices, len(tc.want))
+			for i, want := range tc.want {
+				var counterSets []string
+				for _, cs := range slices[i].SharedCounters {
+					counterSets = append(counterSets, cs.Name)
+				}
+				assert.Equal(t, want.counterSets, counterSets)
+				var devices []string
+				for _, dev := range slices[i].Devices {
+					devices = append(devices, dev.Name)
+					assert.Equal(t, MigStaticDeviceType, *dev.Attributes["type"].StringValue)
+					require.Len(t, dev.ConsumesCounters, 1)
+					assert.Equal(t, counterSet, dev.ConsumesCounters[0].CounterSet)
+				}
+				assert.Equal(t, want.devices, devices)
+			}
+			assert.Len(t, perGPUAllocatable.GetAllDevices(), tc.wantAdvertised)
+			assert.NotNil(t, perGPUAllocatable.GetDeviceForUnprepare(parent.CanonicalName()))
+		})
+	}
 }
 
 func TestShutdownNilReceiver(t *testing.T) {
