@@ -46,7 +46,8 @@ const (
 	ScopeComputeDomain Scope = "computeDomain"
 
 	// ScopeCluster shares the IMEX daemons of a node among all
-	// ComputeDomains, isolated by their channels. ModeHostManaged implies it.
+	// ComputeDomains, isolated by their channels. Under ModeDriverManaged, the
+	// ComputeDomainDaemonSet runs them. ModeHostManaged implies it.
 	ScopeCluster Scope = "cluster"
 )
 
@@ -61,7 +62,7 @@ const (
 	IsolationIMEXDomain Isolation = "domain"
 
 	// IsolationIMEXChannel gives each workload ResourceClaimTemplate its own
-	// reserved channel within an IMEX domain.
+	// reserved channel within an IMEX domain. Required by ScopeCluster.
 	IsolationIMEXChannel Isolation = "channel"
 )
 
@@ -77,6 +78,7 @@ type Config struct {
 type Gates struct {
 	HostManagedIMEXDaemon            bool
 	ComputeDomainChannelReservations bool
+	ComputeDomainDaemonSet           bool
 }
 
 // EffectiveHostManaged reports whether the resolved configuration puts the
@@ -98,6 +100,13 @@ func (c Config) EffectiveScope() Scope {
 	}
 }
 
+// StaticDaemon reports whether the driver runs one static IMEX daemon per
+// node, managed through the ComputeDomainDaemonSet, instead of one per
+// ComputeDomain.
+func (c Config) StaticDaemon() bool {
+	return c.Mode == ModeDriverManaged && c.EffectiveScope() == ScopeCluster
+}
+
 // SharedIMEXDomain reports whether all ComputeDomains share an IMEX domain,
 // isolated by their channels, with no per-ComputeDomain IMEX daemon.
 func (c Config) SharedIMEXDomain() bool {
@@ -116,7 +125,8 @@ func (c Config) String() string {
 //
 //	driverManaged, computeDomain (default), domain (default)  -> OK
 //	driverManaged, computeDomain, channel                     -> ComputeDomainChannelReservations
-//	driverManaged, cluster                                    -> error (not implemented yet)
+//	driverManaged, cluster, channel                           -> ComputeDomainDaemonSet (static daemons)
+//	driverManaged, cluster, domain                            -> error (shared daemons need channels)
 //	hostManaged, cluster (implied), domain                    -> HostManagedIMEXDaemon
 //	hostManaged, cluster (implied), channel                   -> HostManagedIMEXDaemon, ComputeDomainChannelReservations
 //	hostManaged, computeDomain                                -> error (the host daemon is shared)
@@ -148,8 +158,14 @@ func (c Config) Validate(gates Gates) error {
 			return fmt.Errorf("imex.scope=%q is not supported with imex.mode=%q: the host IMEX daemon is shared by all ComputeDomains", ScopeComputeDomain, ModeHostManaged)
 		}
 	case ScopeCluster:
-		if !c.EffectiveHostManaged() {
-			return fmt.Errorf("imex.scope=%q is not supported yet with imex.mode=%q: driver-managed IMEX daemons shared by all ComputeDomains are not implemented", ScopeCluster, ModeDriverManaged)
+		if c.EffectiveHostManaged() {
+			return nil
+		}
+		if !channel {
+			return fmt.Errorf("imex.scope=%q requires imex.isolation=%q, as ComputeDomains sharing IMEX daemons are isolated by their channels", ScopeCluster, IsolationIMEXChannel)
+		}
+		if !gates.ComputeDomainDaemonSet {
+			return fmt.Errorf("imex.scope=%q requires the ComputeDomainDaemonSet feature gate to be enabled", ScopeCluster)
 		}
 	default:
 		return fmt.Errorf("unknown imex.scope %q: must be %q or %q", c.Scope, ScopeComputeDomain, ScopeCluster)

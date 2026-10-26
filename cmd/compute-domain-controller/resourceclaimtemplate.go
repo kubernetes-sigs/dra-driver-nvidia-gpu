@@ -409,9 +409,10 @@ func NewWorkloadResourceClaimTemplateManager(config *ManagerConfig, getComputeDo
 // channelAllocationModeFor decides the AllocationMode to request in the
 // workload ResourceClaimTemplate for a ComputeDomain channel.
 //
-// When ComputeDomains share an IMEX domain (cluster scope) this always forces
-// AllocationMode Single, regardless of what the ComputeDomain requested: the
-// shared IMEX domain holds other ComputeDomains' channels.
+// When ComputeDomains share an IMEX domain (host-managed or static
+// driver-managed IMEX) this always forces AllocationMode Single, regardless
+// of what the ComputeDomain requested: the shared IMEX domain holds other
+// ComputeDomains' channels.
 //
 // Otherwise (per-ComputeDomain IMEX daemons), the channel's own AllocationMode
 // is used as-is.

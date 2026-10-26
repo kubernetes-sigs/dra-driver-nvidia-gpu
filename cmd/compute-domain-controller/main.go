@@ -172,7 +172,7 @@ func newApp() *cli.App {
 		},
 		&cli.StringFlag{
 			Name:        "imex-scope",
-			Usage:       "Whose IMEX daemons run on a node: computeDomain (default for driverManaged; one set per ComputeDomain) or cluster (shared by all ComputeDomains, implied by hostManaged).",
+			Usage:       "Whose IMEX daemons run on a node: computeDomain (default for driverManaged; one set per ComputeDomain) or cluster (shared by all ComputeDomains, from the ComputeDomainDaemonSet under driverManaged).",
 			Destination: &flags.imexScope,
 			EnvVars:     []string{"IMEX_SCOPE"},
 		},
@@ -256,6 +256,7 @@ func newApp() *cli.App {
 			if err := imexConfig.Validate(imex.Gates{
 				HostManagedIMEXDaemon:            featuregates.Enabled(featuregates.HostManagedIMEXDaemon),
 				ComputeDomainChannelReservations: featuregates.Enabled(featuregates.ComputeDomainChannelReservations),
+				ComputeDomainDaemonSet:           featuregates.Enabled(featuregates.ComputeDomainDaemonSet),
 			}); err != nil {
 				return fmt.Errorf("imex configuration validation failed: %w", err)
 			}

@@ -768,3 +768,21 @@ func TestComputeDomainManagerWithoutClaimAdmission(t *testing.T) {
 	assert.Nil(t, m.claimAdmissionManager, "no claim informer that could never sync")
 	require.NoError(t, m.Stop())
 }
+
+func TestClaimAdmissionStaticDaemon(t *testing.T) {
+	setChannelReservationsGate(t, true)
+	f := newAdmissionFixture(t, imex.ModeDriverManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
+	f.m.config.imexConfig.Scope, f.m.config.imexConfig.Isolation = imex.ScopeCluster, imex.IsolationIMEXChannel
+	f.clique(t, "node-1", "clique-1")
+
+	a := allocatedChannelClaim(t, "a", "team-a", "cd-a", "node-1", "job")
+	f.add(t, a)
+	assert.Equal(t, imex.ChannelAdmittedCondition, f.admit(t, a).Type)
+
+	// Another ComputeDomain shares the node on its own channel.
+	b := allocatedChannelClaim(t, "b", "team-b", "cd-b", "node-1", "job")
+	f.add(t, b)
+	assert.Equal(t, imex.ChannelAdmittedCondition, f.admit(t, b).Type)
+	assert.NotEqual(t, f.allocation(t, "team-a", "a").Channel, f.allocation(t, "team-b", "b").Channel)
+	assert.Empty(t, f.m.inflight, "static IMEX daemons do not own nodes")
+}
