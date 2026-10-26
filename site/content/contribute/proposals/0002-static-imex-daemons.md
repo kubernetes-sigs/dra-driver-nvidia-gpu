@@ -134,8 +134,30 @@ The daemon gets `COMPUTE_DOMAIN_DAEMONSET_UID` instead of
   reservations do. Enable leader election.
 - **Clique label:** a node without the `nvidia.com/gpu.clique` label runs no
   daemon. Its workloads get no channel injected, as on non-fabric nodes.
-- **Switching modes:** not supported with running workloads, as for any
-  change of `imex.mode`, `imex.scope` or `imex.isolation`.
+- **DaemonSet node selection:** the DaemonSet controller removes daemons
+  from nodes a new pod template no longer selects, whatever the update
+  strategy. Such spec changes are held back, with `UpdateBlocked`, while
+  those nodes have workloads using IMEX channels.
+- **Driver upgrades:** a new driver may render a different pod template.
+  The template is only re-rendered on a spec change, or to revert edits of
+  the DaemonSet, detected through its generation, and `TemplateOutdated`
+  reports the difference. The image pinned at creation is kept in a
+  DaemonSet annotation, so edits to the DaemonSet cannot change it.
+- **Invalid specs:** CEL rules bound `image` and `imexConfig`, and the
+  controller validates node selectors, names and IMEX settings before
+  applying them. Spec values are set on the rendered object, not in the
+  YAML template. An invalid spec leaves the daemons alone, with
+  `Degraded=InvalidSpec`.
+- **Migrating from per-ComputeDomain daemons:** not supported with running
+  workloads, as both kinds of daemons cannot run on a node. Leftovers are
+  handled anyway.
+  Static daemons skip nodes with the `resource.nvidia.com/computeDomain`
+  label, which the kubelet plugin also removes in this mode, and deleting a
+  ComputeDomain created before the switch deletes its per-ComputeDomain
+  DaemonSet. Switching back leaves the static daemons running, reported with
+  `Degraded=StaticDaemonsDisabled`.
+- **Uninstall:** Helm does not delete the `ComputeDomainDaemonSet`, so the
+  daemons keep running. Delete it first to remove them.
 
 ## Test plan
 

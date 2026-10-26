@@ -144,8 +144,10 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	// Static IMEX daemons are shared by all ComputeDomains.
 	var cddsManager *ComputeDomainDaemonSetManager
-	if managerConfig.imexConfig.StaticDaemon() {
-		cddsManager = NewComputeDomainDaemonSetManager(managerConfig, cdManager.claimAdmissionManager.hasChannelClaims)
+	if !managerConfig.imexConfig.StaticDaemon() {
+		reportStaticDaemonsDisabled(ctx, managerConfig)
+	} else {
+		cddsManager = NewComputeDomainDaemonSetManager(managerConfig, cdManager.claimAdmissionManager.channelClaimNodes)
 		if err := cddsManager.Start(ctx); err != nil {
 			return fmt.Errorf("error starting ComputeDomainDaemonSet manager: %w", err)
 		}

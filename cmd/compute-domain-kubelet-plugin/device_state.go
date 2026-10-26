@@ -600,9 +600,9 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, cs 
 	for c := range configResultsMap {
 		switch config := c.(type) {
 		case *configapi.ComputeDomainChannelConfig:
-			// A shared IMEX domain never adds the ComputeDomain node label,
-			// so there is nothing to remove here.
-			if s.config.imexConfig.SharedIMEXDomain() {
+			// Host-managed mode never adds the ComputeDomain node label. Claims
+			// prepared before switching to static IMEX daemons did.
+			if s.config.imexConfig.EffectiveHostManaged() {
 				continue
 			}
 			// Keep the IMEX daemon for the ComputeDomain's other claims.

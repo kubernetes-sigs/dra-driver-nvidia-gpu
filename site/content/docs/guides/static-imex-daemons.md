@@ -32,9 +32,8 @@ restart IMEX daemons under running workloads.
     ComputeDomainChannelReservations: true
   ```
 
-- Drain ComputeDomain workloads and delete existing ComputeDomains before you
-  switch an existing installation, as for any change of `imex.mode`,
-  `imex.scope` or `imex.isolation`.
+- To switch an existing installation, see
+  [Migrate from per-ComputeDomain daemons](#migrate-from-per-computedomain-daemons).
 
 ## Create the daemons
 
@@ -92,6 +91,19 @@ kubectl patch computedomaindaemonset default --type merge \
   -p '{"spec":{"image":"registry.k8s.io/dra-driver-nvidia/dra-driver-nvidia-gpu:v0.6.1"}}'
 ```
 
+Changing the spec never touches daemons on nodes that keep running one, but
+the DaemonSet removes daemons from nodes the spec no longer selects right
+away, whatever the update strategy. A `nodeSelector` change that would do
+so on nodes with workloads using IMEX channels is held back, with an
+`UpdateBlocked` condition naming those nodes, until their workloads are gone.
+
+## Upgrade the driver
+
+Driver upgrades do not change the daemons. When the new driver renders a
+different daemon template, the `TemplateOutdated` condition says so, and the
+template is applied with the next spec change, typically setting `spec.image`
+to the new driver image. Edits to the DaemonSet itself are reverted.
+
 ## NVLink partition changes
 
 When the GPUs of a node are moved to another NVLink partition, the kubelet
@@ -102,8 +114,43 @@ domains. The daemon leaves the clique of its old partition and its new pod
 joins the clique of the new one. Workload claims prepared on the node keep
 their channel, but their IMEX domain changed with the partition.
 
+## Migrate from per-ComputeDomain daemons
+
+Drain ComputeDomain workloads and delete existing ComputeDomains before you
+switch to `scope: cluster`, as for any change of `imex.mode`, `imex.scope`
+or `imex.isolation`. Existing ComputeDomains are not migrated, as their
+IMEX daemons cannot run beside the static ones. If some are left, the driver
+avoids conflicts with their IMEX daemons:
+
+- Static daemons skip nodes that still run a per-ComputeDomain IMEX daemon,
+  marked by the `resource.nvidia.com/computeDomain` node label. The kubelet
+  plugin removes the label when the last workload of that ComputeDomain on
+  the node ends, and the static daemon starts there.
+- Deleting a ComputeDomain created before the switch also deletes its
+  per-ComputeDomain DaemonSet.
+
+Switching back to `scope: computeDomain` does not delete the static daemons.
+The controller reports them with a `Degraded` condition. Delete the
+`ComputeDomainDaemonSet` first, as both kinds of daemons cannot run on a
+node.
+
+## Conditions
+
+| Condition | Meaning |
+|---|---|
+| `Ready` | All scheduled daemons are ready. |
+| `RolloutInProgress` | Daemons run an outdated revision. |
+| `TemplateOutdated` | The driver renders a newer daemon template, applied with the next spec change. |
+| `UpdateBlocked` | A spec change that would remove daemons from nodes with workloads is held back. |
+| `DeletionBlocked` | Deletion waits for workloads using IMEX channels. |
+| `Degraded` | The spec is invalid (`InvalidSpec`), reconciling fails (`ReconcileError`), or the controller does not run static daemons (`StaticDaemonsDisabled`). |
+
 ## Delete the daemons
 
 Deleting the `ComputeDomainDaemonSet` waits, with a `DeletionBlocked`
 condition, until no `ResourceClaim` is allocated an IMEX channel. The
 controller then deletes the DaemonSet, its claim template and its cliques.
+
+Uninstalling the driver leaves the daemons running, so that workloads keep
+their IMEX domains. Delete the `ComputeDomainDaemonSet` before uninstalling to
+remove them.

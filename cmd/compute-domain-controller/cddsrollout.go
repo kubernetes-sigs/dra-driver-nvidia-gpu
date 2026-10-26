@@ -80,6 +80,8 @@ func maxUnavailableCliques(ru *nvapi.ComputeDomainDaemonSetRollingUpdate, clique
 	return max(n, 1)
 }
 
+const defaultMinReadySeconds = 30
+
 // rolloutPlan is the next step of a rolling update.
 type rolloutPlan struct {
 	// cliques to restart, and their outdated daemon pods.
@@ -103,7 +105,9 @@ func planCliqueRollout(cliques []*staticClique, unclustered []*corev1.Pod, hash 
 		}
 	}
 
-	minReady := time.Duration(0)
+	// The API defaults minReadySeconds within rollingUpdate, which may be
+	// omitted.
+	minReady := defaultMinReadySeconds * time.Second
 	if ru != nil {
 		minReady = time.Duration(ru.MinReadySeconds) * time.Second
 	}

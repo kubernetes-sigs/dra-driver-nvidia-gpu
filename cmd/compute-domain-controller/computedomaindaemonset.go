@@ -22,8 +22,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -36,8 +38,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
@@ -45,6 +51,8 @@ import (
 	"k8s.io/klog/v2"
 
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 	nvinformers "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/informers/externalversions"
 )
 
@@ -58,7 +66,16 @@ const (
 	// staticDaemonTemplateHashKey annotates the static IMEX DaemonSet and its
 	// pods with the hash of the pod template they run.
 	staticDaemonTemplateHashKey = "resource.nvidia.com/templateHash"
-	gpuCliqueNodeLabelKey       = "nvidia.com/gpu.clique"
+	// staticDaemonSpecGenerationKey annotates the static IMEX DaemonSet with
+	// the ComputeDomainDaemonSet generation its pod template was rendered from.
+	staticDaemonSpecGenerationKey = "resource.nvidia.com/specGeneration"
+	// staticDaemonAppliedGenerationKey annotates the static IMEX DaemonSet with
+	// its generation as last written by the controller, to detect edits.
+	staticDaemonAppliedGenerationKey = "resource.nvidia.com/appliedGeneration"
+	// staticDaemonImageKey annotates the static IMEX DaemonSet with the image
+	// pinned at creation, used while spec.image is empty.
+	staticDaemonImageKey  = "resource.nvidia.com/pinnedImage"
+	gpuCliqueNodeLabelKey = "nvidia.com/gpu.clique"
 
 	// cddsSyncDelay batches the events of thousands of daemons into one sync.
 	cddsSyncDelay = 500 * time.Millisecond
@@ -76,10 +93,9 @@ type StaticDaemonSetTemplateData struct {
 	DaemonSetLabelKey         string
 	DaemonSetLabelValue       types.UID
 	CliqueNodeLabelKey        string
+	ComputeDomainNodeLabelKey string
 	ResourceClaimTemplateName string
-	ImageName                 string
 	MaxNodesPerIMEXDomain     int
-	IMEXConfigOverrides       map[string]string
 	LogVerbosity              int
 }
 
@@ -92,9 +108,9 @@ type StaticDaemonSetTemplateData struct {
 // view and bursts from thousands of daemons collapse into few syncs.
 type ComputeDomainDaemonSetManager struct {
 	config *ManagerConfig
-	// hasChannelClaims reports whether any claim is allocated an IMEX
-	// channel, which holds back deletion.
-	hasChannelClaims func() bool
+	// channelClaimNodes returns the nodes with claims allocated an IMEX
+	// channel, whose daemons must not be removed.
+	channelClaimNodes func() map[string]bool
 
 	waitGroup     sync.WaitGroup
 	cancelContext context.CancelFunc
@@ -122,7 +138,7 @@ type ComputeDomainDaemonSetManager struct {
 	restarting   map[string]time.Time
 }
 
-func NewComputeDomainDaemonSetManager(config *ManagerConfig, hasChannelClaims func() bool) *ComputeDomainDaemonSetManager {
+func NewComputeDomainDaemonSetManager(config *ManagerConfig, channelClaimNodes func() map[string]bool) *ComputeDomainDaemonSetManager {
 	cddsFactory := nvinformers.NewSharedInformerFactory(config.clientsets.Nvidia, informerResyncPeriod)
 	ownedSelector := func(opts *metav1.ListOptions) {
 		opts.LabelSelector = computeDomainDaemonSetLabelKey
@@ -138,7 +154,7 @@ func NewComputeDomainDaemonSetManager(config *ManagerConfig, hasChannelClaims fu
 
 	return &ComputeDomainDaemonSetManager{
 		config:                config,
-		hasChannelClaims:      hasChannelClaims,
+		channelClaimNodes:     channelClaimNodes,
 		cddsFactory:           cddsFactory,
 		cddsInformer:          cddsFactory.Resource().V1beta1().ComputeDomainDaemonSets().Informer(),
 		cliqueFactory:         cliqueFactory,
@@ -232,6 +248,7 @@ func (m *ComputeDomainDaemonSetManager) processNextItem(ctx context.Context) boo
 	requeueAfter, err := m.sync(ctx)
 	if err != nil {
 		klog.Errorf("ComputeDomainDaemonSet sync failed (attempt %d): %v", m.queue.NumRequeues(key), err)
+		m.reportDegraded(ctx, "ReconcileError", err)
 		m.queue.AddRateLimited(key)
 		return true
 	}
@@ -283,16 +300,23 @@ func (m *ComputeDomainDaemonSetManager) sync(ctx context.Context) (time.Duration
 	if cdds, err = m.addFinalizer(ctx, cdds); err != nil {
 		return 0, err
 	}
+	// An invalid spec leaves the daemons as they are, rather than failing to
+	// apply it over and over.
+	if err := m.validateSpec(cdds); err != nil {
+		m.reportDegraded(ctx, "InvalidSpec", err)
+		return 0, nil
+	}
 	rct, err := m.ensureResourceClaimTemplate(ctx, cdds)
 	if err != nil {
 		return 0, err
 	}
-	ds, err := m.ensureDaemonSet(ctx, cdds, rct.Name)
+	pods := m.pods(cdds.UID)
+	state, err := m.ensureDaemonSet(ctx, cdds, rct.Name, pods)
 	if err != nil {
 		return 0, err
 	}
+	ds := state.ds
 
-	pods := m.pods(cdds.UID)
 	if err := m.realignDaemons(ctx, pods); err != nil {
 		return 0, err
 	}
@@ -308,7 +332,7 @@ func (m *ComputeDomainDaemonSetManager) sync(ctx context.Context) (time.Duration
 			return 0, err
 		}
 	}
-	if err := m.updateStatus(ctx, cdds, ds, cliques, pods, hash); err != nil {
+	if err := m.updateStatus(ctx, cdds, state, cliques, pods, hash); err != nil {
 		return 0, err
 	}
 	return requeueAfter, nil
@@ -330,7 +354,7 @@ func (m *ComputeDomainDaemonSetManager) addFinalizer(ctx context.Context, cdds *
 // delete removes the static IMEX daemons once no workload uses an IMEX
 // channel, as removing them breaks the IMEX domains of running workloads.
 func (m *ComputeDomainDaemonSetManager) delete(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet) (time.Duration, error) {
-	if m.hasChannelClaims() {
+	if len(m.channelClaimNodes()) > 0 {
 		newCDDS := cdds.DeepCopy()
 		meta.SetStatusCondition(&newCDDS.Status.Conditions, metav1.Condition{
 			Type:               nvapi.ComputeDomainDaemonSetConditionDeletionBlocked,
@@ -437,15 +461,16 @@ func (m *ComputeDomainDaemonSetManager) ensureResourceClaimTemplate(ctx context.
 }
 
 // renderDaemonSet renders the static IMEX DaemonSet, annotated with the hash
-// of its pod template. The image is spec.image, else the one the DaemonSet
-// runs, else the driver image, so that driver upgrades do not change it.
+// of its pod template. The image is spec.image, else the one pinned when the
+// DaemonSet was created, so that driver upgrades do not change it.
 func (m *ComputeDomainDaemonSetManager) renderDaemonSet(cdds *nvapi.ComputeDomainDaemonSet, rctName string, existing *appsv1.DaemonSet) (*appsv1.DaemonSet, error) {
-	image := cdds.Spec.Image
-	if image == "" && existing != nil && len(existing.Spec.Template.Spec.Containers) > 0 {
-		image = existing.Spec.Template.Spec.Containers[0].Image
+	pinned := m.config.imageName
+	if existing != nil && existing.Annotations[staticDaemonImageKey] != "" {
+		pinned = existing.Annotations[staticDaemonImageKey]
 	}
+	image := cdds.Spec.Image
 	if image == "" {
-		image = m.config.imageName
+		image = pinned
 	}
 
 	tmpl, err := template.ParseFiles(m.daemonSetTemplatePath)
@@ -459,10 +484,9 @@ func (m *ComputeDomainDaemonSetManager) renderDaemonSet(cdds *nvapi.ComputeDomai
 		DaemonSetLabelKey:         computeDomainDaemonSetLabelKey,
 		DaemonSetLabelValue:       cdds.UID,
 		CliqueNodeLabelKey:        gpuCliqueNodeLabelKey,
+		ComputeDomainNodeLabelKey: computeDomainLabelKey,
 		ResourceClaimTemplateName: rctName,
-		ImageName:                 image,
 		MaxNodesPerIMEXDomain:     cdds.Spec.MaxNodesPerClique,
-		IMEXConfigOverrides:       cdds.Spec.IMEXConfig,
 		LogVerbosity:              cdds.Spec.LogVerbosity,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to execute template: %w", err)
@@ -476,7 +500,13 @@ func (m *ComputeDomainDaemonSetManager) renderDaemonSet(cdds *nvapi.ComputeDomai
 		return nil, fmt.Errorf("failed to convert unstructured data to typed object: %w", err)
 	}
 
+	// Values from the spec are set here rather than in the template, so that
+	// they cannot change the rendered YAML.
 	podSpec := &ds.Spec.Template.Spec
+	podSpec.Containers[0].Image = image
+	if overrides := imexConfigOverridesEnv(cdds.Spec.IMEXConfig); overrides != "" {
+		podSpec.Containers[0].Env = append(podSpec.Containers[0].Env, corev1.EnvVar{Name: "IMEX_CONFIG_OVERRIDES", Value: overrides})
+	}
 	podSpec.NodeSelector = cdds.Spec.NodeSelector
 	podSpec.PriorityClassName = cdds.Spec.PriorityClassName
 	podSpec.ImagePullSecrets = cdds.Spec.ImagePullSecrets
@@ -496,7 +526,94 @@ func (m *ComputeDomainDaemonSetManager) renderDaemonSet(cdds *nvapi.ComputeDomai
 		ds.Spec.Template.Annotations = map[string]string{}
 	}
 	ds.Spec.Template.Annotations[staticDaemonTemplateHashKey] = hash
+	ds.Annotations = map[string]string{staticDaemonImageKey: pinned}
 	return &ds, nil
+}
+
+// imexConfigOverridesEnv formats IMEX config overrides as parsed by the
+// daemon, sorted for a stable pod template.
+func imexConfigOverridesEnv(overrides map[string]string) string {
+	keys := slices.Sorted(maps.Keys(overrides))
+	var env strings.Builder
+	for _, key := range keys {
+		fmt.Fprintf(&env, "%s=%s,", key, overrides[key])
+	}
+	return env.String()
+}
+
+// validateSpec checks what the CRD schema cannot, before the spec is applied.
+func (m *ComputeDomainDaemonSetManager) validateSpec(cdds *nvapi.ComputeDomainDaemonSet) error {
+	var errs []error
+	if err := imex.ValidateConfigOverrides(cdds.Spec.IMEXConfig); err != nil {
+		errs = append(errs, fmt.Errorf("spec.imexConfig: %w", err))
+	}
+	// The daemon parses the overrides as comma-separated KEY=VALUE pairs.
+	for key, value := range cdds.Spec.IMEXConfig {
+		if strings.Contains(value, ",") {
+			errs = append(errs, fmt.Errorf("spec.imexConfig value of %q must not contain a comma", key))
+		}
+	}
+	for key, value := range cdds.Spec.NodeSelector {
+		for _, msg := range validation.IsQualifiedName(key) {
+			errs = append(errs, fmt.Errorf("spec.nodeSelector key %q: %s", key, msg))
+		}
+		for _, msg := range validation.IsValidLabelValue(value) {
+			errs = append(errs, fmt.Errorf("spec.nodeSelector value %q: %s", value, msg))
+		}
+	}
+	if name := cdds.Spec.PriorityClassName; name != "" {
+		for _, msg := range validation.IsDNS1123Subdomain(name) {
+			errs = append(errs, fmt.Errorf("spec.priorityClassName %q: %s", name, msg))
+		}
+	}
+	for _, secret := range cdds.Spec.ImagePullSecrets {
+		for _, msg := range validation.IsDNS1123Subdomain(secret.Name) {
+			errs = append(errs, fmt.Errorf("spec.imagePullSecrets name %q: %s", secret.Name, msg))
+		}
+	}
+	return utilerrors.NewAggregate(errs)
+}
+
+var nodeSelectorOperators = map[corev1.NodeSelectorOperator]selection.Operator{
+	corev1.NodeSelectorOpIn:           selection.In,
+	corev1.NodeSelectorOpNotIn:        selection.NotIn,
+	corev1.NodeSelectorOpExists:       selection.Exists,
+	corev1.NodeSelectorOpDoesNotExist: selection.DoesNotExist,
+	corev1.NodeSelectorOpGt:           selection.GreaterThan,
+	corev1.NodeSelectorOpLt:           selection.LessThan,
+}
+
+// podPlacedOn reports whether a DaemonSet with this pod spec runs a pod on the
+// node, by its node selector and required node affinity.
+func podPlacedOn(spec *corev1.PodSpec, node *corev1.Node) bool {
+	nodeLabels := labels.Set(node.Labels)
+	if !labels.SelectorFromSet(spec.NodeSelector).Matches(nodeLabels) {
+		return false
+	}
+	if spec.Affinity == nil || spec.Affinity.NodeAffinity == nil || spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		return true
+	}
+	for _, term := range spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms {
+		selector := labels.NewSelector()
+		valid := true
+		for _, expr := range term.MatchExpressions {
+			op, ok := nodeSelectorOperators[expr.Operator]
+			if !ok {
+				valid = false
+				break
+			}
+			req, err := labels.NewRequirement(expr.Key, op, expr.Values)
+			if err != nil {
+				valid = false
+				break
+			}
+			selector = selector.Add(*req)
+		}
+		if valid && selector.Matches(nodeLabels) {
+			return true
+		}
+	}
+	return false
 }
 
 func podTemplateHash(template *corev1.PodTemplateSpec) (string, error) {
@@ -509,9 +626,21 @@ func podTemplateHash(template *corev1.PodTemplateSpec) (string, error) {
 	return strconv.FormatUint(h.Sum64(), 36), nil
 }
 
+// staticDaemonSetState is the static IMEX DaemonSet after reconciling it.
+type staticDaemonSetState struct {
+	ds *appsv1.DaemonSet
+	// templateOutdated is set when the driver renders a newer pod template
+	// than the DaemonSet runs.
+	templateOutdated bool
+	// blockedNodes would lose their daemon under running workloads with the
+	// spec change that is held back.
+	blockedNodes []string
+}
+
 // ensureDaemonSet creates the static IMEX DaemonSet, or updates its pod
-// template. Its OnDelete strategy leaves restarting daemons to the rollout.
-func (m *ComputeDomainDaemonSetManager) ensureDaemonSet(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, rctName string) (*appsv1.DaemonSet, error) {
+// template when the spec changed or the DaemonSet was edited. A newer driver
+// template alone is not applied, so driver upgrades leave the daemons alone.
+func (m *ComputeDomainDaemonSetManager) ensureDaemonSet(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, rctName string, pods []*corev1.Pod) (*staticDaemonSetState, error) {
 	var existing *appsv1.DaemonSet
 	if obj, exists, err := m.daemonSetInf.GetStore().GetByKey(m.config.driverNamespace + "/" + staticDaemonSetName(cdds.UID)); err == nil && exists {
 		existing, _ = obj.(*appsv1.DaemonSet)
@@ -520,8 +649,11 @@ func (m *ComputeDomainDaemonSetManager) ensureDaemonSet(ctx context.Context, cdd
 	if err != nil {
 		return nil, err
 	}
+	specGeneration := strconv.FormatInt(cdds.Generation, 10)
 
 	if existing == nil {
+		desired.Annotations[staticDaemonSpecGenerationKey] = specGeneration
+		desired.Annotations[staticDaemonAppliedGenerationKey] = "1"
 		created, err := m.config.clientsets.Core.AppsV1().DaemonSets(desired.Namespace).Create(ctx, desired, metav1.CreateOptions{})
 		if errors.IsAlreadyExists(err) {
 			return nil, fmt.Errorf("waiting for DaemonSet %s in the informer", desired.Name)
@@ -530,21 +662,70 @@ func (m *ComputeDomainDaemonSetManager) ensureDaemonSet(ctx context.Context, cdd
 			return nil, fmt.Errorf("error creating DaemonSet: %w", err)
 		}
 		klog.Infof("Created static IMEX DaemonSet %s/%s", created.Namespace, created.Name)
-		return created, nil
+		return &staticDaemonSetState{ds: created}, nil
 	}
 
-	if existing.Spec.Template.Annotations[staticDaemonTemplateHashKey] == desired.Spec.Template.Annotations[staticDaemonTemplateHashKey] {
-		return existing, nil
+	sameTemplate := existing.Spec.Template.Annotations[staticDaemonTemplateHashKey] == desired.Spec.Template.Annotations[staticDaemonTemplateHashKey]
+	specChanged := existing.Annotations[staticDaemonSpecGenerationKey] != specGeneration
+	edited := existing.Annotations[staticDaemonAppliedGenerationKey] != strconv.FormatInt(existing.Generation, 10)
+	if !specChanged && !edited {
+		return &staticDaemonSetState{ds: existing, templateOutdated: !sameTemplate}, nil
 	}
+
+	// The DaemonSet controller removes daemons from nodes its pod template no
+	// longer selects right away, whatever the update strategy.
+	if blocked := m.nodesLosingDaemons(&desired.Spec.Template.Spec, pods); len(blocked) > 0 {
+		return &staticDaemonSetState{ds: existing, blockedNodes: blocked}, nil
+	}
+
 	updated := existing.DeepCopy()
 	updated.Spec.Template = desired.Spec.Template
 	updated.Spec.UpdateStrategy = desired.Spec.UpdateStrategy
+	if updated.Annotations == nil {
+		updated.Annotations = map[string]string{}
+	}
+	updated.Annotations[staticDaemonSpecGenerationKey] = specGeneration
+	updated.Annotations[staticDaemonImageKey] = desired.Annotations[staticDaemonImageKey]
 	result, err := m.config.clientsets.Core.AppsV1().DaemonSets(updated.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("error updating DaemonSet: %w", err)
 	}
-	klog.Infof("Updated the pod template of static IMEX DaemonSet %s/%s", result.Namespace, result.Name)
-	return result, nil
+	// Spec writes bump the generation, metadata writes do not.
+	if applied := strconv.FormatInt(result.Generation, 10); result.Annotations[staticDaemonAppliedGenerationKey] != applied {
+		result = result.DeepCopy()
+		result.Annotations[staticDaemonAppliedGenerationKey] = applied
+		if result, err = m.config.clientsets.Core.AppsV1().DaemonSets(result.Namespace).Update(ctx, result, metav1.UpdateOptions{}); err != nil {
+			return nil, fmt.Errorf("error recording the applied DaemonSet generation: %w", err)
+		}
+	}
+	if edited && !specChanged {
+		klog.Infof("Reverted changes to static IMEX DaemonSet %s/%s", result.Namespace, result.Name)
+	} else {
+		klog.Infof("Updated the pod template of static IMEX DaemonSet %s/%s", result.Namespace, result.Name)
+	}
+	return &staticDaemonSetState{ds: result}, nil
+}
+
+// nodesLosingDaemons returns the nodes whose daemon a pod spec would remove
+// while claims there are allocated an IMEX channel.
+func (m *ComputeDomainDaemonSetManager) nodesLosingDaemons(spec *corev1.PodSpec, pods []*corev1.Pod) []string {
+	inUse := m.channelClaimNodes()
+	if len(inUse) == 0 {
+		return nil
+	}
+	nodes := make(map[string]*corev1.Node)
+	for _, node := range m.nodes() {
+		nodes[node.Name] = node
+	}
+	var blocked []string
+	for _, pod := range pods {
+		node, ok := nodes[pod.Spec.NodeName]
+		if ok && inUse[node.Name] && !podPlacedOn(spec, node) {
+			blocked = append(blocked, node.Name)
+		}
+	}
+	slices.Sort(blocked)
+	return slices.Compact(blocked)
 }
 
 func (m *ComputeDomainDaemonSetManager) pods(uid types.UID) []*corev1.Pod {
@@ -705,7 +886,8 @@ func (m *ComputeDomainDaemonSetManager) removeStaleDaemons(ctx context.Context, 
 	return nil
 }
 
-func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, ds *appsv1.DaemonSet, cliques []*staticClique, pods []*corev1.Pod, hash string) error {
+func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, state *staticDaemonSetState, cliques []*staticClique, pods []*corev1.Pod, hash string) error {
+	ds := state.ds
 	newCDDS := cdds.DeepCopy()
 	status := &newCDDS.Status
 	status.ObservedGeneration = cdds.Generation
@@ -739,12 +921,55 @@ func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *
 			rollout.Reason, rollout.Message = "RollingUpdate", fmt.Sprintf("%d IMEX daemons run an outdated revision", outdated)
 		}
 	}
-	for _, c := range []metav1.Condition{ready, rollout} {
+	outdated := metav1.Condition{Type: nvapi.ComputeDomainDaemonSetConditionTemplateOutdated, Status: metav1.ConditionFalse, Reason: "TemplateCurrent",
+		Message: "the daemons run the pod template of this driver"}
+	if state.templateOutdated {
+		outdated.Status, outdated.Reason = metav1.ConditionTrue, "DriverUpgraded"
+		outdated.Message = fmt.Sprintf("this driver renders a newer IMEX daemon template, applied with the next spec change, for example spec.image=%s", m.config.imageName)
+	}
+	blocked := metav1.Condition{Type: nvapi.ComputeDomainDaemonSetConditionUpdateBlocked, Status: metav1.ConditionFalse, Reason: "Applied",
+		Message: "the spec is applied"}
+	if len(state.blockedNodes) > 0 {
+		blocked.Status, blocked.Reason = metav1.ConditionTrue, "NodesInUse"
+		blocked.Message = truncate(fmt.Sprintf("the spec would remove IMEX daemons from nodes with workloads using IMEX channels: %v", state.blockedNodes))
+	}
+	degraded := metav1.Condition{Type: nvapi.ComputeDomainDaemonSetConditionDegraded, Status: metav1.ConditionFalse, Reason: "Reconciled",
+		Message: "the daemons are reconciled"}
+	for _, c := range []metav1.Condition{ready, rollout, outdated, blocked, degraded} {
 		c.ObservedGeneration = cdds.Generation
 		meta.SetStatusCondition(&status.Conditions, c)
 	}
 	meta.RemoveStatusCondition(&status.Conditions, nvapi.ComputeDomainDaemonSetConditionDeletionBlocked)
 	return m.writeStatus(ctx, cdds, newCDDS)
+}
+
+// reportDegraded records why the daemons cannot be reconciled. It is best
+// effort, as the sync is retried anyway.
+func (m *ComputeDomainDaemonSetManager) reportDegraded(ctx context.Context, reason string, cause error) {
+	cdds, err := m.get()
+	if err != nil || cdds == nil {
+		return
+	}
+	newCDDS := cdds.DeepCopy()
+	meta.SetStatusCondition(&newCDDS.Status.Conditions, metav1.Condition{
+		Type:               nvapi.ComputeDomainDaemonSetConditionDegraded,
+		Status:             metav1.ConditionTrue,
+		Reason:             reason,
+		Message:            truncate(cause.Error()),
+		ObservedGeneration: cdds.Generation,
+	})
+	if err := m.writeStatus(ctx, cdds, newCDDS); err != nil {
+		klog.V(2).Infof("Error reporting ComputeDomainDaemonSet as degraded: %v", err)
+	}
+}
+
+// truncate bounds condition messages.
+func truncate(msg string) string {
+	const maxLen = 1024
+	if len(msg) <= maxLen {
+		return msg
+	}
+	return msg[:maxLen-3] + "..."
 }
 
 func (m *ComputeDomainDaemonSetManager) writeStatus(ctx context.Context, old, cdds *nvapi.ComputeDomainDaemonSet) error {
@@ -755,4 +980,33 @@ func (m *ComputeDomainDaemonSetManager) writeStatus(ctx context.Context, old, cd
 		return fmt.Errorf("error updating ComputeDomainDaemonSet status: %w", err)
 	}
 	return nil
+}
+
+// reportStaticDaemonsDisabled flags an existing ComputeDomainDaemonSet while
+// the controller does not run static IMEX daemons. Its daemons keep running,
+// unmanaged, and would conflict with per-ComputeDomain IMEX daemons.
+func reportStaticDaemonsDisabled(ctx context.Context, config *ManagerConfig) {
+	client := config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainDaemonSets()
+	cdds, err := client.Get(ctx, nvapi.ComputeDomainDaemonSetName, metav1.GetOptions{})
+	if err != nil {
+		// Also when the CRD is not installed.
+		klog.V(4).Infof("No ComputeDomainDaemonSet to report: %v", err)
+		return
+	}
+	message := fmt.Sprintf("the controller runs with IMEX %s and the ComputeDomainDaemonSet gate set to %t, so it does not manage these static IMEX daemons, which keep running. Use imex.scope=cluster, or delete the ComputeDomainDaemonSet", config.imexConfig, featuregates.Enabled(featuregates.ComputeDomainDaemonSet))
+	klog.Warningf("ComputeDomainDaemonSet %s exists, but %s", cdds.Name, message)
+	newCDDS := cdds.DeepCopy()
+	meta.SetStatusCondition(&newCDDS.Status.Conditions, metav1.Condition{
+		Type:               nvapi.ComputeDomainDaemonSetConditionDegraded,
+		Status:             metav1.ConditionTrue,
+		Reason:             "StaticDaemonsDisabled",
+		Message:            truncate(message),
+		ObservedGeneration: cdds.Generation,
+	})
+	if equality.Semantic.DeepEqual(cdds.Status, newCDDS.Status) {
+		return
+	}
+	if _, err := client.UpdateStatus(ctx, newCDDS, metav1.UpdateOptions{}); err != nil {
+		klog.Errorf("Error reporting ComputeDomainDaemonSet %s as unmanaged: %v", cdds.Name, err)
+	}
 }

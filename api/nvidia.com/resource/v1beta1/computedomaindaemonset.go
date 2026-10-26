@@ -38,6 +38,16 @@ const (
 	// ComputeDomainDaemonSetConditionDeletionBlocked is true while deletion
 	// waits for workloads that use IMEX channels.
 	ComputeDomainDaemonSetConditionDeletionBlocked = "DeletionBlocked"
+	// ComputeDomainDaemonSetConditionUpdateBlocked is true while a spec change
+	// that would remove IMEX daemons from nodes with workloads is held back.
+	ComputeDomainDaemonSetConditionUpdateBlocked = "UpdateBlocked"
+	// ComputeDomainDaemonSetConditionTemplateOutdated is true when the driver
+	// renders a newer daemon template than the daemons run. It is applied with
+	// the next spec change, so that driver upgrades do not restart daemons.
+	ComputeDomainDaemonSetConditionTemplateOutdated = "TemplateOutdated"
+	// ComputeDomainDaemonSetConditionDegraded is true when the spec is invalid
+	// or the daemons cannot be reconciled.
+	ComputeDomainDaemonSetConditionDegraded = "Degraded"
 )
 
 // +genclient
@@ -87,6 +97,8 @@ type ComputeDomainDaemonSetSpec struct {
 	// is kept, so that driver upgrades do not change the daemons. Set it to
 	// upgrade them.
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:XValidation:rule="!self.contains(' ')",message="image must not contain spaces"
 	Image string `json:"image,omitempty"`
 
 	// ImagePullSecrets in the driver namespace for the IMEX daemon pods.
@@ -118,6 +130,8 @@ type ComputeDomainDaemonSetSpec struct {
 
 	// IMEXConfig overrides, or adds, nvidia-imex config file settings.
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxProperties=64
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z_][A-Za-z0-9_]*$'))",message="imexConfig keys must be nvidia-imex setting names"
 	IMEXConfig map[string]string `json:"imexConfig,omitempty"`
 
 	// LogVerbosity of the IMEX daemon pods.

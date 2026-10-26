@@ -19,11 +19,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -40,10 +43,11 @@ import (
 )
 
 type cddsFixture struct {
-	m         *ComputeDomainDaemonSetManager
-	core      *fake.Clientset
-	nv        *nvfake.Clientset
-	hasClaims bool
+	m    *ComputeDomainDaemonSetManager
+	core *fake.Clientset
+	nv   *nvfake.Clientset
+	// claimNodes have claims allocated an IMEX channel.
+	claimNodes map[string]bool
 }
 
 func testComputeDomainDaemonSet() *nvapi.ComputeDomainDaemonSet {
@@ -69,13 +73,46 @@ func newCDDSFixture(t testing.TB, objects ...runtime.Object) *cddsFixture {
 		}
 	}
 	f := &cddsFixture{core: fake.NewSimpleClientset(coreObjects...), nv: nvfake.NewSimpleClientset(nvObjects...)}
+	// Like the API server, bump the DaemonSet generation on spec changes.
+	f.core.PrependReactor("*", "daemonsets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		switch action.GetVerb() {
+		case "create":
+			if create, ok := action.(k8stesting.CreateAction); ok {
+				if ds, ok := create.GetObject().(*appsv1.DaemonSet); ok {
+					ds.Generation = 1
+				}
+			}
+		case "update":
+			a, ok := action.(k8stesting.UpdateAction)
+			if !ok || a.GetSubresource() != "" {
+				break
+			}
+			ds, ok := a.GetObject().(*appsv1.DaemonSet)
+			if !ok {
+				break
+			}
+			old, err := f.core.Tracker().Get(a.GetResource(), ds.Namespace, ds.Name)
+			if err != nil {
+				break
+			}
+			oldDS, ok := old.(*appsv1.DaemonSet)
+			if !ok {
+				break
+			}
+			ds.Generation = oldDS.Generation
+			if !equality.Semantic.DeepEqual(oldDS.Spec, ds.Spec) {
+				ds.Generation++
+			}
+		}
+		return false, nil, nil
+	})
 	config := &ManagerConfig{
 		driverNamespace: "driver",
 		imageName:       "driver:v1",
 		imexConfig:      imex.Config{Mode: imex.ModeDriverManaged, Scope: imex.ScopeCluster, Isolation: imex.IsolationIMEXChannel},
 		clientsets:      flags.ClientSets{Core: f.core, Nvidia: f.nv},
 	}
-	f.m = NewComputeDomainDaemonSetManager(config, func() bool { return f.hasClaims })
+	f.m = NewComputeDomainDaemonSetManager(config, func() map[string]bool { return f.claimNodes })
 	f.m.daemonSetTemplatePath = "../../templates/compute-domain-static-daemon.tmpl.yaml"
 	f.m.rctTemplatePath = "../../templates/compute-domain-daemon-claim-template.tmpl.yaml"
 	f.m.now = func() time.Time { return rolloutNow }
@@ -294,7 +331,7 @@ func TestComputeDomainDaemonSetDeletion(t *testing.T) {
 	f := newCDDSFixture(t, cdds, clique)
 	f.sync(t)
 
-	f.hasClaims = true
+	f.claimNodes = map[string]bool{"c0-n0": true}
 	deleting := f.cdds(t)
 	deleting.DeletionTimestamp = &metav1.Time{Time: rolloutNow}
 	require.NoError(t, f.nv.Tracker().Update(nvapi.SchemeGroupVersion.WithResource("computedomaindaemonsets"), deleting, ""))
@@ -304,7 +341,7 @@ func TestComputeDomainDaemonSetDeletion(t *testing.T) {
 	assert.True(t, meta.IsStatusConditionTrue(f.cdds(t).Status.Conditions, nvapi.ComputeDomainDaemonSetConditionDeletionBlocked))
 	f.daemonSet(t)
 
-	f.hasClaims = false
+	f.claimNodes = nil
 	_, err := f.m.sync(context.Background())
 	require.Error(t, err, "waits for the DaemonSet to be gone")
 	f.refresh(t)
@@ -410,4 +447,167 @@ func TestComputeDomainDaemonSetRealignsMovedDaemons(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got.Daemons, 1)
 	assert.Equal(t, "unlabeled", got.Daemons[0].NodeName)
+}
+
+func TestComputeDomainDaemonSetIgnoresDriverTemplateChanges(t *testing.T) {
+	f := newCDDSFixture(t, testComputeDomainDaemonSet())
+	f.sync(t)
+	ds := f.daemonSet(t)
+
+	// A driver upgrade renders a different pod template.
+	f.m.config.imagePullSecretNames = []string{"new-registry"}
+	f.core.ClearActions()
+	f.sync(t)
+
+	for _, action := range f.core.Actions() {
+		assert.NotEqual(t, "update", action.GetVerb(), "driver upgrades do not touch the daemons")
+	}
+	assert.Equal(t, ds.Spec.Template, f.daemonSet(t).Spec.Template)
+	assert.True(t, meta.IsStatusConditionTrue(f.cdds(t).Status.Conditions, nvapi.ComputeDomainDaemonSetConditionTemplateOutdated))
+
+	// The next spec change applies it.
+	f.update(t, func(cdds *nvapi.ComputeDomainDaemonSet) { cdds.Spec.LogVerbosity = 2 })
+	f.sync(t)
+	assert.Equal(t, []corev1.LocalObjectReference{{Name: "new-registry"}}, f.daemonSet(t).Spec.Template.Spec.ImagePullSecrets)
+	assert.False(t, meta.IsStatusConditionTrue(f.cdds(t).Status.Conditions, nvapi.ComputeDomainDaemonSetConditionTemplateOutdated))
+}
+
+func TestComputeDomainDaemonSetRevertsEdits(t *testing.T) {
+	f := newCDDSFixture(t, testComputeDomainDaemonSet())
+	f.sync(t)
+
+	edited := f.daemonSet(t)
+	edited.Spec.Template.Spec.Containers[0].Image = "someone/else:latest"
+	_, err := f.core.AppsV1().DaemonSets("driver").Update(context.Background(), edited, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	f.refresh(t)
+	f.sync(t)
+
+	ds := f.daemonSet(t)
+	assert.Equal(t, "driver:v1", ds.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, strconv.FormatInt(ds.Generation, 10), ds.Annotations[staticDaemonAppliedGenerationKey])
+
+	f.core.ClearActions()
+	f.sync(t)
+	for _, action := range f.core.Actions() {
+		assert.NotEqual(t, "update", action.GetVerb(), "a reverted DaemonSet is left alone")
+	}
+}
+
+func TestComputeDomainDaemonSetHoldsBackRemovingDaemonsInUse(t *testing.T) {
+	inPool := func(node *corev1.Node, pool string) *corev1.Node {
+		node.Labels["pool"] = pool
+		return node
+	}
+	f := newCDDSFixture(t, testComputeDomainDaemonSet(),
+		inPool(cliqueNode("n0", "c0", true), "a"), daemonPod("n0", "h", time.Hour),
+		inPool(cliqueNode("n1", "c0", true), "b"), daemonPod("n1", "h", time.Hour),
+	)
+	f.sync(t)
+	f.claimNodes = map[string]bool{"n1": true}
+
+	f.update(t, func(cdds *nvapi.ComputeDomainDaemonSet) { cdds.Spec.NodeSelector = map[string]string{"pool": "a"} })
+	f.sync(t)
+
+	assert.Empty(t, f.daemonSet(t).Spec.Template.Spec.NodeSelector, "the DaemonSet would remove the daemon of n1 right away")
+	blocked := meta.FindStatusCondition(f.cdds(t).Status.Conditions, nvapi.ComputeDomainDaemonSetConditionUpdateBlocked)
+	require.NotNil(t, blocked)
+	assert.Equal(t, metav1.ConditionTrue, blocked.Status)
+	assert.Contains(t, blocked.Message, "n1")
+
+	f.claimNodes = nil
+	f.sync(t)
+	assert.Equal(t, map[string]string{"pool": "a"}, f.daemonSet(t).Spec.Template.Spec.NodeSelector)
+	assert.False(t, meta.IsStatusConditionTrue(f.cdds(t).Status.Conditions, nvapi.ComputeDomainDaemonSetConditionUpdateBlocked))
+}
+
+func TestComputeDomainDaemonSetInvalidSpec(t *testing.T) {
+	cdds := testComputeDomainDaemonSet()
+	cdds.Spec.NodeSelector = map[string]string{"not a label": "x"}
+	cdds.Spec.IMEXConfig = map[string]string{"IMEX_CMD_BIND_INTERFACE_IP": "10.0.0.1", "IMEX_SERVER_PORT": "1,2"}
+	f := newCDDSFixture(t, cdds)
+
+	f.sync(t)
+
+	_, err := f.core.AppsV1().DaemonSets("driver").Get(context.Background(), staticDaemonSetName("cdds-uid"), metav1.GetOptions{})
+	assert.Error(t, err, "an invalid spec is not applied")
+	degraded := meta.FindStatusCondition(f.cdds(t).Status.Conditions, nvapi.ComputeDomainDaemonSetConditionDegraded)
+	require.NotNil(t, degraded)
+	assert.Equal(t, "InvalidSpec", degraded.Reason)
+	assert.Contains(t, degraded.Message, "spec.nodeSelector")
+	assert.Contains(t, degraded.Message, "IMEX_CMD_BIND_INTERFACE_IP")
+	assert.Contains(t, degraded.Message, "must not contain a comma")
+}
+
+func TestComputeDomainDaemonSetRendersSpecValuesVerbatim(t *testing.T) {
+	cdds := testComputeDomainDaemonSet()
+	cdds.Spec.IMEXConfig = map[string]string{"B": `"quoted": value`, "A": "1"}
+	f := newCDDSFixture(t, cdds)
+
+	f.sync(t)
+
+	env := f.daemonSet(t).Spec.Template.Spec.Containers[0].Env
+	assert.Contains(t, env, corev1.EnvVar{Name: "IMEX_CONFIG_OVERRIDES", Value: `A=1,B="quoted": value,`}, "values cannot change the rendered YAML")
+}
+
+func TestPodPlacedOn(t *testing.T) {
+	f := newCDDSFixture(t, testComputeDomainDaemonSet())
+	ds, err := f.m.renderDaemonSet(testComputeDomainDaemonSet(), "rct", nil)
+	require.NoError(t, err)
+	spec := &ds.Spec.Template.Spec
+
+	assert.True(t, podPlacedOn(spec, cliqueNode("n0", "c0", true)))
+	assert.False(t, podPlacedOn(spec, cliqueNode("n1", "", true)), "only nodes of a clique")
+	legacy := cliqueNode("n2", "c0", true)
+	legacy.Labels[computeDomainLabelKey] = "cd-uid"
+	assert.False(t, podPlacedOn(spec, legacy), "not while a per-ComputeDomain IMEX daemon runs there")
+}
+
+func TestDeleteLegacyDaemons(t *testing.T) {
+	labels := map[string]string{computeDomainLabelKey: "cd-a", computeDomainResourceClaimTemplateTargetLabelKey: computeDomainResourceClaimTemplateTargetDaemon}
+	legacyDS := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: "computedomain-daemon-cd-a", Namespace: "driver", Labels: labels, Finalizers: []string{computeDomainFinalizer}}}
+	legacyRCT := &resourceapi.ResourceClaimTemplate{ObjectMeta: metav1.ObjectMeta{Name: "computedomain-daemon-cd-a", Namespace: "driver", Labels: labels, Finalizers: []string{computeDomainFinalizer}}}
+	otherDS := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: "computedomain-daemon-cd-b", Namespace: "driver", Labels: map[string]string{computeDomainLabelKey: "cd-b"}}}
+	client := fake.NewSimpleClientset(legacyDS, legacyRCT, otherDS)
+	m := &ComputeDomainManager{config: &ManagerConfig{driverNamespace: "driver", clientsets: flags.ClientSets{Core: client}}}
+
+	require.NoError(t, m.deleteLegacyDaemons(context.Background(), "cd-a"))
+
+	_, err := client.AppsV1().DaemonSets("driver").Get(context.Background(), legacyDS.Name, metav1.GetOptions{})
+	assert.Error(t, err, "the per-ComputeDomain DaemonSet is deleted, finalizer included")
+	_, err = client.ResourceV1().ResourceClaimTemplates("driver").Get(context.Background(), legacyRCT.Name, metav1.GetOptions{})
+	assert.Error(t, err)
+	_, err = client.AppsV1().DaemonSets("driver").Get(context.Background(), otherDS.Name, metav1.GetOptions{})
+	assert.NoError(t, err, "other ComputeDomains keep theirs")
+}
+
+func TestReportStaticDaemonsDisabled(t *testing.T) {
+	nv := nvfake.NewSimpleClientset(testComputeDomainDaemonSet())
+	config := &ManagerConfig{
+		imexConfig: imex.Config{Mode: imex.ModeDriverManaged},
+		clientsets: flags.ClientSets{Nvidia: nv},
+	}
+
+	reportStaticDaemonsDisabled(context.Background(), config)
+
+	cdds, err := nv.ResourceV1beta1().ComputeDomainDaemonSets().Get(context.Background(), nvapi.ComputeDomainDaemonSetName, metav1.GetOptions{})
+	require.NoError(t, err)
+	degraded := meta.FindStatusCondition(cdds.Status.Conditions, nvapi.ComputeDomainDaemonSetConditionDegraded)
+	require.NotNil(t, degraded)
+	assert.Equal(t, "StaticDaemonsDisabled", degraded.Reason)
+
+	// Nothing to report without one.
+	reportStaticDaemonsDisabled(context.Background(), &ManagerConfig{clientsets: flags.ClientSets{Nvidia: nvfake.NewSimpleClientset()}})
+}
+
+func TestPlanCliqueRolloutDefaultsMinReadySeconds(t *testing.T) {
+	nodes, pods := testCliques(2, 1, "old")
+	pods[0].Annotations[staticDaemonTemplateHashKey] = "new"
+	pods[0].Status.Conditions[0].LastTransitionTime = metav1.NewTime(rolloutNow.Add(-10 * time.Second))
+	cliques, unclustered := groupByClique(nodes, pods, nil)
+
+	plan := planCliqueRollout(cliques, unclustered, "new", nil, nodeReadiness(nodes), nil, rolloutNow)
+
+	assert.Empty(t, plan.cliques, "an omitted rollingUpdate still waits 30s")
+	assert.Equal(t, 20*time.Second, plan.requeueAfter)
 }

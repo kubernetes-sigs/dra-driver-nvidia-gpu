@@ -210,7 +210,7 @@ Requires [`ComputeDomainDaemonSet`](feature-gates.md) (Alpha, default: false).
 | `spec.updateStrategy.rollingUpdate.minReadySeconds` | integer | `30` | How long updated daemons must be ready before the next batch. |
 | `spec.updateStrategy.rollingUpdate.paused` | boolean | `false` | Stops new batches. |
 | `status.cliques[]` | list | | Nodes, ready daemons and updated daemons per clique. |
-| `status.conditions[]` | list | | `Ready`, `RolloutInProgress` and `DeletionBlocked`. |
+| `status.conditions[]` | list | | `Ready`, `RolloutInProgress`, `TemplateOutdated`, `UpdateBlocked`, `DeletionBlocked` and `Degraded`. See [Conditions](../guides/static-imex-daemons.md#conditions). |
 
 ## ComputeDomain opaque configuration types
 
