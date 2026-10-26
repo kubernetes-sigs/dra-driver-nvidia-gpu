@@ -82,14 +82,12 @@ setting; the next partition activation disables it again.
 
 On HGX A100 and HGX-2 systems, Fabric Manager trains GPU NVLinks in software
 during partition activation, and the links only train from reset.
-After disabling persistence on an inactive partition, the driver resets all of
-the partition's GPUs together with a single `nvidia-smi -r` command while they
-are still bound to the NVIDIA driver, and then activates the partition.
-GPUs outside the partition are not reset.
-The reset is a single command because Volta GPUs with NVLink connections
-cannot be reset one at a time.
-If the reset fails, for example because another process still has a GPU open,
-the driver returns an error without activating the partition.
+After disabling persistence on an inactive partition, the driver selects the
+Linux PCI `bus` reset method and writes `1` to each selected GPU's
+`/sys/bus/pci/devices/<BDF>/reset` file. This issues a Secondary Bus Reset
+(SBR) before the driver activates the partition.
+If SBR is unavailable or a sysfs operation fails, the driver returns an error
+without activating the partition.
 An already-active partition skips the reset, so a retried Prepare does not
 reset GPUs whose NVLinks are already trained.
 HGX H100 and later systems train NVLinks in hardware and do not need this reset.

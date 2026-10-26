@@ -83,8 +83,17 @@ func newFakePersistenceSMI(t *testing.T, exitCode int) fakePersistenceSMI {
 	t.Helper()
 	dir := t.TempDir()
 	lib := &fakePersistenceNVML{devices: make(map[string]*fakePersistenceDevice)}
-	fake := fakePersistenceSMI{lib: &deviceLib{devRoot: filepath.Join(dir, "driver"), nvmllib: lib}, logPath: filepath.Join(dir, "commands"), nvml: lib}
+	fake := fakePersistenceSMI{
+		lib: &deviceLib{
+			devRoot:   filepath.Join(dir, "driver"),
+			sysfsRoot: filepath.Join(dir, "sys"),
+			nvmllib:   lib,
+		},
+		logPath: filepath.Join(dir, "commands"),
+		nvml:    lib,
+	}
 	require.NoError(t, os.MkdirAll(fake.lib.devRoot, 0o755))
+	require.NoError(t, os.MkdirAll(fake.lib.sysfsRoot, 0o755))
 	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nexit %d\n", fake.logPath, exitCode)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "chroot"), []byte(script), 0o755))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))

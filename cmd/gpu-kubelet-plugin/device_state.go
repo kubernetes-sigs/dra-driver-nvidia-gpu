@@ -1638,8 +1638,7 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 		// HGX-2 and HGX A100 NVLinks only train from reset, and a reset
 		// after activation leaves them inactive. Preparation runs only for
 		// an inactive partition, so a retry never resets an active one.
-		// HGX-2 GPUs must be reset together, so reset the whole partition
-		// in one call; GPUs outside it are not touched.
+		// GPUs outside the partition are not touched.
 		var resetPCI []string
 		for _, gpu := range gpus {
 			if gpu.requiresResetBeforeFabricActivation() {
@@ -1649,8 +1648,8 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 		if len(resetPCI) == 0 {
 			return nil
 		}
-		klog.V(2).Infof("Fabric Manager: resetting GPUs %v before activating partition %d", resetPCI, partitionID)
-		if err := s.nvdevlib.resetGPUs(resetPCI); err != nil {
+		klog.V(2).Infof("Fabric Manager: resetting GPUs %v with SBR before activating partition %d", resetPCI, partitionID)
+		if err := s.nvdevlib.resetGPUsWithSBR(resetPCI); err != nil {
 			return fmt.Errorf("resetting GPUs %v: %w", resetPCI, err)
 		}
 		return nil

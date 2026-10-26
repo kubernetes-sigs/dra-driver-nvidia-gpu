@@ -13,6 +13,8 @@
 # limitations under the License.
 
 {{- if or .Values.resources.computeDomains.enabled .Values.resources.gpus.enabled }}
+{{- $passthroughEnabled := and .Values.featureGates (and (hasKey .Values.featureGates "PassthroughSupport") .Values.featureGates.PassthroughSupport) }}
+{{- $fabricManagerPartitioningEnabled := and .Values.featureGates (and (hasKey .Values.featureGates "FabricManagerPartitioning") .Values.featureGates.FabricManagerPartitioning) }}
 {{- if .Values.resources.computeDomains.enabled }}
 {{- include "dra-driver-nvidia-gpu.validateIMEXConfig" . }}
 {{- end }}
@@ -273,7 +275,7 @@ spec:
           value: void
         - name: CDI_ROOT
           value: /var/run/cdi
-        {{- if and .Values.featureGates (and (hasKey .Values.featureGates "PassthroughSupport") .Values.featureGates.PassthroughSupport) }}
+        {{- if $passthroughEnabled }}
         - name: HOST_ROOT
           value: "/host-root"
         {{- end }}
@@ -335,7 +337,7 @@ spec:
         - name: driver-root
           mountPath: /driver-root
           mountPropagation: HostToContainer
-        {{- if and .Values.featureGates (and (hasKey .Values.featureGates "PassthroughSupport") .Values.featureGates.PassthroughSupport) }}
+        {{- if $passthroughEnabled }}
         - name: host-root
           mountPath: /host-root
           mountPropagation: HostToContainer
@@ -344,9 +346,13 @@ spec:
           mountPath: /lib/modules/
           mountPropagation: HostToContainer
           readOnly: true
+        {{- end }}
+        {{- if or $passthroughEnabled $fabricManagerPartitioningEnabled }}
         - name: sysfs
           mountPath: /sys/
           mountPropagation: Bidirectional
+        {{- end }}
+        {{- if $passthroughEnabled }}
         - name: procfs
           mountPath: /proc/
           mountPropagation: Bidirectional
@@ -384,7 +390,7 @@ spec:
           path: {{ .Values.altProcDevices }}
           type: File
       {{- end }}
-      {{- if and .Values.featureGates (and (hasKey .Values.featureGates "PassthroughSupport") .Values.featureGates.PassthroughSupport) }}
+      {{- if $passthroughEnabled }}
       # This is the root filesystem of the host. This is used to execute the required
       # system commands against the host FS. For example, to test and load the vfio-pci
       # module variant for a GPU.
@@ -398,10 +404,14 @@ spec:
         hostPath:
           path: /lib/modules/
           type: Directory
+      {{- end }}
+      {{- if or $passthroughEnabled $fabricManagerPartitioningEnabled }}
       - name: sysfs
         hostPath:
           path: /sys/
           type: Directory
+      {{- end }}
+      {{- if $passthroughEnabled }}
       - name: procfs
         hostPath:
           path: /proc/

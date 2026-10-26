@@ -18,6 +18,7 @@ package main
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1569,27 +1570,65 @@ func (l deviceLib) disableGPUPersistenceMode(pciAddress string) error {
 	return nil
 }
 
-// Reset the GPUs in a single nvidia-smi invocation while they stay bound to the
-// nvidia driver. Pre-Ampere GPUs with NVLink connections cannot be reset one at
-// a time. nvidia-smi refuses the reset while any process, including an NVML
-// client, has one of the GPUs open.
-//
-// Note: we `chroot` into the device root to properly run nvidia-smi.
-func (l deviceLib) resetGPUs(pciAddresses []string) error {
-	cmd := exec.Command(
-		"chroot",
-		l.devRoot,
-		"nvidia-smi",
-		"-i",
-		strings.Join(pciAddresses, ","),
-		"-r")
+// resetGPUsWithSBR resets each GPU through the PCI subsystem's bus reset
+// method. Selecting "bus" before writing reset=1 makes the kernel issue a
+// Secondary Bus Reset instead of choosing another function reset method.
+func (l deviceLib) resetGPUsWithSBR(pciAddresses []string) error {
+	sysfsRoot := l.sysfsRoot
+	if sysfsRoot == "" {
+		sysfsRoot = "/sys"
+	}
 
-	output, err := cmd.CombinedOutput()
-	klog.V(4).Infof("resetGPUs command: %s, output: \n%s", cmd.String(), string(output))
-	if err != nil {
-		return fmt.Errorf("error running nvidia-smi: %w: %s", err, strings.TrimSpace(string(output)))
+	for _, pciAddress := range pciAddresses {
+		if _, err := deviceattribute.GetPCIBusIDAttribute(pciAddress); err != nil {
+			return fmt.Errorf("invalid PCI address %q: %w", pciAddress, err)
+		}
+
+		devicePath := filepath.Join(sysfsRoot, "bus", "pci", "devices", pciAddress)
+		resetMethodPath := filepath.Join(devicePath, "reset_method")
+		resetPath := filepath.Join(devicePath, "reset")
+
+		originalResetMethods, err := os.ReadFile(resetMethodPath)
+		if err != nil {
+			return fmt.Errorf("secondary bus reset of GPU at PCI %s: reading %s: %w", pciAddress, resetMethodPath, err)
+		}
+		if err := writePCISysfsFile(resetMethodPath, []byte("bus\n")); err != nil {
+			return fmt.Errorf("secondary bus reset of GPU at PCI %s: selecting bus reset through %s: %w", pciAddress, resetMethodPath, err)
+		}
+
+		var resetErr error
+		if err := writePCISysfsFile(resetPath, []byte("1\n")); err != nil {
+			resetErr = fmt.Errorf("triggering reset through %s: %w", resetPath, err)
+		}
+
+		resetMethodsToRestore := originalResetMethods
+		if len(resetMethodsToRestore) == 0 {
+			// sysfs expects a newline write to restore a disabled method list.
+			resetMethodsToRestore = []byte("\n")
+		}
+		var restoreErr error
+		if err := writePCISysfsFile(resetMethodPath, resetMethodsToRestore); err != nil {
+			restoreErr = fmt.Errorf("restoring reset methods through %s: %w", resetMethodPath, err)
+		}
+		if err := errors.Join(resetErr, restoreErr); err != nil {
+			return fmt.Errorf("secondary bus reset of GPU at PCI %s: %w", pciAddress, err)
+		}
+
+		klog.V(4).Infof("Reset GPU at PCI %s with a Secondary Bus Reset through host sysfs", pciAddress)
 	}
 	return nil
+}
+
+func writePCISysfsFile(path string, value []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(value); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 // Enable GPU Persistence mode
