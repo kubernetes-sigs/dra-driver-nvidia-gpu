@@ -528,6 +528,10 @@ func (l deviceLib) getGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 	if err != nil {
 		return nil, fmt.Errorf("error getting architecture for device %d: %w", index, err)
 	}
+	architectureID, ret := device.GetArchitecture()
+	if ret != nvml.SUCCESS {
+		return nil, fmt.Errorf("error getting architecture ID for device %d: %w", index, ret)
+	}
 	brand, err := device.GetBrandAsString()
 	if err != nil {
 		return nil, fmt.Errorf("error getting brand for device %d: %w", index, err)
@@ -644,6 +648,7 @@ func (l deviceLib) getGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		productName:           productName,
 		brand:                 brand,
 		architecture:          architecture,
+		architectureID:        architectureID,
 		cudaComputeCapability: cudaComputeCapability,
 		driverVersion:         driverVersion,
 		cudaDriverVersion:     fmt.Sprintf("%v.%v", cudaDriverVersion/1000, (cudaDriverVersion%1000)/10),
@@ -655,7 +660,7 @@ func (l deviceLib) getGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		addressingMode:        addressingMode,
 	}
 
-	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
+	if featuregates.Enabled(featuregates.FabricManagerPartitioning) && gpuInfo.supportsFabricManagerPartitioning() {
 		if moduleID, ret := device.GetModuleId(); ret == nvml.SUCCESS {
 			gpuInfo.gpuModuleID = moduleID
 		} else {
