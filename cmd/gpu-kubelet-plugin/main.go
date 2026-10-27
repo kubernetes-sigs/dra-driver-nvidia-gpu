@@ -68,6 +68,7 @@ type Flags struct {
 	klogVerbosity                 int
 	additionalXidsToIgnore        string
 	consumableShares              string
+	vgpuProfiles                  string
 }
 
 type Config struct {
@@ -220,6 +221,13 @@ func newApp() *cli.App {
 			Destination: &flags.consumableShares,
 			EnvVars:     []string{"CONSUMABLE_SHARES"},
 		},
+		&cli.StringFlag{
+			Name:        "vgpu-profiles",
+			Usage:       "A comma-separated allowlist of vGPU type names to advertise as vGPU partition devices (e.g. 'NVIDIA L40S-12Q,NVIDIA L40S-24Q'). An empty list advertises no vGPU partitions.",
+			Value:       "", // GRID A100-4C,GRID A100-40C
+			Destination: &flags.vgpuProfiles,
+			EnvVars:     []string{"VGPU_PROFILES"},
+		},
 	}
 	cliFlags = append(cliFlags, flags.kubeClientConfig.Flags()...)
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)
@@ -315,6 +323,10 @@ func validateCLIFlags(flags *Flags) error {
 		if err != nil || val <= 0 {
 			return fmt.Errorf("invalid value for --consumable-shares: %q (must be 'disabled', 'memory', 'unlimited', or a positive integer)", flags.consumableShares)
 		}
+	}
+
+	if flags.vgpuProfiles != "" && !featuregates.Enabled(featuregates.VGPUSupport) {
+		return fmt.Errorf("--vgpu-profiles requires feature gate %s to be enabled", featuregates.VGPUSupport)
 	}
 
 	return nil

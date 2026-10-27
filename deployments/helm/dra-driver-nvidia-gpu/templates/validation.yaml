@@ -129,6 +129,13 @@
 {{- end }}
 {{- end }}
 
+{{- if and .Values.vgpu .Values.vgpu.profiles (not (and .Values.featureGates .Values.featureGates.VGPUSupport)) }}
+{{- $error := "" }}
+{{- $error = printf "%s\nvgpu.profiles is set, but vGPU support is gated off." $error }}
+{{- $error = printf "%s\nSet 'featureGates.VGPUSupport=true' to enable advertising vGPU partition devices." $error }}
+{{- fail $error }}
+{{- end }}
+
 {{- if not (include "dra-driver-nvidia-gpu.resourceApiVersion" .) -}}
 {{- $error := "" }}
 {{- $error = printf "%s\nNo supported resource.k8s.io API version found in the cluster." $error }}

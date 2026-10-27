@@ -103,6 +103,22 @@ const (
 	// via --consumable-shares. Note: MPS sharing is not supported when consumable
 	// shares is enabled.
 	ConsumableShares featuregate.Feature = "ConsumableShares"
+
+	// VGPUSupport enables advertising NVIDIA vGPU partition devices
+	// (type=vgpu) as partitionable devices in ResourceSlices:
+	// a per-GPU CounterSet plus abstract per-profile slot partitions.
+	// Requires cluster-side DRAPartitionableDevices.
+	VGPUSupport featuregate.Feature = "VGPUSupport"
+
+	// DRADeviceCompatibilityGroups makes the driver publish the
+	// compatibilityGroups field (KEP-5963) on device consumesCounters
+	// entries in ResourceSlices, for scheme/family exclusivity between
+	// partitions sharing a CounterSet (disjoint vGPU
+	// profile families). Mirrors the Kubernetes feature gate of the same
+	// name: enabling this in the driver is only safe when the cluster (API
+	// server and kube-scheduler) has DRADeviceCompatibilityGroups enabled;
+	// otherwise the scheduler ignores devices that declare groups.
+	DRADeviceCompatibilityGroups featuregate.Feature = "DRADeviceCompatibilityGroups"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -205,6 +221,20 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(0, 5),
 		},
 	},
+	VGPUSupport: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 6),
+		},
+	},
+	DRADeviceCompatibilityGroups: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 6),
+		},
+	},
 }
 
 var (
@@ -267,8 +297,20 @@ func ValidateFeatureGates() error {
 		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", PassthroughSupport, NVMLDeviceHealthCheck)
 	}
 
-	if Enabled(DeviceMetadata) && !Enabled(PassthroughSupport) {
-		return fmt.Errorf("feature gate %s requires %s to also be enabled", DeviceMetadata, PassthroughSupport)
+	if Enabled(DeviceMetadata) && !Enabled(PassthroughSupport) && !Enabled(VGPUSupport) {
+		return fmt.Errorf("feature gate %s requires %s or %s to also be enabled", DeviceMetadata, PassthroughSupport, VGPUSupport)
+	}
+
+	// vGPU partitions are advertised through the same KEP-4815 publish path
+	// as Dynamic MIG, but a unified per-GPU CounterSet covering MIG and vGPU
+	// partitions at the same time is not implemented yet. Passthrough devices are not
+	// representable in that publish path yet either.
+	if Enabled(VGPUSupport) && Enabled(DynamicMIG) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, DynamicMIG)
+	}
+
+	if Enabled(VGPUSupport) && Enabled(PassthroughSupport) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, PassthroughSupport)
 	}
 
 	return nil

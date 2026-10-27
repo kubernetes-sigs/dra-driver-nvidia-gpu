@@ -41,6 +41,17 @@ gpuResourcesEnabledOverride: false
 # Configure consumable shares support ("disabled", "memory", "unlimited", or a positive integer)
 consumableShares: ""
 
+# NVIDIA vGPU support (alpha). vGPU partition devices are advertised through
+# the partitionable-devices ResourceSlice model; this requires
+# featureGates.VGPUSupport=true, cluster-side DRAPartitionableDevices, and a
+# host running the NVIDIA vGPU Manager.
+vgpu:
+  # profiles is a comma-separated allowlist of vGPU type names to advertise
+  # as vGPU partition devices, e.g. "NVIDIA L40S-12Q,NVIDIA L40S-24Q".
+  # Types not in the allowlist are never advertised, even if the host
+  # supports them. The empty list (default) advertises no vGPU partitions.
+  profiles: ""
+
 allowDefaultNamespace: false
 
 # resourceApiVersion sets the resource.k8s.io API version used for DRA resources (DeviceClass,
@@ -128,6 +139,8 @@ resources:
 #   HostManagedIMEXDaemon: false       # Gate allowing resources.computeDomains.imex.mode=hostManaged
 #   DRAListTypeAttributes: false       # Publish list-valued DRA device attributes
 #   ConsumableShares: false            # Publish consumable capacity and multi-allocation support for devices
+#   VGPUSupport: false                 # Advertise NVIDIA vGPU partition devices in ResourceSlices
+#   DRADeviceCompatibilityGroups: false # Publish KEP-5963 compatibility groups; requires the cluster gate of the same name
 featureGates: {}
 
 # Log verbosity for all components. Zero or greater, higher number means higher

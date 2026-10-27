@@ -56,7 +56,7 @@ func TestNewDeviceLibVfioCapability(t *testing.T) {
 				for _, name := range []string{"libnvidia-ml.so.1", "nvidia-smi"} {
 					require.NoError(t, os.WriteFile(filepath.Join(hostRoot, name), nil, 0o644))
 				}
-				lib, err := newDeviceLib(root.New(root.WithDriverRoot(hostRoot)), hostRoot)
+				lib, err := newDeviceLib(root.New(root.WithDriverRoot(hostRoot)), hostRoot, "")
 				if gate && mode == "read error" {
 					require.ErrorContains(t, err, "error checking if IOMMU is enabled")
 					var pathErr *os.PathError

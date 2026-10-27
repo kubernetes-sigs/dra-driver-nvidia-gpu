@@ -129,7 +129,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	devRoot := driver.DevRoot
 	klog.Infof("Using devRoot=%v", devRoot)
 
-	nvdevlib, err := newDeviceLib(driver, config.flags.hostRoot)
+	nvdevlib, err := newDeviceLib(driver, config.flags.hostRoot, config.flags.vgpuProfiles)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
 	}
@@ -325,6 +325,17 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	// More details: https://github.com/kubernetes/kubernetes/pull/136269
 	if err := s.validateNoOverlappingPreparedDevices(cp, claim); err != nil {
 		return nil, fmt.Errorf("unable to prepare claim %v: %w", claimUID, err)
+	}
+
+	// vGPU partition devices are advertised but not preparable on this
+	// driver build. Without this check, a vGPU claim would match no device
+	// config group (default configs only cover gpu/mig/vfio devices), so it
+	// would either be dropped from preparation entirely or fail later via a
+	// mismatched request-scoped config — in both cases after PrepareStarted
+	// had already been checkpointed, leaving useless limbo state. Reject
+	// before any host or checkpoint side effect. // TODO: remove this once vGPU support is implemented.
+	if err := s.validateNoVgpuAllocations(claim); err != nil {
+		return nil, err
 	}
 
 	// Relevant for DynamicMIG: a previous preparation attempt for the same
@@ -910,6 +921,25 @@ func (s *DeviceState) deleteClaimFromCheckpoint(ctx context.Context, claimRef ku
 	return nil
 }
 
+// validateNoVgpuAllocations rejects any claim whose allocation references a
+// vGPU partition device. The vGPU lifecycle is not implemented yet; failing here, before the
+// checkpoint's PrepareStarted write, keeps the checkpoint free of records for claims that can never complete. // TODO: remove this once vGPU support is implemented.
+func (s *DeviceState) validateNoVgpuAllocations(claim *resourceapi.ResourceClaim) error {
+	if claim.Status.Allocation == nil {
+		return nil
+	}
+	for _, r := range claim.Status.Allocation.Devices.Results {
+		if r.Driver != DriverName {
+			continue
+		}
+		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
+		if device != nil && device.Type() == VgpuDeviceType {
+			return fmt.Errorf("device %q is a vGPU partition; vGPU device lifecycle is not implemented yet (claim %s)", r.Device, ResourceClaimToString(claim))
+		}
+	}
+	return nil
+}
+
 // validateAdminAccessRequest rejects admin-access requests that are incompatible
 // with how this driver treats admin access. Admin access is meant for host-side
 // monitoring/management of a full GPU, so it must not be combined with:
@@ -1111,6 +1141,11 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 					Info:   allocatableDevice.Vfio,
 					Device: device,
 				}
+			case VgpuDeviceType:
+				// Prepare work is not implemented yet for vGPU partitions. We fail loudly instead of silently preparing nothing.
+				return nil, fmt.Errorf("device %q is a vGPU partition; vGPU device lifecycle is not implemented yet", device.DeviceName)
+			default:
+				return nil, fmt.Errorf("device %q has unexpected type %q", device.DeviceName, allocatableDevice.Type())
 			}
 
 			klog.V(6).Infof("Prepared device for claim '%s': %s", ResourceClaimToString(claim), device.DeviceName)
