@@ -25,7 +25,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -663,9 +662,15 @@ func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Con
 	if err != nil {
 		return nil, fmt.Errorf("get host IMEX channel reservations: %w", err)
 	}
-	reservedID, err := strconv.Atoi(registry.Data[config.DomainID])
-	if err != nil || reservedID != channelID {
+	reservation, exists, err := imex.ChannelReservationFor(registry, config.DomainID)
+	if err != nil {
+		return nil, permanentError{fmt.Errorf("invalid host IMEX channel reservation for ComputeDomain %s: %w", config.DomainID, err)}
+	}
+	if !exists || reservation.ChannelID != channelID {
 		return nil, permanentError{fmt.Errorf("channel %d is not reserved for ComputeDomain %s", channelID, config.DomainID)}
+	}
+	if reservation.FabricDomainID != "" && reservation.FabricDomainID != s.computeDomainManager.CliqueID() {
+		return nil, permanentError{fmt.Errorf("fabric domain %q does not match reservation %q for ComputeDomain %s", s.computeDomainManager.CliqueID(), reservation.FabricDomainID, config.DomainID)}
 	}
 
 	if err := s.computeDomainManager.AssertComputeDomainNamespace(ctx, claim.Namespace, config.DomainID); err != nil {

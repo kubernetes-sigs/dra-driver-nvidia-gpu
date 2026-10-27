@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strconv"
 
 	coreapi "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
@@ -32,9 +31,9 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 )
 
-// availableHostChannels intersects node pool advertisements. A reservation
-// must have the same meaning on every node in the shared host IMEX domain.
-func availableHostChannels(ctx context.Context, config *ManagerConfig) ([]int, error) {
+// availableHostChannels intersects node pool advertisements independently for
+// each physical NVLink fabric domain.
+func availableHostChannels(ctx context.Context, config *ManagerConfig) (map[string][]int, error) {
 	slices, err := config.clientsets.Resource.ResourceSlices().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list ResourceSlices: %w", err)
@@ -43,6 +42,7 @@ func availableHostChannels(ctx context.Context, config *ManagerConfig) ([]int, e
 		generation int64
 		expected   int64
 		slices     int64
+		domain     string
 		channels   map[int]bool
 	}
 	pools := make(map[string]*poolChannels)
@@ -69,32 +69,58 @@ func availableHostChannels(ctx context.Context, config *ManagerConfig) ([]int, e
 				idAttr = device.Attributes[resourceapi.QualifiedName(DriverName+"/id")]
 			}
 			if typeAttr.StringValue != nil && *typeAttr.StringValue == "channel" && idAttr.IntValue != nil && *idAttr.IntValue >= 0 {
+				domainAttr := device.Attributes[imex.FabricDomainIDAttribute]
+				if domainAttr.StringValue == nil {
+					domainAttr = device.Attributes[resourceapi.QualifiedName(DriverName+"/"+imex.FabricDomainIDAttribute)]
+				}
+				if domainAttr.StringValue == nil || *domainAttr.StringValue == "" {
+					return nil, fmt.Errorf("waiting for IMEX ResourceSlice pool %s to publish fabric domain identity", slice.Spec.Pool.Name)
+				}
+				if pool.domain != "" && pool.domain != *domainAttr.StringValue {
+					return nil, fmt.Errorf("IMEX ResourceSlice pool %s contains multiple fabric domains", slice.Spec.Pool.Name)
+				}
+				pool.domain = *domainAttr.StringValue
 				pool.channels[int(*idAttr.IntValue)] = true
 			}
 		}
 	}
-	counts := make(map[int]int)
+	type domainChannels struct {
+		pools  int
+		counts map[int]int
+	}
+	domains := make(map[string]*domainChannels)
 	for _, pool := range pools {
 		if pool.slices != pool.expected {
 			return nil, fmt.Errorf("waiting for complete IMEX ResourceSlice pool publication")
 		}
+		if pool.domain == "" {
+			continue
+		}
+		domain := domains[pool.domain]
+		if domain == nil {
+			domain = &domainChannels{counts: make(map[int]int)}
+			domains[pool.domain] = domain
+		}
+		domain.pools++
 		for id := range pool.channels {
-			counts[id]++
+			domain.counts[id]++
 		}
 	}
-	var channels []int
-	for id, count := range counts {
-		if count == len(pools) {
-			channels = append(channels, id)
+	available := make(map[string][]int)
+	for fabricDomainID, domain := range domains {
+		for id, count := range domain.counts {
+			if count == domain.pools {
+				available[fabricDomainID] = append(available[fabricDomainID], id)
+			}
 		}
+		sort.Ints(available[fabricDomainID])
 	}
-	sort.Ints(channels)
-	return channels, nil
+	return available, nil
 }
 
-func (m *WorkloadResourceClaimTemplateManager) reserveHostChannel(ctx context.Context, uid string) (int, error) {
+func (m *WorkloadResourceClaimTemplateManager) reserveHostChannel(ctx context.Context, uid string) (imex.ChannelReservation, error) {
 	client := m.config.clientsets.Core.CoreV1().ConfigMaps(m.config.driverNamespace)
-	channel := -1
+	var reservation imex.ChannelReservation
 	err := retry.OnError(retry.DefaultRetry, func(err error) bool {
 		return errors.IsConflict(err) || errors.IsAlreadyExists(err)
 	}, func() error {
@@ -105,47 +131,81 @@ func (m *WorkloadResourceClaimTemplateManager) reserveHostChannel(ctx context.Co
 		if err != nil {
 			return err
 		}
-		used := make(map[int]string)
-		for owner, value := range registry.Data {
-			id, err := strconv.Atoi(value)
-			if err != nil || id < 0 {
-				return fmt.Errorf("invalid channel reservation for ComputeDomain %s: %q", owner, value)
+		reservations := make(map[string]imex.ChannelReservation)
+		for owner := range registry.Data {
+			current, _, err := imex.ChannelReservationFor(registry, owner)
+			if err != nil {
+				return err
 			}
-			if other, exists := used[id]; exists {
-				return fmt.Errorf("channel %d reserved by both %s and %s", id, other, owner)
-			}
-			used[id] = owner
-			if owner == uid {
-				channel = id
+			reservations[owner] = current
+		}
+		for owner, current := range reservations {
+			for other, existing := range reservations {
+				if owner >= other || current.ChannelID != existing.ChannelID {
+					continue
+				}
+				if current.FabricDomainID == "" || existing.FabricDomainID == "" || current.FabricDomainID == existing.FabricDomainID {
+					return fmt.Errorf("channel %d in fabric domain %q reserved by both %s and %s", current.ChannelID, current.FabricDomainID, owner, other)
+				}
 			}
 		}
-		if channel >= 0 {
+		if current, exists := reservations[uid]; exists {
+			reservation = current
 			return nil
 		}
-		channels, err := availableHostChannels(ctx, m.config)
+		available, err := availableHostChannels(ctx, m.config)
 		if err != nil {
 			return err
 		}
-		for _, id := range channels {
-			if _, exists := used[id]; exists {
-				continue
-			}
-			if registry.Data == nil {
-				registry.Data = make(map[string]string)
-			}
-			registry.Data[uid] = strconv.Itoa(id)
-			if _, err := client.Update(ctx, registry, metav1.UpdateOptions{}); err != nil {
-				return err
-			}
-			channel = id
-			return nil
+		type fabricDomainCandidate struct {
+			id           string
+			reservations int
 		}
-		return fmt.Errorf("no unreserved IMEX channel advertised on all nodes")
+		var fabricDomains []fabricDomainCandidate
+		for fabricDomainID := range available {
+			candidate := fabricDomainCandidate{id: fabricDomainID}
+			for _, existing := range reservations {
+				if existing.FabricDomainID == fabricDomainID {
+					candidate.reservations++
+				}
+			}
+			fabricDomains = append(fabricDomains, candidate)
+		}
+		sort.Slice(fabricDomains, func(i, j int) bool {
+			if fabricDomains[i].reservations != fabricDomains[j].reservations {
+				return fabricDomains[i].reservations < fabricDomains[j].reservations
+			}
+			return fabricDomains[i].id < fabricDomains[j].id
+		})
+		for _, candidate := range fabricDomains {
+			fabricDomainID := candidate.id
+			for _, id := range available[fabricDomainID] {
+				used := false
+				for _, existing := range reservations {
+					if existing.ChannelID == id && (existing.FabricDomainID == "" || existing.FabricDomainID == fabricDomainID) {
+						used = true
+						break
+					}
+				}
+				if used {
+					continue
+				}
+				reservation = imex.ChannelReservation{FabricDomainID: fabricDomainID, ChannelID: id}
+				if err := imex.SetChannelReservation(registry, uid, reservation); err != nil {
+					return err
+				}
+				if _, err := client.Update(ctx, registry, metav1.UpdateOptions{}); err != nil {
+					return err
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("no unreserved IMEX channel advertised in any fabric domain")
 	})
 	if err != nil {
-		return 0, fmt.Errorf("reserve IMEX channel for ComputeDomain %s: %w", uid, err)
+		return imex.ChannelReservation{}, fmt.Errorf("reserve IMEX channel for ComputeDomain %s: %w", uid, err)
 	}
-	return channel, nil
+	return reservation, nil
 }
 
 // releaseHostChannel is called only after the template has disappeared. Claims
@@ -193,7 +253,9 @@ func (m *WorkloadResourceClaimTemplateManager) releaseHostChannel(ctx context.Co
 		if _, exists := registry.Data[uid]; !exists {
 			return nil
 		}
-		delete(registry.Data, uid)
+		if err := imex.DeleteChannelReservation(registry, uid); err != nil {
+			return err
+		}
 		_, err = client.Update(ctx, registry, metav1.UpdateOptions{})
 		return err
 	})

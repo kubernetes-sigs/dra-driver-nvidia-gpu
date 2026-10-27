@@ -20,6 +20,10 @@ spec:
           selectors:
           - cel:
               expression: "device.attributes['compute-domain.nvidia.com'].id == {{ .ChannelID }}"
+{{- if ne .FabricDomainID "" }}
+          - cel:
+              expression: 'device.attributes["compute-domain.nvidia.com"].fabricDomainID == "{{ .FabricDomainID }}"'
+{{- end }}
 {{- end }}
       config:
       - requests: ["channel"]

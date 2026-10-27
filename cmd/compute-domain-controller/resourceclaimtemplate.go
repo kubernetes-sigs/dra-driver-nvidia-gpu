@@ -35,6 +35,7 @@ import (
 	"k8s.io/klog/v2"
 
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 )
 
 const (
@@ -55,6 +56,7 @@ type ResourceClaimTemplateTemplateData struct {
 	ChannelConfig           *nvapi.ComputeDomainChannelConfig
 	DaemonConfig            *nvapi.ComputeDomainDaemonConfig
 	ChannelID               *int
+	FabricDomainID          string
 }
 
 type BaseResourceClaimTemplateManager struct {
@@ -378,12 +380,14 @@ func channelAllocationModeFor(cd *nvapi.ComputeDomain, hostManaged bool) string 
 
 func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, namespace, name string, cd *nvapi.ComputeDomain) (*resourceapi.ResourceClaimTemplate, error) {
 	var channelID *int
+	var fabricDomainID string
 	if m.config.imexConfig.EffectiveHostManaged() {
-		id, err := m.reserveHostChannel(ctx, string(cd.UID))
+		reservation, err := m.reserveHostChannel(ctx, string(cd.UID))
 		if err != nil {
 			return nil, err
 		}
-		channelID = &id
+		channelID = &reservation.ChannelID
+		fabricDomainID = reservation.FabricDomainID
 	}
 	rcts, err := getByComputeDomainUID[*resourceapi.ResourceClaimTemplate](ctx, m.mutationCache, string(cd.UID))
 	if err != nil {
@@ -395,7 +399,7 @@ func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, names
 	if len(rcts) == 1 {
 		if channelID != nil {
 			requests := rcts[0].Spec.Spec.Devices.Requests
-			if len(requests) != 1 || requests[0].Exactly == nil || requests[0].Exactly.DeviceClassName != computeDomainChannelDeviceClass || len(requests[0].Exactly.Selectors) != 1 || requests[0].Exactly.Selectors[0].CEL == nil || requests[0].Exactly.Selectors[0].CEL.Expression != hostChannelSelector(*channelID) {
+			if !hostChannelRequestMatchesReservation(requests, fabricDomainID, *channelID) {
 				return nil, fmt.Errorf("existing host-managed ResourceClaimTemplate does not match reserved channel %d; drain workloads and recreate the ComputeDomain", *channelID)
 			}
 		}
@@ -418,6 +422,7 @@ func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, names
 		DriverName:              DriverName,
 		ChannelConfig:           channelConfig,
 		ChannelID:               channelID,
+		FabricDomainID:          fabricDomainID,
 	}
 	if channelID != nil {
 		templateData.DeviceClassName = computeDomainChannelDeviceClass
@@ -433,4 +438,28 @@ func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, names
 
 func hostChannelSelector(id int) string {
 	return fmt.Sprintf("device.attributes['compute-domain.nvidia.com'].id == %d", id)
+}
+
+func hostFabricDomainSelector(fabricDomainID string) string {
+	return fmt.Sprintf("device.attributes[\"compute-domain.nvidia.com\"].%s == %q", imex.FabricDomainIDAttribute, fabricDomainID)
+}
+
+func hostChannelRequestMatchesReservation(requests []resourceapi.DeviceRequest, fabricDomainID string, channelID int) bool {
+	if len(requests) != 1 || requests[0].Exactly == nil || requests[0].Exactly.DeviceClassName != computeDomainChannelDeviceClass {
+		return false
+	}
+	expected := []string{hostChannelSelector(channelID)}
+	if fabricDomainID != "" {
+		expected = append(expected, hostFabricDomainSelector(fabricDomainID))
+	}
+	selectors := requests[0].Exactly.Selectors
+	if len(selectors) != len(expected) {
+		return false
+	}
+	for i := range expected {
+		if selectors[i].CEL == nil || selectors[i].CEL.Expression != expected[i] {
+			return false
+		}
+	}
+	return true
 }

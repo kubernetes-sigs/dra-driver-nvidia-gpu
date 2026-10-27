@@ -33,8 +33,10 @@ import (
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 	drametrics "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/workqueue"
 )
@@ -45,23 +47,30 @@ import (
 // ComputeDomain daemon devices are
 // additionally omitted when hostManaged is true, since daemon claims are
 // never valid in that mode (see applyComputeDomainDaemonConfig).
-func computeDomainPublishedDevices(allocatable AllocatableDevices, hostManaged bool) []resourceapi.Device {
+func computeDomainPublishedDevices(allocatable AllocatableDevices, hostManaged bool, fabricDomainID string) []resourceapi.Device {
 	var devices []resourceapi.Device
 	for _, device := range allocatable {
 		if !hostManaged && device.Type() == ComputeDomainChannelType && device.Channel.ID != 0 {
 			continue
 		}
+		if hostManaged && device.Type() == ComputeDomainChannelType && fabricDomainID == "" {
+			continue
+		}
 		if hostManaged && device.Type() == ComputeDomainDaemonType {
 			continue
 		}
-		devices = append(devices, device.GetDevice())
+		published := device.GetDevice()
+		if hostManaged && device.Type() == ComputeDomainChannelType {
+			published.Attributes[imex.FabricDomainIDAttribute] = resourceapi.DeviceAttribute{StringValue: ptr.To(fabricDomainID)}
+		}
+		devices = append(devices, published)
 	}
 	slices.SortFunc(devices, func(a, b resourceapi.Device) int { return strings.Compare(a.Name, b.Name) })
 	return devices
 }
 
-func computeDomainPublishedSlices(allocatable AllocatableDevices, hostManaged bool) []resourceslice.Slice {
-	devices := computeDomainPublishedDevices(allocatable, hostManaged)
+func computeDomainPublishedSlices(allocatable AllocatableDevices, hostManaged bool, fabricDomainID string) []resourceslice.Slice {
+	devices := computeDomainPublishedDevices(allocatable, hostManaged, fabricDomainID)
 	var result []resourceslice.Slice
 	for chunk := range slices.Chunk(devices, resourceapi.ResourceSliceMaxDevices) {
 		result = append(result, resourceslice.Slice{Devices: chunk})
@@ -137,12 +146,15 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	driver.pluginhelper = helper
 
-	// Enumerate the set of ComputeDomain devices to publish.
-	resources := resourceslice.DriverResources{
-		Pools: map[string]resourceslice.Pool{
-			config.flags.nodeName: {Slices: computeDomainPublishedSlices(state.allocatable, config.imexConfig.EffectiveHostManaged())},
-		},
+	publishResources := func(ctx context.Context, fabricDomainID string) error {
+		resources := resourceslice.DriverResources{
+			Pools: map[string]resourceslice.Pool{
+				config.flags.nodeName: {Slices: computeDomainPublishedSlices(state.allocatable, config.imexConfig.EffectiveHostManaged(), fabricDomainID)},
+			},
+		}
+		return driver.pluginhelper.PublishResources(ctx, resources)
 	}
+	state.computeDomainManager.SetCliqueIDChangeCallback(publishResources)
 
 	if err := state.computeDomainManager.Start(ctx); err != nil {
 		return nil, fmt.Errorf("error starting ComputeDomain manager: %w", err)
@@ -159,7 +171,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	driver.healthcheck = healthcheck
 
-	if err := driver.pluginhelper.PublishResources(ctx, resources); err != nil {
+	if err := publishResources(ctx, state.computeDomainManager.CliqueID()); err != nil {
 		return nil, fmt.Errorf("error in PublishResources(): %w", err)
 	}
 

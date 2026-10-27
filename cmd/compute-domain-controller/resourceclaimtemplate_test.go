@@ -78,12 +78,16 @@ func TestWorkloadTemplatePinsHostChannel(t *testing.T) {
 	tmpl, err := template.ParseFiles("../../templates/compute-domain-workload-claim-template.tmpl.yaml")
 	require.NoError(t, err)
 	for _, id := range []*int{nil, new(int), func() *int { id := 1; return &id }()} {
+		fabricDomainID := ""
+		if id != nil {
+			fabricDomainID = "fabric-a"
+		}
 		data := ResourceClaimTemplateTemplateData{
 			Namespace: "workload", Name: "channels", Finalizer: computeDomainFinalizer,
 			ComputeDomainLabelKey: computeDomainLabelKey, ComputeDomainLabelValue: "domain-a",
 			TargetLabelKey: computeDomainResourceClaimTemplateTargetLabelKey, TargetLabelValue: computeDomainResourceClaimTemplateTargetWorkload,
 			DeviceClassName: computeDomainDefaultChannelDeviceClass, DriverName: DriverName,
-			ChannelConfig: nvapi.DefaultComputeDomainChannelConfig(), ChannelID: id,
+			ChannelConfig: nvapi.DefaultComputeDomainChannelConfig(), ChannelID: id, FabricDomainID: fabricDomainID,
 		}
 		data.ChannelConfig.DomainID = "domain-a"
 		if id != nil {
@@ -98,8 +102,9 @@ func TestWorkloadTemplatePinsHostChannel(t *testing.T) {
 		if id == nil {
 			require.Empty(t, request.Selectors)
 		} else {
-			require.Len(t, request.Selectors, 1)
+			require.Len(t, request.Selectors, 2)
 			require.Equal(t, hostChannelSelector(*id), request.Selectors[0].CEL.Expression)
+			require.Equal(t, hostFabricDomainSelector(fabricDomainID), request.Selectors[1].CEL.Expression)
 		}
 	}
 }

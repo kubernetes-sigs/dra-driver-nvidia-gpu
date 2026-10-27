@@ -2,7 +2,7 @@
 title: 0001 — Host-managed ComputeDomain channel reservations
 linkTitle: Host-managed channel reservations
 weight: 1
-description: Reserve one consistent IMEX channel per ComputeDomain in a shared host domain.
+description: Reserve one consistent IMEX channel per ComputeDomain within an NVLink fabric domain.
 ---
 
 | Field | Value |
@@ -14,11 +14,12 @@ description: Reserve one consistent IMEX channel per ComputeDomain in a shared h
 
 ## Summary
 
-In host-managed IMEX mode, reserve a distinct channel for each ComputeDomain
-and request that same channel on every worker node. Persist reservations across
-controller restarts, and return a channel to the pool when the ComputeDomain
-and its workload claims are removed. Driver-managed mode keeps its current
-channel publication and injection behavior.
+In host-managed IMEX mode, select an NVLink fabric domain and reserve a distinct
+channel for each ComputeDomain within that domain. Request the same fabric
+domain and channel on every worker node. Persist reservations across controller
+restarts, and return a channel to the domain's pool when the ComputeDomain and
+its workload claims are removed. Driver-managed mode keeps its current channel
+publication and injection behavior.
 
 ## Motivation
 
@@ -30,15 +31,16 @@ host-managed implementation selects channel zero for every ComputeDomain.
 
 ### Goals
 
-- Distinct ComputeDomains receive distinct channel IDs.
+- Distinct ComputeDomains in one NVLink fabric domain receive distinct channel IDs.
+- ComputeDomains in different fabric domains may reuse a channel ID.
 - Workers of one ComputeDomain request the same ID across nodes.
 - Retries and controller restarts preserve assignments.
 - Finalization releases reservations only after workload claims disappear.
 
 ### Non-goals
 
-Per-pod reservations, multiple independent host domains in one installation,
-same-node sharing between independent claims, and host daemon lifecycle changes.
+Per-pod reservations, same-node sharing between independent claims, and host
+daemon lifecycle changes.
 
 ## Why this belongs in the NVIDIA DRA driver
 
@@ -67,10 +69,11 @@ spec:
       name: job-a-channel
 ```
 
-With host-managed mode enabled, `job-a` reserves channel zero. A second domain
-reserves channel one. The generated templates use
-`compute-domain-channel.nvidia.com` and a CEL selector for the reserved ID.
-After `job-a` and its claims are removed, the next domain can reserve zero.
+With host-managed mode enabled, `job-a` reserves channel zero in one physical
+fabric domain. A second ComputeDomain in that fabric domain reserves channel
+one, while a ComputeDomain selected into another fabric domain may also reserve
+channel zero. Generated templates use `compute-domain-channel.nvidia.com` and
+CEL selectors for the reserved fabric domain and channel ID.
 
 ### Affected components
 
@@ -84,30 +87,37 @@ After `job-a` and its claims are removed, the next domain can reserve zero.
 ### Authoritative state owner
 
 Only the controller writes `compute-domain-imex-channel-reservations`, a
-ConfigMap in the driver namespace mapping ComputeDomain UIDs to channel IDs.
+ConfigMap in the driver namespace. Its data maps ComputeDomain UIDs to channel
+IDs for kubelet-plugin compatibility, while an annotation maps those UIDs to
+canonical `<clusterUUID>.<cliqueID>` fabric-domain identities.
 Creates and updates use API conflict retries. Plugins read this object during
 Prepare. It has no owner reference to an individual domain and must not be
 deleted or modified while domains exist.
 
 ### Smallest valuable slice
 
-One shared host IMEX domain per installation, with exclusive claims on each
-node and channel reservations lasting for the ComputeDomain lifetime.
+Multiple host IMEX fabric domains per installation, with exclusive claims on
+each node and fabric-domain-scoped reservations lasting for the ComputeDomain
+lifetime.
 
 ## Design
 
 ### API changes
 
 No new CRD fields or opaque config fields. A new DeviceClass selects any IMEX
-channel. Generated templates add a request-level channel ID selector.
+channel. Host-managed channel devices add a `fabricDomainID` ResourceSlice
+attribute. Generated templates add request-level fabric-domain and channel-ID
+selectors.
 The registry is controller implementation state, not a user configuration knob.
 Node pools advertise all channels across slices of at most 128 devices.
 
-The controller intersects channels across currently published node pools,
-using only complete latest-generation pools. New reservations wait for complete
-publication and fail retryably on exhaustion. Existing reservations are stable
-even if node advertisements temporarily disappear. A later node lacking the
-reserved channel cannot satisfy that domain's claim.
+The controller groups currently published node pools by `fabricDomainID` and
+intersects channels only within each group, using complete latest-generation
+pools. It chooses a domain with the fewest reservations, then its lowest free
+channel. New reservations wait for complete publication and fail retryably on
+exhaustion. Existing reservations are stable even if node advertisements
+temporarily disappear. A later node outside the selected fabric domain, or
+lacking the reserved channel, cannot satisfy that ComputeDomain's claim.
 
 During deletion, remove the template first, then wait until no claim spec or
 allocated config refers to the domain UID. Remove the registry entry before
@@ -133,29 +143,35 @@ channel-zero-only host mode. Upgrade the chart and all relevant binaries,
 then recreate domains. Existing unpinned templates fail reconciliation rather
 than being silently rewritten. Follow the same drain procedure on downgrade.
 Controller restarts retain registry state; node checkpoints retain their
-current schema. Do not run multiple driver installations against the same
-host IMEX domain with independent registries.
+current schema. Do not run multiple driver installations against the same host
+IMEX fabric domains with independent registries. Once scoped reservations reuse
+a channel ID across fabric domains, downgrading the controller requires draining
+and removing those ComputeDomains because the older controller treats IDs as
+cluster-global.
 
 ### Environment floor
 
 The existing supported host-managed IMEX environment and Kubernetes DRA API
-remain prerequisites. All participating nodes must belong to the configured
-shared host IMEX domain, expose the reserved channel, and have a ready host
-daemon. This change does not alter hardware or driver version prerequisites.
+remain prerequisites. All workers of a ComputeDomain must belong to its
+controller-selected fabric domain, expose the reserved channel, and have a
+ready host daemon. This change does not alter hardware or driver version
+prerequisites.
 
 ### Test plan
 
-Controller unit tests cover distinct IDs, restart persistence, conflict retries,
-exhaustion, latest-generation pool completeness, and release blocked by claims.
+Controller unit tests cover distinct IDs within one fabric domain, ID reuse
+across domains, restart persistence, conflict retries, exhaustion,
+latest-generation pool completeness, and release blocked by claims.
 Template tests cover zero and nonzero pinned selectors and driver-managed mode.
 Plugin tests cover bounded deterministic publication and rejection of a
-channel different from its reservation. Run unit tests with the race detector
-and Helm policy/lint checks.
+channel or local fabric domain different from its reservation. Run unit tests
+with the race detector and Helm policy/lint checks.
 
-On real MNNVL hardware, create two domains with workers on multiple nodes,
-verify their injected channel paths are consistent within each domain and
-different between domains, and run memory exchange. Delete one domain and its
-claims, verify reuse, and exercise plugin/controller restart and force deletion.
+On real MNNVL hardware, create domains in at least two physical fabric domains,
+verify their injected channel paths are consistent within each ComputeDomain,
+different for concurrent ComputeDomains in one fabric domain, and reusable
+across separate fabric domains. Run memory exchange, then verify deletion,
+reuse, plugin/controller restart, and force deletion.
 Extend `tests/bats/test_cd_imex_chan_inject.bats` for this scenario before
 graduation; no hardware execution is implied by unit test success. Mock NVML
 can validate publication but cannot prove actual host IMEX isolation.
@@ -179,11 +195,12 @@ provide device discovery, not persistent ComputeDomain channel ownership.
 ## Drawbacks
 
 One ConfigMap serializes reservations and adds API traffic. Conservatively
-intersecting node pools can reduce capacity when one node advertises fewer
-channels. Idle ComputeDomains retain reservations until deleted.
+intersecting node pools within a fabric domain can reduce its capacity when one
+node advertises fewer channels. Automatic fabric-domain selection does not
+account for workload-specific GPU pressure or affinity. Idle ComputeDomains
+retain reservations until deleted.
 
 ## Open questions
 
 Maintainer review of the reservation contract and real-hardware validation
-remain outstanding. Same-node claim sharing and multiple host domains are
-separate future designs.
+remain outstanding. Same-node claim sharing remains a separate future design.

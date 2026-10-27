@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"sync"
 	"testing"
@@ -726,20 +727,30 @@ func TestApplyComputeDomainChannelConfigHostManagedUsesAllocatedChannel(t *testi
 
 func TestHostManagedChannelReservationValidation(t *testing.T) {
 	for name, test := range map[string]struct {
-		reservation string
-		allocated   int
-		wantError   bool
+		reservation  string
+		fabricDomain string
+		localDomain  string
+		allocated    int
+		wantError    string
 	}{
 		"nonzero reserved channel": {reservation: "1", allocated: 1},
-		"wrong channel":            {reservation: "1", allocated: 0, wantError: true},
-		"missing reservation":      {allocated: 1, wantError: true},
+		"wrong channel":            {reservation: "1", allocated: 0, wantError: "is not reserved for ComputeDomain"},
+		"missing reservation":      {allocated: 1, wantError: "is not reserved for ComputeDomain"},
+		"wrong fabric domain":      {reservation: "1", fabricDomain: "fabric-a", localDomain: "fabric-b", allocated: 1, wantError: "does not match reservation"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			config := hostManagedConfig()
 			registry, err := config.clientsets.Core.CoreV1().ConfigMaps("driver").Get(ctx, imex.ChannelReservationsConfigMap, metav1.GetOptions{})
 			require.NoError(t, err)
-			registry.Data["cd-uid"] = test.reservation
+			if test.reservation == "" {
+				delete(registry.Data, "cd-uid")
+			} else {
+				registry.Data["cd-uid"] = test.reservation
+			}
+			if test.fabricDomain != "" {
+				registry.Annotations = map[string]string{imex.ChannelReservationDomainsAnnotation: fmt.Sprintf(`{"cd-uid":%q}`, test.fabricDomain)}
+			}
 			_, err = config.clientsets.Core.CoreV1().ConfigMaps("driver").Update(ctx, registry, metav1.UpdateOptions{})
 			require.NoError(t, err)
 			factory := nvinformers.NewSharedInformerFactory(nvfake.NewSimpleClientset(), 0)
@@ -749,13 +760,13 @@ func TestHostManagedChannelReservationValidation(t *testing.T) {
 			deviceName := "channel-" + strconv.Itoa(test.allocated)
 			state := &DeviceState{
 				config: config, checkpointManager: &fakeCheckpointManager{checkpoint: checkpointWithClaims(nil)},
-				computeDomainManager: &ComputeDomainManager{informer: informer},
+				computeDomainManager: &ComputeDomainManager{informer: informer, cliqueID: test.localDomain},
 				allocatable:          AllocatableDevices{deviceName: &AllocatableDevice{Channel: &ComputeDomainChannelInfo{ID: test.allocated}}},
 			}
 			result := allocationResult("request", DriverName, deviceName, nil)
 			prepared, err := state.applyComputeDomainChannelConfigHostManaged(ctx, channelConfig("cd-uid"), claimWithResults("claim-uid", result), &result)
-			if test.wantError {
-				require.ErrorContains(t, err, "is not reserved for ComputeDomain")
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
 				require.True(t, isPermanentError(err))
 				return
 			}

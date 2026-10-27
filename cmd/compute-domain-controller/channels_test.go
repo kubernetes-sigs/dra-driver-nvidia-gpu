@@ -37,7 +37,7 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 )
 
-func channelSlice(node string, ids ...int) *resourceapi.ResourceSlice {
+func channelSlice(node, fabricDomainID string, ids ...int) *resourceapi.ResourceSlice {
 	slice := &resourceapi.ResourceSlice{
 		ObjectMeta: metav1.ObjectMeta{Name: node},
 		Spec: resourceapi.ResourceSliceSpec{
@@ -50,6 +50,7 @@ func channelSlice(node string, ids ...int) *resourceapi.ResourceSlice {
 			Name: fmt.Sprintf("channel-%d", id),
 			Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
 				"type": {StringValue: ptr.To("channel")}, "id": {IntValue: ptr.To(int64(id))},
+				imex.FabricDomainIDAttribute: {StringValue: ptr.To(fabricDomainID)},
 			},
 		})
 	}
@@ -65,13 +66,13 @@ func channelManager(objects ...runtime.Object) (*WorkloadResourceClaimTemplateMa
 
 func TestHostChannelReservationLifecycle(t *testing.T) {
 	ctx := context.Background()
-	manager, client := channelManager(channelSlice("node-a", 0, 1), channelSlice("node-b", 0, 1))
+	manager, client := channelManager(channelSlice("node-a", "fabric-a", 0, 1), channelSlice("node-b", "fabric-a", 0, 1))
 	first, err := manager.reserveHostChannel(ctx, "domain-a")
 	require.NoError(t, err)
-	require.Equal(t, 0, first)
+	require.Equal(t, imex.ChannelReservation{FabricDomainID: "fabric-a", ChannelID: 0}, first)
 	second, err := manager.reserveHostChannel(ctx, "domain-b")
 	require.NoError(t, err)
-	require.Equal(t, 1, second)
+	require.Equal(t, imex.ChannelReservation{FabricDomainID: "fabric-a", ChannelID: 1}, second)
 	_, err = manager.reserveHostChannel(ctx, "domain-c")
 	require.ErrorContains(t, err, "no unreserved IMEX channel")
 
@@ -84,15 +85,28 @@ func TestHostChannelReservationLifecycle(t *testing.T) {
 	require.NoError(t, restarted.releaseHostChannel(ctx, "domain-a"))
 	id, err = restarted.reserveHostChannel(ctx, "domain-c")
 	require.NoError(t, err)
-	require.Equal(t, 0, id)
+	require.Equal(t, imex.ChannelReservation{FabricDomainID: "fabric-a", ChannelID: 0}, id)
 	registry, err := client.CoreV1().ConfigMaps("driver").Get(ctx, imex.ChannelReservationsConfigMap, metav1.GetOptions{})
 	require.NoError(t, err)
 	require.Equal(t, map[string]string{"domain-b": "1", "domain-c": "0"}, registry.Data)
+	require.JSONEq(t, `{"domain-b":"fabric-a","domain-c":"fabric-a"}`, registry.Annotations[imex.ChannelReservationDomainsAnnotation])
+}
+
+func TestHostChannelReservationReusesIDAcrossFabricDomains(t *testing.T) {
+	ctx := context.Background()
+	manager, _ := channelManager(channelSlice("node-a", "fabric-a", 0, 1), channelSlice("node-b", "fabric-b", 0, 1))
+	first, err := manager.reserveHostChannel(ctx, "domain-a")
+	require.NoError(t, err)
+	second, err := manager.reserveHostChannel(ctx, "domain-b")
+	require.NoError(t, err)
+	require.Equal(t, 0, first.ChannelID)
+	require.Equal(t, 0, second.ChannelID)
+	require.NotEqual(t, first.FabricDomainID, second.FabricDomainID)
 }
 
 func TestHostChannelReservationConflict(t *testing.T) {
 	ctx := context.Background()
-	manager, client := channelManager(channelSlice("node-a", 0, 1))
+	manager, client := channelManager(channelSlice("node-a", "fabric-a", 0, 1))
 	conflicted := false
 	client.PrependReactor("update", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		if conflicted {
@@ -105,34 +119,36 @@ func TestHostChannelReservationConflict(t *testing.T) {
 		require.True(t, ok)
 		registry := object.DeepCopy()
 		registry.Data = map[string]string{"other-domain": "0"}
+		registry.Annotations = map[string]string{imex.ChannelReservationDomainsAnnotation: `{"other-domain":"fabric-a"}`}
 		require.NoError(t, client.Tracker().Update(coreapi.SchemeGroupVersion.WithResource("configmaps"), registry, "driver"))
 		return true, nil, errors.NewConflict(schema.GroupResource{Resource: "configmaps"}, registry.Name, fmt.Errorf("concurrent reservation"))
 	})
 	id, err := manager.reserveHostChannel(ctx, "domain-a")
 	require.NoError(t, err)
 	require.True(t, conflicted)
-	require.Equal(t, 1, id)
+	require.Equal(t, 1, id.ChannelID)
 }
 
 func TestAvailableHostChannels(t *testing.T) {
 	for name, test := range map[string]struct {
 		slices    []runtime.Object
-		want      []int
+		want      map[string][]int
 		wantError bool
 	}{
-		"intersection":   {slices: []runtime.Object{channelSlice("a", 0, 1, 2), channelSlice("b", 0, 2)}, want: []int{0, 2}},
-		"no publication": {},
+		"intersection":     {slices: []runtime.Object{channelSlice("a", "fabric-a", 0, 1, 2), channelSlice("b", "fabric-a", 0, 2)}, want: map[string][]int{"fabric-a": {0, 2}}},
+		"separate domains": {slices: []runtime.Object{channelSlice("a", "fabric-a", 0, 1), channelSlice("b", "fabric-b", 0)}, want: map[string][]int{"fabric-a": {0, 1}, "fabric-b": {0}}},
+		"no publication":   {want: map[string][]int{}},
 		"incomplete publication": {slices: []runtime.Object{func() *resourceapi.ResourceSlice {
-			s := channelSlice("a", 0)
+			s := channelSlice("a", "fabric-a", 0)
 			s.Spec.Pool.ResourceSliceCount = 2
 			return s
 		}()}, wantError: true},
-		"latest generation": {slices: []runtime.Object{channelSlice("a", 0, 1), func() *resourceapi.ResourceSlice {
-			s := channelSlice("a", 0)
+		"latest generation": {slices: []runtime.Object{channelSlice("a", "fabric-a", 0, 1), func() *resourceapi.ResourceSlice {
+			s := channelSlice("a", "fabric-a", 0)
 			s.Name = "a-new"
 			s.Spec.Pool.Generation = 2
 			return s
-		}()}, want: []int{0}},
+		}()}, want: map[string][]int{"fabric-a": {0}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			manager, _ := channelManager(test.slices...)
@@ -160,7 +176,7 @@ func TestHostChannelReleaseWaitsForClaims(t *testing.T) {
 			} else {
 				claim.Spec.Devices.Config = []resourceapi.DeviceClaimConfiguration{{DeviceConfiguration: configuration}}
 			}
-			manager, client := channelManager(channelSlice("a", 0), claim)
+			manager, client := channelManager(channelSlice("a", "fabric-a", 0), claim)
 			_, err := manager.reserveHostChannel(ctx, "domain-a")
 			require.NoError(t, err)
 			require.ErrorContains(t, manager.releaseHostChannel(ctx, "domain-a"), "waiting for ResourceClaim workload/worker")
@@ -170,7 +186,7 @@ func TestHostChannelReleaseWaitsForClaims(t *testing.T) {
 			require.NoError(t, manager.releaseHostChannel(ctx, "domain-a"))
 			id, err := manager.reserveHostChannel(ctx, "domain-b")
 			require.NoError(t, err)
-			require.Zero(t, id)
+			require.Zero(t, id.ChannelID)
 		})
 	}
 }

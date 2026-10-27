@@ -25,6 +25,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 )
 
 func deviceNames(devices []resourceapi.Device) []string {
@@ -41,7 +43,7 @@ func TestComputeDomainPublishedSlices(t *testing.T) {
 	for id := range 2048 {
 		allocatable[fmt.Sprintf("channel-%d", id)] = &AllocatableDevice{Channel: &ComputeDomainChannelInfo{ID: id}}
 	}
-	publication := computeDomainPublishedSlices(allocatable, true)
+	publication := computeDomainPublishedSlices(allocatable, true, "fabric-a")
 	require.Len(t, publication, 16)
 	seen := make(map[string]bool)
 	for _, slice := range publication {
@@ -49,10 +51,11 @@ func TestComputeDomainPublishedSlices(t *testing.T) {
 		for _, device := range slice.Devices {
 			require.False(t, seen[device.Name])
 			seen[device.Name] = true
+			require.Equal(t, "fabric-a", *device.Attributes[imex.FabricDomainIDAttribute].StringValue)
 		}
 	}
 	require.Len(t, seen, 2048)
-	assert.Equal(t, publication, computeDomainPublishedSlices(allocatable, true))
+	assert.Equal(t, publication, computeDomainPublishedSlices(allocatable, true, "fabric-a"))
 }
 
 func TestComputeDomainPublishedDevices(t *testing.T) {
@@ -64,10 +67,14 @@ func TestComputeDomainPublishedDevices(t *testing.T) {
 
 	t.Run("driver-managed publishes channel 0 and the daemon device", func(t *testing.T) {
 		// Non-zero channels are always excluded (advertised from the control plane).
-		assert.Equal(t, []string{"channel-0", "daemon-0"}, deviceNames(computeDomainPublishedDevices(allocatable, false)))
+		assert.Equal(t, []string{"channel-0", "daemon-0"}, deviceNames(computeDomainPublishedDevices(allocatable, false, "")))
 	})
 
 	t.Run("host-managed omits the daemon device", func(t *testing.T) {
-		assert.Equal(t, []string{"channel-0", "channel-1"}, deviceNames(computeDomainPublishedDevices(allocatable, true)))
+		assert.Equal(t, []string{"channel-0", "channel-1"}, deviceNames(computeDomainPublishedDevices(allocatable, true, "fabric-a")))
+	})
+
+	t.Run("host-managed omits channels without a fabric domain", func(t *testing.T) {
+		assert.Empty(t, computeDomainPublishedDevices(allocatable, true, ""))
 	})
 }

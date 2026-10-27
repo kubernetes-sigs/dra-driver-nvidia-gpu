@@ -21,21 +21,46 @@ To inspect the ResourceSlices on your own cluster, see
 
 ## Device types
 
-The DRA Driver for NVIDIA GPUs publishes all devices under a single driver,
-`gpu.nvidia.com`, with one pool per node. The NVIDIA-specific `type` attribute on
-each device identifies the kind of device, and the built-in DeviceClasses select
-on it:
+The DRA Driver for NVIDIA GPUs publishes GPU devices under `gpu.nvidia.com` and
+ComputeDomain devices under `compute-domain.nvidia.com`, with one pool per
+node. The NVIDIA-specific `type` attribute identifies the kind of device, and
+the built-in DeviceClasses select on it:
 
 | `type` | DeviceClass | Device |
 |---|---|---|
 | `gpu` | `gpu.nvidia.com` | Full physical GPU |
 | `mig` | `mig.nvidia.com` | MIG slice |
 | `vfio` | `vfio.gpu.nvidia.com` | VFIO passthrough device |
+| `channel` | `compute-domain-channel.nvidia.com` | IMEX channel |
+| `daemon` | `compute-domain-daemon.nvidia.com` | Driver-managed IMEX daemon slot |
 
 The sections below show a representative `spec.devices[]` entry for each type.
 `kubectl` prints map keys alphabetically (so `type` and `uuid` appear last), the
 `#` comments are annotations rather than part of the real output, and the values
 are illustrative — confirm them on your own cluster.
+
+## Host-managed IMEX channel (type: channel)
+
+In host-managed IMEX mode, each fabric-attached node publishes every available
+channel. `fabricDomainID` is the canonical `<clusterUUID>.<cliqueID>` identity
+reported by NVML. The controller uses the tuple `(fabricDomainID, id)` as the
+reservation key, so the same channel number can be reused in different physical
+fabric domains.
+
+```yaml
+- attributes:
+    fabricDomainID:
+      string: a1b2c3d4-e5f6-7890-abcd-ef1234567890.0
+    id:
+      int: 0
+    type:
+      string: channel
+  name: channel-0
+```
+
+Non-fabric nodes do not publish host-managed channel devices. Generated
+ComputeDomain claim templates select both the reserved `fabricDomainID` and
+channel `id`.
 
 ## Full GPU (type: gpu)
 
