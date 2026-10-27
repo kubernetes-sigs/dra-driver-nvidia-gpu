@@ -137,7 +137,21 @@ DOCKER_ENVS = \
 	--env TEST_DRA_LIST_TYPE_ATTRIBUTES=$(TEST_DRA_LIST_TYPE_ATTRIBUTES) \
 	--env NVMM_PATH=$(NVMM_PATH) \
 	--env TEST_ALT_PROC_DEVICES=$(TEST_ALT_PROC_DEVICES) \
-	--env MOCK_NVML=$(MOCK_NVML)
+	--env MOCK_NVML=$(MOCK_NVML) \
+	--env TEST_CD_MODE=$(TEST_CD_MODE) \
+	--env TEST_CD_IMAGE=$(TEST_CD_IMAGE) \
+	--env TEST_CD_READY_TIMEOUT=$(TEST_CD_READY_TIMEOUT) \
+	--env TEST_CD_CLEANUP_TIMEOUT=$(TEST_CD_CLEANUP_TIMEOUT) \
+	--env TEST_CD_STUCK_TIMEOUT=$(TEST_CD_STUCK_TIMEOUT) \
+	--env TEST_CD_CHURN_DURATION=$(TEST_CD_CHURN_DURATION) \
+	--env TEST_CD_CHURN_WORKERS=$(TEST_CD_CHURN_WORKERS) \
+	--env TEST_CD_CHURN_NODES_PER_CD=$(TEST_CD_CHURN_NODES_PER_CD) \
+	--env TEST_CD_CHURN_MIN_LIFETIME=$(TEST_CD_CHURN_MIN_LIFETIME) \
+	--env TEST_CD_CHURN_MAX_LIFETIME=$(TEST_CD_CHURN_MAX_LIFETIME) \
+	--env TEST_CD_FORCE_DELETE_PERCENT=$(TEST_CD_FORCE_DELETE_PERCENT) \
+	--env TEST_CD_CHAOS=$(TEST_CD_CHAOS) \
+	--env TEST_CD_CHAOS_INTERVAL=$(TEST_CD_CHAOS_INTERVAL) \
+	--env TEST_CD_CHURN_SEED=$(TEST_CD_CHURN_SEED)
 
 DOCKER_UID := $(shell id -u)
 DOCKER_GID := $(shell id -g)
@@ -199,7 +213,7 @@ runner-image:
 # suite/file 'setup' in bats, but we'd lose output on success). During dev, you
 # may want to add --show-output-of-passing-tests (and read bats docs for other
 # cmdline args).
-.PHONY: tests-gpu tests-gpu-single tests-gpu-a10 tests-gpu-dynmig tests-gpu-dynmig-no-mig-mode-toggle tests-cd
+.PHONY: tests-gpu tests-gpu-single tests-gpu-a10 tests-gpu-dynmig tests-gpu-dynmig-no-mig-mode-toggle tests-cd tests-cd-modes tests-cd-mode
 
 # Single-GPU-safe subset. Suitable for CI environments with one GPU and no
 # GPU Operator (e.g., Lambda Cloud). Excludes test_basics.bats (expects GPU
@@ -277,6 +291,35 @@ tests-cd: runner-image
 		tests/bats/test_cd_failover.bats \
 		tests/bats/test_cd_updowngrade.bats \
 		tests/bats/test_cd_leader_election.bats)
+
+# Driver-managed IMEX modes covered by tests-cd-modes. Host-managed IMEX is
+# not covered.
+TEST_CD_MODES ?= per-cd per-cd-reservations per-cd-channel static
+
+# Run the ComputeDomain regression and churn tests once per IMEX mode, with a
+# fresh driver installation each. Continues with the next mode on failure.
+tests-cd-modes: runner-image
+	@failed=""; \
+	for mode in $(TEST_CD_MODES); do \
+	  echo "--- ComputeDomain mode $${mode} ---"; \
+	  $(MAKE) -f tests/bats/Makefile tests-cd-mode TEST_CD_MODE=$${mode} || failed="$${failed} $${mode}"; \
+	done; \
+	if [ -n "$${failed}" ]; then echo "failed modes:$${failed}"; exit 1; fi; \
+	echo "all modes passed: $(TEST_CD_MODES)"
+
+# Tests that do not apply to a mode are left out rather than skipped.
+CD_MODE_TAGS_per-cd := !cd-static,!cd-reservations
+CD_MODE_TAGS_per-cd-reservations := !cd-static
+CD_MODE_TAGS_per-cd-channel := !cd-static
+CD_MODE_TAGS_static := !cd-per-cd
+CD_MODE_FILTER = $(if $(CD_MODE_TAGS_$(TEST_CD_MODE)),--filter-tags '$(CD_MODE_TAGS_$(TEST_CD_MODE))')
+
+# Run the ComputeDomain regression and churn tests in TEST_CD_MODE.
+tests-cd-mode: runner-image
+	$(call RUN_BATS, \
+		$(CD_MODE_FILTER) \
+		tests/bats/test_cd_modes.bats \
+		tests/bats/test_cd_churn.bats)
 
 # Run the complete test suite (the reference!)
 tests: runner-image

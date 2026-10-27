@@ -81,6 +81,49 @@ kubectl wait --for=delete pods -l 'env=batssuite,test=stress-shared' \
 kubectl delete resourceclaimtemplate -l env=batssuite
 kubectl delete resourceclaim -l env=batssuite
 
+# The controller removes the finalizers of these, so wait before uninstalling.
+timeout -v 300 kubectl delete computedomains -A --all --ignore-not-found
+
+# Static modes delete their ComputeDomainDaemonSet when done. One left by an
+# aborted run keeps its finalizer, as the chart above runs without the gate.
+# Its static daemons are removed below.
+for _CDDS in $(kubectl get computedomaindaemonsets -o name 2>/dev/null); do
+  timeout -v 30 kubectl patch "${_CDDS}" --type=merge -p '{"metadata":{"finalizers":null}}'
+done
+timeout -v 30 kubectl delete computedomaindaemonsets --all --ignore-not-found
+
+# Daemon objects in the driver namespace are not garbage collected, so remove
+# those of ComputeDomains and ComputeDomainDaemonSets that are gone, also
+# their finalizers, which only a controller with the right gate removes.
+_LIVE=$( (kubectl get computedomains -A -o json; kubectl get computedomaindaemonsets -o json) 2>/dev/null | \
+    jq -sc '[.[].items[].metadata.uid]')
+_DEAD() {
+  jq -r --argjson live "${_LIVE}" --arg key "$1" '.items[]
+    | select(.metadata.labels[$key] as $u | $live | any(. == $u) | not)
+    | "\(.kind)/\(.metadata.name)"'
+}
+for _KEY in resource.nvidia.com/computeDomain resource.nvidia.com/computeDomainDaemonSet; do
+  for _OBJ in $(kubectl get daemonsets,resourceclaimtemplates -n dra-driver-nvidia-gpu -l "${_KEY}" -o json | _DEAD "${_KEY}"); do
+    echo "removing ${_OBJ}, its owner is gone"
+    timeout -v 30 kubectl patch -n dra-driver-nvidia-gpu "${_OBJ}" --type=merge -p '{"metadata":{"finalizers":null}}'
+    timeout -v 60 kubectl delete -n dra-driver-nvidia-gpu "${_OBJ}" --ignore-not-found
+  done
+done
+_KEY=resource.nvidia.com/computeDomain
+for _OBJ in $(kubectl get devicetaintrules -l "${_KEY}" -o json 2>/dev/null | _DEAD "${_KEY}"); do
+  timeout -v 30 kubectl delete "${_OBJ}" --ignore-not-found
+done
+for _NODE in $(kubectl get nodes -l "${_KEY}" -o json | _DEAD "${_KEY}"); do
+  timeout -v 30 kubectl label "${_NODE}" "${_KEY}-"
+done
+for _CLIQUE in $(kubectl get computedomaincliques -A -o json 2>/dev/null | \
+    jq -r --argjson live "${_LIVE}" '.items[]
+      | select(.metadata.name | split(".")[0] as $u | $live | any(. == $u) | not)
+      | "\(.metadata.namespace)/\(.metadata.name)"'); do
+  timeout -v 30 kubectl patch computedomainclique -n "${_CLIQUE%%/*}" "${_CLIQUE#*/}" --type=merge -p '{"metadata":{"finalizers":null}}'
+  timeout -v 30 kubectl delete computedomainclique -n "${_CLIQUE%%/*}" "${_CLIQUE#*/}" --ignore-not-found
+done
+
 # Delete any previous remainder of `clean-state-dirs-all-nodes.sh` invocation.
 kubectl delete pods privpod-rm-plugindirs 2> /dev/null
 
@@ -96,7 +139,21 @@ kubectl wait \
 # that. This might time out in case workload wasn't cleaned up properly. If that
 # happens, the next test suite invocation will have failures like "create not
 # allowed while custom resource definition is terminating".
-timeout -v 10 kubectl delete crds computedomains.resource.nvidia.com || echo "CRD deletion failed"
+# Objects whose finalizers the controller did not remove would keep a CRD,
+# and with it the field owner of the `kubectl apply` above, which makes the
+# next `helm install` fail with a conflict on .spec.versions.
+for _KIND in computedomains computedomaincliques computedomaindaemonsets; do
+  for _OBJ in $(kubectl get "${_KIND}.resource.nvidia.com" -A -o json 2>/dev/null | \
+      jq -r '.items[] | "\(.metadata.namespace // "")/\(.metadata.name)"'); do
+    _NS="${_OBJ%%/*}"
+    timeout -v 30 kubectl patch "${_KIND}.resource.nvidia.com" "${_OBJ#*/}" \
+        ${_NS:+-n "${_NS}"} --type=merge -p '{"metadata":{"finalizers":null}}'
+  done
+done
+timeout -v 120 kubectl delete crds --ignore-not-found \
+    computedomains.resource.nvidia.com \
+    computedomaincliques.resource.nvidia.com \
+    computedomaindaemonsets.resource.nvidia.com || echo "CRD deletion failed"
 
 # Remove kubelet plugin state directories from all nodes (critical part of
 # cleanup, fail hard if this does not succeed).
