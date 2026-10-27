@@ -19,11 +19,13 @@ package main
 import (
 	"testing"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	"k8s.io/utils/ptr"
 
-	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
 func newTestGpuInfo(numaNodeAttr *deviceattribute.DeviceAttribute) *GpuInfo {
@@ -258,4 +260,87 @@ func TestGpuInfoAttributesAddressingMode(t *testing.T) {
 		require.NotNil(t, attr.StringValue)
 		require.Equal(t, "hmm", *attr.StringValue)
 	})
+}
+
+func TestSupportsFabricManagerPartitioning(t *testing.T) {
+	tests := map[string]struct {
+		gpus map[string]*GpuInfo
+		want bool
+	}{
+		"no GPUs": {
+			gpus: nil,
+			want: false,
+		},
+		"Ampere": {
+			gpus: map[string]*GpuInfo{"gpu": {architectureID: nvml.DEVICE_ARCH_AMPERE}},
+			want: false,
+		},
+		"Hopper": {
+			gpus: map[string]*GpuInfo{"gpu": {architectureID: nvml.DEVICE_ARCH_HOPPER}},
+			want: true,
+		},
+		"newer than Hopper": {
+			gpus: map[string]*GpuInfo{"gpu": {architectureID: nvml.DEVICE_ARCH_BLACKWELL}},
+			want: true,
+		},
+		"mixed Hopper and Ampere": {
+			gpus: map[string]*GpuInfo{
+				"hopper": {architectureID: nvml.DEVICE_ARCH_HOPPER},
+				"ampere": {architectureID: nvml.DEVICE_ARCH_AMPERE},
+			},
+			want: false,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			l := &deviceLib{gpuInfosByUUID: tc.gpus}
+			require.Equal(t, tc.want, l.supportsFabricManagerPartitioning())
+		})
+	}
+}
+
+func TestNewFabricManagerTreatsFeatureAsDisabledOnAmpere(t *testing.T) {
+	oldGate := featuregates.Enabled(featuregates.FabricManagerPartitioning)
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): true}))
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): oldGate}))
+	})
+
+	nvdevlib := &deviceLib{
+		gpuInfosByUUID: map[string]*GpuInfo{"gpu": {architectureID: nvml.DEVICE_ARCH_AMPERE}},
+	}
+	manager, err := newFabricManager(nvdevlib, nil)
+	require.NoError(t, err)
+	require.Nil(t, manager)
+}
+
+func TestFabricManagerAttributesRequireHopperOrNewer(t *testing.T) {
+	oldGate := featuregates.Enabled(featuregates.FabricManagerPartitioning)
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): true}))
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): oldGate}))
+	})
+
+	for name, tc := range map[string]struct {
+		architecture nvml.DeviceArchitecture
+		want         bool
+	}{
+		"Ampere":    {architecture: nvml.DEVICE_ARCH_AMPERE, want: false},
+		"Hopper":    {architecture: nvml.DEVICE_ARCH_HOPPER, want: true},
+		"Blackwell": {architecture: nvml.DEVICE_ARCH_BLACKWELL, want: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			gpu := newTestGpuInfo(nil)
+			gpu.architectureID = tc.architecture
+			gpu.gpuModuleID = 1
+			gpu.partitionsBySize = map[int]int{1: 7}
+
+			attrs := gpu.Attributes()
+			_, hasModuleID := attrs["gpuModuleID"]
+			_, hasPartition := attrs["partition1"]
+			require.Equal(t, tc.want, hasModuleID)
+			require.Equal(t, tc.want, hasPartition)
+		})
+	}
 }

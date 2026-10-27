@@ -81,9 +81,10 @@ const (
 	// set exactly matches the claim's allocated physical GPUs; a non-matching
 	// set fails Prepare. ResourceClaims should constrain allocation with
 	// matchAttribute on gpu.nvidia.com/partitionN. Requires Fabric Manager
-	// running with FABRIC_MODE=1. Independent of PassthroughSupport: with both
-	// gates on, full-GPU and VFIO claims are partitioned; with only this gate
-	// on, only full-GPU claims are.
+	// running with FABRIC_MODE=1 and Hopper or newer GPUs. On older GPUs the
+	// gate is treated as disabled. Independent of PassthroughSupport: with
+	// both gates on, full-GPU and VFIO claims are partitioned; with only this
+	// gate on, only full-GPU claims are.
 	FabricManagerPartitioning featuregate.Feature = "FabricManagerPartitioning"
 
 	// HostManagedIMEXDaemon gates whether the imex deployment mode

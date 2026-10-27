@@ -41,6 +41,7 @@ type GpuInfo struct {
 	productName           string
 	brand                 string
 	architecture          string
+	architectureID        nvml.DeviceArchitecture
 	cudaComputeCapability string
 	driverVersion         string
 	cudaDriverVersion     string
@@ -202,11 +203,17 @@ func (d *GpuInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.DeviceA
 		}
 	}
 
-	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
+	if featuregates.Enabled(featuregates.FabricManagerPartitioning) && d.supportsFabricManagerPartitioning() {
 		d.addFabricManagerAttributes(attrs)
 	}
 
 	return attrs
+}
+
+// supportsFabricManagerPartitioning reports whether this GPU meets the minimum
+// architecture requirement for Fabric Manager partitioning.
+func (d *GpuInfo) supportsFabricManagerPartitioning() bool {
+	return d != nil && d.architectureID >= nvml.DEVICE_ARCH_HOPPER
 }
 
 // addFabricManagerAttributes publishes the NVML-reported gpuModuleID and
@@ -308,7 +315,7 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
 		if d.parent == nil {
 			klog.V(4).Infof("No parent GPU for %s; skipping Fabric Manager attributes", d.CanonicalName())
-		} else {
+		} else if d.parent.supportsFabricManagerPartitioning() {
 			d.parent.addFabricManagerAttributes(device.Attributes)
 		}
 	}
