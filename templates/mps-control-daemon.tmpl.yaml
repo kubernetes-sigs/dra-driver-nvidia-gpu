@@ -39,21 +39,23 @@ spec:
         args:
         - |-
           set -e
-          rm -f /driver-root/var/log/nvidia-mps/startup.log
+          rm -f {{ .MpsLogMountPath }}/startup.log
 
           if [ -x /driver-root/bin/sh ] || [ -x /driver-root/usr/bin/sh ]; then
             # Use chroot to avoid library mismatch between container and host
             # when driver root is / (default value) or /run/nvidia/driver (default location for driver installation by GPU Operator)
             RUN="chroot /driver-root sh -c"
           else
-            # No shell in driver root (e.g. GKE COS): run directly with PATH/LD_LIBRARY_PATH
+            # No shell in driver root (e.g. GKE COS, Talos Linux): run directly with PATH/LD_LIBRARY_PATH
             export PATH="/driver-root/usr/bin:/driver-root/bin:/driver-root/usr/local/bin:$PATH"
-            export LD_LIBRARY_PATH="/driver-root/lib64:/driver-root/lib:/driver-root/usr/lib64:/driver-root/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            # The container's own libc directory comes first: a driver root may ship its own glibc
+            # (e.g. Talos Linux in /usr/local/lib64), which must not be mixed with the container's loader.
+            export LD_LIBRARY_PATH="/lib/$(uname -m)-linux-gnu:/driver-root/lib64:/driver-root/lib:/driver-root/usr/lib64:/driver-root/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
             RUN="sh -c"
 
             # Point MPS to mounted paths (not set in Deployment spec as for chroot approach /driver-root/... paths don't exist inside chroot)
-            export CUDA_MPS_PIPE_DIRECTORY=/driver-root/tmp/nvidia-mps
-            export CUDA_MPS_LOG_DIRECTORY=/driver-root/var/log/nvidia-mps
+            export CUDA_MPS_PIPE_DIRECTORY={{ .MpsPipeMountPath }}
+            export CUDA_MPS_LOG_DIRECTORY={{ .MpsLogMountPath }}
           fi
 
           $RUN "nvidia-cuda-mps-control -d{{ if .MultiUser }} -M{{ end }}"
@@ -64,14 +66,14 @@ spec:
           $RUN "echo set_default_device_pinned_mem_limit {{ $id }} {{ $limit }} | nvidia-cuda-mps-control"
           {{- end}}
 
-          echo "startup complete" > /driver-root/var/log/nvidia-mps/startup.log
+          echo "startup complete" > {{ .MpsLogMountPath }}/startup.log
 
-          tail -n +1 -f /driver-root/var/log/nvidia-mps/control.log
+          tail -n +1 -f {{ .MpsLogMountPath }}/control.log
         startupProbe:
           exec:
             command:
             - cat
-            - /driver-root/var/log/nvidia-mps/startup.log
+            - {{ .MpsLogMountPath }}/startup.log
           initialDelaySeconds: 1
           periodSeconds: 1
         env:
@@ -88,9 +90,9 @@ spec:
         - name: mps-shm-directory
           mountPath: {{ .MpsShmMountPath }}
         - name: mps-pipe-directory
-          mountPath: /driver-root/tmp/nvidia-mps
+          mountPath: {{ .MpsPipeMountPath }}
         - name: mps-log-directory
-          mountPath: /driver-root/var/log/nvidia-mps
+          mountPath: {{ .MpsLogMountPath }}
       volumes:
       - name: driver-root
         hostPath:
