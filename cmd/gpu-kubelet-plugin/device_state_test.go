@@ -753,6 +753,87 @@ func TestGetPreparedMigDevice(t *testing.T) {
 	require.Nil(t, state.getPreparedMigDevice(&Checkpoint{}, "mig-0"))
 }
 
+func TestDeleteMigDevIfExistsAndNotUsedByCompletedClaim(t *testing.T) {
+	enableDynamicMIGForTest(t)
+
+	const rolledBack = "gpu-0-mig-3g20gb-9-4"
+
+	newState := func() (*DeviceState, *[]string) {
+		var events []string
+		gi := &fakeNVMLGpuInstance{
+			info:   nvml.GpuInstanceInfo{Id: 3, ProfileId: 9, Placement: nvml.GpuInstancePlacement{Start: 4, Size: 3}},
+			ci:     &fakeNVMLComputeInstance{events: &events},
+			events: &events,
+		}
+		gpu := &fakeNVMLGPU{migDevice: &fakeNVMLMigDevice{giID: 3}, gi: gi, events: &events}
+		parent := &GpuInfo{UUID: "GPU-0", minor: 0, pciBusID: "0000:01:00.0"}
+		state := &DeviceState{nvdevlib: &deviceLib{
+			gpuInfosByUUID:  map[string]*GpuInfo{parent.UUID: parent},
+			devhandleByUUID: map[string]nvml.Device{parent.UUID: gpu},
+		}}
+		return state, &events
+	}
+
+	completedWith := func(results ...resourceapi.DeviceRequestAllocationResult) PreparedClaimsByUID {
+		return PreparedClaimsByUID{"completed": {
+			CheckpointState: ClaimCheckpointStatePrepareCompleted,
+			Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{Results: results},
+			}},
+		}}
+	}
+	ours := func(device string) resourceapi.DeviceRequestAllocationResult {
+		return resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: device}
+	}
+
+	tests := map[string]struct {
+		claims       PreparedClaimsByUID
+		wantTeardown bool
+	}{
+		"completed claim names the same device differently": {
+			claims: completedWith(ours("gpu-1"), ours("gpu-0-mig-3g40gb-9-4")),
+		},
+		"no completed claim": {
+			wantTeardown: true,
+		},
+		"completed claim holds another placement": {
+			claims:       completedWith(ours("gpu-0-mig-3g40gb-9-0")),
+			wantTeardown: true,
+		},
+		"completed claim holds another GI profile": {
+			claims:       completedWith(ours("gpu-0-mig-3g40gb-14-4")),
+			wantTeardown: true,
+		},
+		"completed claim holds the same placement on another GPU": {
+			claims:       completedWith(ours("gpu-1-mig-3g40gb-9-4")),
+			wantTeardown: true,
+		},
+		"another driver's result parses to the same device": {
+			claims: completedWith(ours("gpu-1"),
+				resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: "gpu-0-mig-foreign-9-4"}),
+			wantTeardown: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			state, events := newState()
+			if !tc.wantTeardown {
+				// Keeping must not need NVML; any lookup fails on an empty lib.
+				state.nvdevlib = &deviceLib{}
+			}
+
+			require.NoError(t, state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(rolledBack, tc.claims))
+			if tc.wantTeardown {
+				require.Contains(t, *events, "destroy-gi")
+			}
+		})
+	}
+
+	// A full GPU is left alone; an empty device lib fails any lookup.
+	require.NoError(t, (&DeviceState{nvdevlib: &deviceLib{}}).deleteMigDevIfExistsAndNotUsedByCompletedClaim("gpu-0", nil))
+}
+
 func TestPreparedClaimDeviceHasAdminAccess(t *testing.T) {
 	claim := &PreparedClaim{
 		Status: resourceapi.ResourceClaimStatus{
@@ -1046,10 +1127,8 @@ func TestCheckpointedClaimThatCannotBeAccountedFor(t *testing.T) {
 		return PreparedClaimsByUID{"completed": claim}
 	}
 
-	// The device under test sits on GPU-0, whose parent resolves by PCI bus ID
-	// as well as by minor. The UUID that reaches NVML is then the evidence for
-	// how far the scan got, and it is a specific one.
-	target := &MigSpecTuple{ParentMinor: 0, ParentPCIBusID: "0000:01:00.0", ProfileID: 19}
+	// The device under test sits on GPU-0. The UUID that reaches NVML is then
+	// the evidence for how far the scan got, and it is a specific one.
 	lookingUp := func() (*DeviceState, *mockNVMLLibrary) {
 		nvmllib := &mockNVMLLibrary{deviceGetHandleByUUIDFunc: func(string) (nvml.Device, nvml.Return) {
 			return nil, nvml.ERROR_NOT_FOUND
@@ -1080,7 +1159,7 @@ func TestCheckpointedClaimThatCannotBeAccountedFor(t *testing.T) {
 	t.Run("the device stays when the claim holding it cannot be read", func(t *testing.T) {
 		state, nvmllib := lookingUp()
 
-		err := state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(target, owned, completed(PreparedClaim{}))
+		err := state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(owned, completed(PreparedClaim{}))
 
 		require.NoError(t, err)
 		require.Empty(t, nvmllib.deviceGetHandleByUUIDArgs, "teardown MUST NOT be attempted")
@@ -1090,7 +1169,7 @@ func TestCheckpointedClaimThatCannotBeAccountedFor(t *testing.T) {
 		state, nvmllib := lookingUp()
 
 		err := state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(
-			target, owned, completed(PreparedClaim{PreparedDevices: preparedWith(owned)}))
+			owned, completed(PreparedClaim{PreparedDevices: preparedWith(owned)}))
 
 		require.NoError(t, err)
 		require.Empty(t, nvmllib.deviceGetHandleByUUIDArgs, "the device is in use, teardown MUST NOT be attempted")
@@ -1102,7 +1181,7 @@ func TestCheckpointedClaimThatCannotBeAccountedFor(t *testing.T) {
 		state, nvmllib := lookingUp()
 
 		err := state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(
-			target, owned, completed(PreparedClaim{PreparedDevices: preparedWith("gpu-1-mig-1g10gb-19-0")}))
+			owned, completed(PreparedClaim{PreparedDevices: preparedWith("gpu-1-mig-1g10gb-19-0")}))
 
 		require.Error(t, err, "the lookup is attempted and the stubbed NVML refuses it")
 		require.Equal(t, []string{"GPU-0"}, nvmllib.deviceGetHandleByUUIDArgs, "the parent of the device under test")

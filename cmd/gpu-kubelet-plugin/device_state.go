@@ -757,17 +757,7 @@ func (s *DeviceState) rollbackPartiallyPreparedMIGDevices(ctx context.Context, c
 			continue
 		}
 		devname := r.Device
-		ms, err := NewMigSpecTupleFromCanonicalName(devname)
-		if err != nil {
-			// This may be a regular, full GPU -- in which case there's nothing
-			// to do. To be sure that we detect parser errors, log that error
-			// though.
-			klog.V(6).Infof("Device name %s failed NewMigSpecTupleFromCanonicalName() parsing (assume this is not a MIG device): %s", devname, err)
-			continue
-		}
-
-		klog.V(1).Infof("Device %s is a MIG device, DynamicMIG mode: deleteMigDevIfExistsAndNotUsedByCompletedClaim()", devname)
-		if err := s.deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms, devname, completedClaims); err != nil {
+		if err := s.deleteMigDevIfExistsAndNotUsedByCompletedClaim(devname, completedClaims); err != nil {
 			return fmt.Errorf("failed to delete unused MIG device %s (deleteMigDevIfExistsAndNotUsedByCompletedClaim): %w", devname, err)
 		}
 	}
@@ -1977,16 +1967,30 @@ func preparedClaimDeviceHasAdminAccess(claim *PreparedClaim, deviceName DeviceNa
 }
 
 // Make this best-effort for now (do not return an error, but log details).
-func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpecTuple, dname DeviceName, completelyPreparedClaims PreparedClaimsByUID) error {
+func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(dname DeviceName, completelyPreparedClaims PreparedClaimsByUID) error {
+	ms, err := NewMigSpecTupleFromCanonicalName(dname)
+	if err != nil {
+		// This may be a regular, full GPU -- in which case there's nothing
+		// to do. To be sure that we detect parser errors, log that error
+		// though.
+		klog.V(6).Infof("Device name %s failed NewMigSpecTupleFromCanonicalName() parsing (assume this is not a MIG device): %s", dname, err)
+		return nil
+	}
+	klog.V(1).Infof("Device %s is a MIG device, DynamicMIG mode: deleteMigDevIfExistsAndNotUsedByCompletedClaim()", dname)
+
 	for uid, claim := range completelyPreparedClaims {
 		names, ok := claim.GetHeldDevices()
 		if !ok {
 			klog.Warningf("Keep device %s: cannot tell which devices claim %s holds", dname, PreparedClaimToString(&claim, uid))
 			return nil
 		}
-		if slices.Contains(names, dname) {
-			klog.V(1).Infof("Device %s is in use by completely prepared claim %s", dname, PreparedClaimToString(&claim, uid))
-			return nil
+		for _, name := range names {
+			// Compare parsed names. The parser ignores the profile segment, so
+			// two names can mean the device FindMigDevBySpec() looks up below.
+			if held, err := NewMigSpecTupleFromCanonicalName(name); err == nil && ms.sameDevice(held) {
+				klog.V(1).Infof("Device %s is in use by completely prepared claim %s as %s", dname, PreparedClaimToString(&claim, uid), name)
+				return nil
+			}
 		}
 	}
 
