@@ -1423,8 +1423,7 @@ func (l deviceLib) inspectMigProfilesAndPlacements(gpuInfo *GpuInfo, device nvde
 func (l deviceLib) FindMigDevBySpec(ms *MigSpecTuple) (*MigLiveTuple, error) {
 	var parentUUID string
 	parentPCIBusID := ms.ParentPCIBusID
-	// This may be unset if the mig spec was constructed from the
-	// allocated device name.
+	// Only a tuple parsed from a device name lacks it; no caller passes one.
 	if ms.ParentPCIBusID == "" {
 		gpuInfo, err := l.getGpuInfoByMinor(ms.ParentMinor)
 		if err != nil {

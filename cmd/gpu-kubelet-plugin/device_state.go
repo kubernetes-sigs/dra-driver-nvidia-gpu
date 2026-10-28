@@ -792,17 +792,7 @@ func (s *DeviceState) rollbackPartiallyPreparedMIGDevices(ctx context.Context, c
 			continue
 		}
 		devname := r.Device
-		ms, err := NewMigSpecTupleFromCanonicalName(devname)
-		if err != nil {
-			// This may be a regular, full GPU -- in which case there's nothing
-			// to do. To be sure that we detect parser errors, log that error
-			// though.
-			klog.V(6).Infof("Device name %s failed NewMigSpecTupleFromCanonicalName() parsing (assume this is not a MIG device): %s", devname, err)
-			continue
-		}
-
-		klog.V(1).Infof("Device %s is a MIG device, DynamicMIG mode: deleteMigDevIfExistsAndNotUsedByCompletedClaim()", devname)
-		if err := s.deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms, devname, completedClaims); err != nil {
+		if err := s.deleteMigDevIfExistsAndNotUsedByCompletedClaim(devname, completedClaims); err != nil {
 			return fmt.Errorf("failed to delete unused MIG device %s (deleteMigDevIfExistsAndNotUsedByCompletedClaim): %w", devname, err)
 		}
 	}
@@ -2042,18 +2032,45 @@ func preparedClaimDeviceHasAdminAccess(claim *PreparedClaim, deviceName DeviceNa
 	return false
 }
 
-// Make this best-effort for now (do not return an error, but log details).
-func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpecTuple, dname DeviceName, completelyPreparedClaims PreparedClaimsByUID) error {
+func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(dname DeviceName, completelyPreparedClaims PreparedClaimsByUID) error {
+	device := s.perGPUAllocatable.GetAllocatableDevice(dname)
+	if device == nil {
+		// An error would fail every retry while the name is in the checkpoint.
+		klog.V(4).Infof("Allocatable not found for device %q, nothing to tear down", dname)
+		return nil
+	}
+	if device.Type() != MigDynamicDeviceType {
+		klog.V(6).Infof("Device %s is not a dynamic MIG device, nothing to tear down", dname)
+		return nil
+	}
+	ms := device.MigDynamic.Tuple()
+	klog.V(6).Infof("Device %s is a MIG device, DynamicMIG mode: check whether a completely prepared claim uses it", dname)
+
+	var notFound error
 	for uid, claim := range completelyPreparedClaims {
 		names, ok := claim.GetHeldDevices()
 		if !ok {
 			klog.Warningf("Keep device %s: cannot tell which devices claim %s holds", dname, PreparedClaimToString(&claim, uid))
 			return nil
 		}
-		if slices.Contains(names, dname) {
-			klog.V(1).Infof("Device %s is in use by completely prepared claim %s", dname, PreparedClaimToString(&claim, uid))
-			return nil
+		for _, name := range names {
+			held := s.perGPUAllocatable.GetAllocatableDevice(name)
+			if held == nil {
+				// Report it after the scan, so a known holder wins in any order.
+				if notFound == nil {
+					notFound = fmt.Errorf("allocatable not found for device %q of completely prepared claim %s", name, PreparedClaimToString(&claim, uid))
+				}
+				continue
+			}
+			if held.Type() == MigDynamicDeviceType && *held.MigDynamic.Tuple() == *ms {
+				klog.V(1).Infof("Device %s is in use by completely prepared claim %s", dname, PreparedClaimToString(&claim, uid))
+				return nil
+			}
 		}
+	}
+	// An unknown name could encode this spec.
+	if notFound != nil {
+		return notFound
 	}
 
 	klog.V(1).Infof("Device '%s' is not in use by any completely prepared claim, find corresponding actual MIG device", dname)
