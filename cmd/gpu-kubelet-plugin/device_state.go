@@ -1914,8 +1914,13 @@ func preparedClaimDeviceHasAdminAccess(claim *PreparedClaim, deviceName DeviceNa
 func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpecTuple, dname DeviceName, completelyPreparedClaims PreparedClaimsByUID) error {
 	for uid, claim := range completelyPreparedClaims {
 		for _, res := range claim.Status.Allocation.Devices.Results {
-			if res.Device == dname {
-				klog.V(1).Infof("Device %s is in use by completely prepared claim %s", dname, PreparedClaimToString(&claim, uid))
+			if res.Driver != DriverName {
+				continue
+			}
+			// Compare parsed names. The parser ignores the profile segment, so
+			// two names can mean the device FindMigDevBySpec() looks up below.
+			if other, err := NewMigSpecTupleFromCanonicalName(res.Device); err == nil && ms.sameDevice(other) {
+				klog.V(1).Infof("Device %s is in use by completely prepared claim %s as %s", dname, PreparedClaimToString(&claim, uid), res.Device)
 				return nil
 			}
 		}
