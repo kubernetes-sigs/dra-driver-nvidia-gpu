@@ -82,3 +82,75 @@ func TestValidateDomainID(t *testing.T) {
 		})
 	}
 }
+
+func TestComputeDomainChannelConfigValidate(t *testing.T) {
+	const validDomainID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+	testCases := []struct {
+		description    string
+		domainID       string
+		allocationMode string
+		expectError    bool
+	}{
+		{
+			description:    "empty allocationMode",
+			domainID:       validDomainID,
+			allocationMode: "",
+		},
+		{
+			description:    "Single allocationMode",
+			domainID:       validDomainID,
+			allocationMode: configapi.ComputeDomainChannelAllocationModeSingle,
+		},
+		{
+			description:    "All allocationMode",
+			domainID:       validDomainID,
+			allocationMode: configapi.ComputeDomainChannelAllocationModeAll,
+		},
+		{
+			description:    "lowercase all allocationMode",
+			domainID:       validDomainID,
+			allocationMode: "all",
+			expectError:    true,
+		},
+		{
+			description:    "lowercase single allocationMode",
+			domainID:       validDomainID,
+			allocationMode: "single",
+			expectError:    true,
+		},
+		{
+			description:    "uppercase ALL allocationMode",
+			domainID:       validDomainID,
+			allocationMode: "ALL",
+			expectError:    true,
+		},
+		{
+			description:    "unknown allocationMode",
+			domainID:       validDomainID,
+			allocationMode: "foo",
+			expectError:    true,
+		},
+		{
+			description:    "invalid domainID with valid allocationMode",
+			domainID:       "",
+			allocationMode: configapi.ComputeDomainChannelAllocationModeAll,
+			expectError:    true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			config := configapi.DefaultComputeDomainChannelConfig()
+			config.DomainID = tc.domainID
+			config.AllocationMode = tc.allocationMode
+
+			err := config.Validate()
+			if tc.expectError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
