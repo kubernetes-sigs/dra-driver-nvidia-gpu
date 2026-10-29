@@ -503,10 +503,36 @@ func TestValidateFeatureGates(t *testing.T) {
 			description: "should be valid when only PassthroughSupport is enabled",
 		},
 		{
+			name:         "VGPUSupport enabled with DynamicMIG",
+			fgMap:        map[featuregate.Feature]bool{VGPUSupport: true, DynamicMIG: true},
+			expectError:  true,
+			errorMessage: "feature gate VGPUSupport is currently mutually exclusive with DynamicMIG",
+			description:  "should fail when both VGPUSupport and DynamicMIG are enabled (unified CounterSet not implemented yet)",
+		},
+		{
+			name:         "VGPUSupport enabled with PassthroughSupport",
+			fgMap:        map[featuregate.Feature]bool{VGPUSupport: true, PassthroughSupport: true},
+			expectError:  true,
+			errorMessage: "feature gate VGPUSupport is currently mutually exclusive with PassthroughSupport",
+			description:  "should fail when both VGPUSupport and PassthroughSupport are enabled",
+		},
+		{
+			name:        "Only VGPUSupport enabled",
+			fgMap:       map[featuregate.Feature]bool{VGPUSupport: true, DynamicMIG: false, PassthroughSupport: false},
+			expectError: false,
+			description: "should be valid when only VGPUSupport is enabled",
+		},
+		{
+			name:        "VGPUSupport enabled with DRADeviceCompatibilityGroups",
+			fgMap:       map[featuregate.Feature]bool{VGPUSupport: true, DRADeviceCompatibilityGroups: true},
+			expectError: false,
+			description: "should allow publishing vGPU partitions with compatibility groups",
+		},
+		{
 			name:         "DeviceMetadata enabled without PassthroughSupport",
 			fgMap:        map[featuregate.Feature]bool{DeviceMetadata: true, PassthroughSupport: false},
 			expectError:  true,
-			errorMessage: "feature gate DeviceMetadata requires PassthroughSupport to also be enabled",
+			errorMessage: "feature gate DeviceMetadata requires PassthroughSupport or VGPUSupport to also be enabled",
 			description:  "should fail when DeviceMetadata is enabled but PassthroughSupport is not",
 		},
 		{
@@ -514,6 +540,12 @@ func TestValidateFeatureGates(t *testing.T) {
 			fgMap:       map[featuregate.Feature]bool{DeviceMetadata: true, PassthroughSupport: true},
 			expectError: false,
 			description: "should be valid when both DeviceMetadata and PassthroughSupport are enabled",
+		},
+		{
+			name:        "DeviceMetadata enabled with VGPUSupport",
+			fgMap:       map[featuregate.Feature]bool{DeviceMetadata: true, VGPUSupport: true, PassthroughSupport: false},
+			expectError: false,
+			description: "should be valid when DeviceMetadata is enabled with VGPUSupport (vGPU devices for KubeVirt need metadata)",
 		},
 		{
 			name:        "FabricManagerPartitioning enabled with PassthroughSupport",

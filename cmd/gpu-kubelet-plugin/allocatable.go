@@ -50,6 +50,7 @@ type AllocatableDevice struct {
 	MigDynamic *MigSpec
 	MigStatic  *MigDeviceInfo
 	Vfio       *VfioDeviceInfo
+	Vgpu       *VgpuPartitionInfo
 
 	// taints holds DRA device taints set by the health monitor. Published
 	// as part of the device's ResourceSlice entry so the scheduler and
@@ -69,6 +70,9 @@ func (d AllocatableDevice) Type() string {
 	}
 	if d.Vfio != nil {
 		return VfioDeviceType
+	}
+	if d.Vgpu != nil {
+		return VgpuDeviceType
 	}
 	return UnknownDeviceType
 }
@@ -92,6 +96,8 @@ func (d *AllocatableDevice) CanonicalName() string {
 		return d.MigDynamic.CanonicalName()
 	case VfioDeviceType:
 		return d.Vfio.CanonicalName()
+	case VgpuDeviceType:
+		return d.Vgpu.CanonicalName()
 	}
 	panic("unexpected type for AllocatableDevice")
 }
@@ -107,6 +113,8 @@ func (d *AllocatableDevice) GetDevice(config *Config) resourceapi.Device {
 		applyConsumableShares(&dev, config)
 	case MigDynamicDeviceType:
 		panic("GetDevice() must currently not be called for MigDynamicDeviceType")
+	case VgpuDeviceType:
+		panic("GetDevice() must not be called for VgpuDeviceType; vGPU partitions are only announced in the partitionable-devices publish path")
 	case VfioDeviceType:
 		// VFIO passthrough devices do not support consumable shares.
 		dev = d.Vfio.GetDevice()
@@ -140,6 +148,11 @@ func (d AllocatableDevice) UUID() string {
 	if d.Vfio != nil {
 		return d.Vfio.UUID
 	}
+	if d.Vgpu != nil {
+		// Abstract partitions have no UUID before actualization, same as
+		// MigDynamic above.
+		panic("unexpected UUID() call for AllocatableDevice of type Vgpu")
+	}
 	panic("unexpected type for AllocatableDevice")
 }
 
@@ -153,6 +166,8 @@ func (d *AllocatableDevice) GetGPUPCIBusID() string {
 		return d.MigDynamic.Parent.pciBusID
 	case VfioDeviceType:
 		return d.Vfio.PciBusID
+	case VgpuDeviceType:
+		return d.Vgpu.Parent.pciBusID
 	}
 	panic("unexpected type for AllocatableDevice")
 }

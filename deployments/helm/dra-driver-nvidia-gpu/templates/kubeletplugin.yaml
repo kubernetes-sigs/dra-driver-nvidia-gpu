@@ -309,6 +309,10 @@ spec:
         - name: CONSUMABLE_SHARES
           value: "{{ .Values.consumableShares }}"
         {{- end }}
+        {{- if .Values.vgpu.profiles }}
+        - name: VGPU_PROFILES
+          value: {{ .Values.vgpu.profiles | quote }}
+        {{- end }}
         {{- if .Values.featureGates }}
         - name: FEATURE_GATES
           value: "{{ range $key, $value := .Values.featureGates }}{{ $key }}={{ $value }},{{ end }}"
