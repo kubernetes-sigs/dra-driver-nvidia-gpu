@@ -70,9 +70,9 @@ type ComputeDomainManager struct {
 	lister        nvlisters.ComputeDomainLister
 	mutationCache cache.MutationCache
 
-	// daemonSetManager and nodeManager are nil when the driver is configured
-	// for host-managed IMEX (see pkg/imex): in that mode the driver never
-	// creates DaemonSets or ComputeDomain node labels, so this machinery
+	// daemonSetManager and nodeManager are nil when ComputeDomains share an
+	// IMEX domain (see pkg/imex): then the driver never creates
+	// per-ComputeDomain DaemonSets or node labels, so this machinery
 	// (including the DaemonSet manager's nested ComputeDomainClique/status
 	// tracking) is never constructed or started at all, rather than merely
 	// left unused.
@@ -94,7 +94,7 @@ func NewComputeDomainManager(config *ManagerConfig) *ComputeDomainManager {
 		lister:   lister,
 	}
 
-	if !config.imexConfig.EffectiveHostManaged() {
+	if !config.imexConfig.SharedIMEXDomain() {
 		m.daemonSetManager = NewMultiNamespaceDaemonSetManager(config, m.Get, m.List, m.UpdateStatus)
 		m.nodeManager = NewNodeManager(config, m.Get)
 	}
@@ -267,19 +267,18 @@ func (m *ComputeDomainManager) RemoveFinalizer(ctx context.Context, uid string) 
 	return nil
 }
 
-// hostManaged reports whether the driver is configured for host-managed IMEX
-// (see pkg/imex), in which case the driver never creates per-ComputeDomain
+// sharedIMEXDomain reports whether ComputeDomains share an IMEX domain (see
+// pkg/imex), in which case the driver never creates per-ComputeDomain
 // DaemonSets, daemon ResourceClaimTemplates, or ComputeDomain node labels.
-func (m *ComputeDomainManager) hostManaged() bool {
-	return m.config.imexConfig.EffectiveHostManaged()
+func (m *ComputeDomainManager) sharedIMEXDomain() bool {
+	return m.config.imexConfig.SharedIMEXDomain()
 }
 
 func (m *ComputeDomainManager) calculateGlobalStatus(cd *nvapi.ComputeDomain) string {
-	// In host-managed IMEX mode the controller does not track per-node daemon
-	// readiness (there are no driver-managed daemons), so Ready means only
-	// that the ComputeDomain was admitted and its workload
-	// ResourceClaimTemplate exists.
-	if m.hostManaged() {
+	// In a shared IMEX domain the controller does not track per-node daemon
+	// readiness per ComputeDomain, so Ready means only that the ComputeDomain
+	// was admitted and its workload ResourceClaimTemplate exists.
+	if m.sharedIMEXDomain() {
 		return nvapi.ComputeDomainStatusReady
 	}
 
@@ -346,11 +345,10 @@ func (m *ComputeDomainManager) onAddOrUpdate(ctx context.Context, obj any) error
 		return nil
 	}
 
-	// Host-managed IMEX reconciles a ComputeDomain
-	// with a much smaller set of objects (no DaemonSet, no node labels)
-	// so branch out early
-	if m.hostManaged() {
-		return m.onAddOrUpdateHostManaged(ctx, cd)
+	// A shared IMEX domain reconciles a ComputeDomain with a much smaller set
+	// of objects (no DaemonSet, no node labels) so branch out early
+	if m.sharedIMEXDomain() {
+		return m.onAddOrUpdateSharedDomain(ctx, cd)
 	}
 	return m.onAddOrUpdateDriverManaged(ctx, cd)
 }
@@ -410,9 +408,9 @@ func (m *ComputeDomainManager) onAddOrUpdateDriverManaged(ctx context.Context, c
 		return fmt.Errorf("error creating DaemonSet: %w", err)
 	}
 
-	// Create the ResourceClaimTemplateManager.
-	if _, err := m.resourceClaimTemplateManager.Create(ctx, cd.Namespace, cd.Spec.Channel.ResourceClaimTemplate.Name, cd); err != nil {
-		return fmt.Errorf("error creating ResourceClaimTemplate '%s/%s': %w", cd.Namespace, cd.Spec.Channel.ResourceClaimTemplate.Name, err)
+	// Create the workload ResourceClaimTemplates.
+	if err := m.resourceClaimTemplateManager.Create(ctx, cd); err != nil {
+		return fmt.Errorf("error creating workload ResourceClaimTemplates: %w", err)
 	}
 
 	// Change the global Status to reflect the number of ComputeDomain daemons connected.
@@ -423,11 +421,11 @@ func (m *ComputeDomainManager) onAddOrUpdateDriverManaged(ctx context.Context, c
 	return nil
 }
 
-// onAddOrUpdateHostManaged reconciles a ComputeDomain under host-managed
-// IMEX: the cluster admin owns the host nvidia-imex daemon lifecycle, so
-// the controller only manages the workload ResourceClaimTemplate and the
-// ComputeDomain finalizer.
-func (m *ComputeDomainManager) onAddOrUpdateHostManaged(ctx context.Context, cd *nvapi.ComputeDomain) error {
+// onAddOrUpdateSharedDomain reconciles a ComputeDomain in a shared IMEX
+// domain: the IMEX daemons run as a host service, so the controller only
+// manages the workload ResourceClaimTemplates and the ComputeDomain
+// finalizer. Channels are assigned to claims at admission.
+func (m *ComputeDomainManager) onAddOrUpdateSharedDomain(ctx context.Context, cd *nvapi.ComputeDomain) error {
 	if cd.GetDeletionTimestamp() != nil {
 		if err := m.resourceClaimTemplateManager.Delete(ctx, string(cd.UID)); err != nil {
 			return fmt.Errorf("error deleting ResourceClaimTemplate: %w", err)
@@ -454,15 +452,15 @@ func (m *ComputeDomainManager) onAddOrUpdateHostManaged(ctx context.Context, cd 
 		return fmt.Errorf("error adding finalizer: %w", err)
 	}
 
-	// Create the workload ResourceClaimTemplate. Its manager adds and tracks
-	// its own finalizer on the template.
-	if _, err := m.resourceClaimTemplateManager.Create(ctx, cd.Namespace, cd.Spec.Channel.ResourceClaimTemplate.Name, cd); err != nil {
-		return fmt.Errorf("error creating ResourceClaimTemplate '%s/%s': %w", cd.Namespace, cd.Spec.Channel.ResourceClaimTemplate.Name, err)
+	// Create the workload ResourceClaimTemplates. Their manager adds and
+	// tracks its own finalizer on each template.
+	if err := m.resourceClaimTemplateManager.Create(ctx, cd); err != nil {
+		return fmt.Errorf("error creating workload ResourceClaimTemplates: %w", err)
 	}
 
-	// Mark the ComputeDomain Ready. Under host-managed IMEX this only means
+	// Mark the ComputeDomain Ready. In a shared IMEX domain this only means
 	// the ComputeDomain was admitted and the workload ResourceClaimTemplate
-	// exists; it says nothing about host nvidia-imex health.
+	// exists. It says nothing about nvidia-imex health.
 	if err := m.updateGlobalStatus(ctx, cd); err != nil {
 		return fmt.Errorf("error updating global status on ComputeDomain '%s/%s': %w", cd.Namespace, cd.Name, err)
 	}
