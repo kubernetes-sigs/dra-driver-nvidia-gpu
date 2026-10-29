@@ -107,6 +107,18 @@ const (
 	// LocalIPCDirectory allows a claim-scoped directory to be injected into
 	// workload containers for same-node local IPC.
 	LocalIPCDirectory featuregate.Feature = "LocalIPCDirectory"
+
+	// ComputeDomainChannelReservations gives each workload ResourceClaimTemplate
+	// of a ComputeDomain its own IMEX channel.
+	//
+	// - A ComputeDomain can list several templates in spec.channels.
+	// - The controller assigns the channel when it admits a claim. Channels
+	//   are unique per NVLink clique.
+	// - Each kubelet plugin publishes one shared channel device, instead of one
+	//   device per channel.
+	// - ComputeDomains sharing IMEX daemons get distinct channels, so they can
+	//   run on the same node.
+	ComputeDomainChannelReservations featuregate.Feature = "ComputeDomainChannelReservations"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -210,6 +222,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		},
 	},
 	LocalIPCDirectory: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 6),
+		},
+	},
+	ComputeDomainChannelReservations: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,

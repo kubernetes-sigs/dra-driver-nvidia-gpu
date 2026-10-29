@@ -81,7 +81,7 @@ resources:
     enabled: true
   computeDomains:
     enabled: true
-    # Changing `imex.mode` or `imex.isolation` on a cluster with active ComputeDomain workloads
+    # Changing `imex.mode`, `imex.scope` or `imex.isolation` on a cluster with active ComputeDomain workloads
     # is not supported and is not enforced by the driver, drain and remove existing ComputeDomains first.
     imex:
       # mode selects the deployment mode of the IMEX daemon in the cluster. It tells
@@ -92,11 +92,19 @@ resources:
       #     and the driver only advertises/injects an IMEX channel device
       #     Requires featureGates.HostManagedIMEXDaemon=true
       mode: driverManaged
+      # scope selects whose IMEX daemons run on a node:
+      #   computeDomain (default): each ComputeDomain gets its own nvidia-imex
+      #     DaemonSet, so a node runs the workloads of one ComputeDomain at a
+      #     time.
+      #   cluster: the IMEX daemon of a node is shared by all ComputeDomains,
+      #     isolated by their channels. Always used with mode=hostManaged.
+      scope: computeDomain
       # isolation selects the IMEX isolation strategy. The value can be one of:
       #   domain (default): In this mode, all workloads running in the
       #     same IMEX domain will share the same channel (0).
-      #   channel: not supported. In this mode, each workload will get a unique
-      #     channel within an IMEX domain.
+      #   channel: each workload ResourceClaimTemplate gets its own channel
+      #     within an IMEX domain, shared by the pods using it.
+      #     Requires featureGates.ComputeDomainChannelReservations=true.
       isolation: "domain"
       # hostSocketPath is the path (under the driver root) to the Unix domain
       # socket the host nvidia-imex daemon's command/control service listens
@@ -128,6 +136,7 @@ resources:
 #   HostManagedIMEXDaemon: false       # Gate allowing resources.computeDomains.imex.mode=hostManaged
 #   DRAListTypeAttributes: false       # Publish list-valued DRA device attributes
 #   ConsumableShares: false            # Publish consumable capacity and multi-allocation support for devices
+#   ComputeDomainChannelReservations: false # Assign IMEX channels per ComputeDomain ResourceClaimTemplate
 featureGates: {}
 
 # Log verbosity for all components. Zero or greater, higher number means higher
