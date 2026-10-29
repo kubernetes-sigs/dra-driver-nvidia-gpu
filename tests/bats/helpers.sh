@@ -401,6 +401,27 @@ get_current_controller_pod_name() {
 }
 
 
+# cd_claim_admission_enabled reports whether the controller admits channel
+# claims before their pods bind, which it does with channel reservations.
+cd_claim_admission_enabled() {
+  kubectl get pods -n dra-driver-nvidia-gpu \
+    -l dra-driver-nvidia-gpu-component=kubelet-plugin \
+    -o jsonpath='{..env[?(@.name=="FEATURE_GATES")].value}' | \
+    grep -q "ComputeDomainChannelReservations=true"
+}
+
+# assert_imex_channel_injected checks the channel device listing in $output.
+# Channel reservations assign channels from 1 and keep 0 for ComputeDomains
+# created without them.
+assert_imex_channel_injected() {
+  if cd_claim_admission_enabled; then
+    assert_output --regexp "channel[1-9]"
+    refute_output --regexp "channel0([^0-9]|$)"
+  else
+    assert_output --partial "channel0"
+  fi
+}
+
 get_one_kubelet_plugin_pod_name() {
   kubectl get pod \
     -l dra-driver-nvidia-gpu-component=kubelet-plugin \
@@ -416,7 +437,7 @@ apply_check_delete_workload_imex_chan_inject() {
   kubectl apply -f demo/specs/imex/channel-injection.yaml
   kubectl wait --for=condition=READY pods imex-channel-injection --timeout=100s
   run kubectl logs imex-channel-injection
-  assert_output --partial "channel0"
+  assert_imex_channel_injected
 
   # Wait for deletion to complete; this is critical before moving on to the next
   # test (as long as we don't wipe state entirely between tests).
