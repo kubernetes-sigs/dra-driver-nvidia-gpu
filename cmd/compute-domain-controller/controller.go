@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/klog/v2"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
@@ -44,13 +45,21 @@ type ManagerConfig struct {
 	// maxNodesPerIMEXDomain is the maximum number of nodes per IMEX domain to allocate
 	maxNodesPerIMEXDomain int
 
-	// imexConfig holds the resolved imex.mode / imex.isolation configuration.
+	// imexConfig holds the resolved imex.mode / imex.scope / imex.isolation
+	// configuration.
 	imexConfig imex.Config
 
 	// imexConfigOverrides holds arbitrary nvidia-imex daemon config file
 	// overrides (resources.computeDomains.imex.config Helm value), passed
 	// through to dynamically rendered compute-domain-daemon DaemonSets.
 	imexConfigOverrides map[string]string
+
+	// imexMaxChannels bounds the reserved IMEX channel IDs.
+	imexMaxChannels int
+
+	// claimAdmission is false if the cluster does not serve
+	// resource.k8s.io/v1 ResourceClaims.
+	claimAdmission bool
 
 	// clientsets provides access to various Kubernetes API client interfaces
 	clientsets flags.ClientSets
@@ -105,6 +114,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		maxNodesPerIMEXDomain:     c.config.flags.maxNodesPerIMEXDomain,
 		imexConfig:                c.config.imexConfig,
 		imexConfigOverrides:       c.config.imexConfigOverrides,
+		imexMaxChannels:           c.config.flags.imexMaxChannels,
 		clientsets:                c.config.clientsets,
 		workQueue:                 workQueue,
 		logVerbosityCDDaemon:      c.config.flags.logVerbosityCDDaemon,
@@ -113,6 +123,15 @@ func (c *Controller) Run(ctx context.Context) error {
 		imagePullSecretNames:      c.config.imagePullSecretNames,
 		cdDaemonPriorityClassName: c.config.cdDaemonPriorityClassName,
 	}
+
+	claimAdmission, err := claimAdmissionSupported(c.config.clientsets.Core)
+	if err != nil {
+		return err
+	}
+	if !claimAdmission {
+		klog.Infof("Not admitting IMEX channels: %s ResourceClaims are not served", resourceapi.SchemeGroupVersion)
+	}
+	managerConfig.claimAdmission = claimAdmission
 
 	// TODO: log full, nested cliFlags structure.
 	klog.Infof("controller manager config: %+v", managerConfig)

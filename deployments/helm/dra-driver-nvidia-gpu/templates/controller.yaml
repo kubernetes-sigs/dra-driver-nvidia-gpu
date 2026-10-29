@@ -24,6 +24,16 @@ metadata:
     {{- include "dra-driver-nvidia-gpu.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.controller.replicas }}
+  {{- if not .Values.controller.leaderElection.enabled }}
+  # Without leader election, avoid two controllers assigning IMEX channels at
+  # the same time during an update. This keeps the RollingUpdate type, as
+  # switching to Recreate fails for upgrades applied server-side.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  {{- end }}
   selector:
     matchLabels:
       {{- include "dra-driver-nvidia-gpu.selectorLabels" (dict "context" . "componentName" "controller") | nindent 6 }}
@@ -108,6 +118,12 @@ spec:
         {{- end }}
         - name: IMEX_MODE
           value: "{{ .Values.resources.computeDomains.imex.mode }}"
+        - name: IMEX_MAX_CHANNELS
+          value: "{{ .Values.resources.computeDomains.imex.maxChannels }}"
+        - name: KUBE_API_QPS
+          value: "{{ .Values.controller.kubeAPI.qps }}"
+        - name: KUBE_API_BURST
+          value: "{{ .Values.controller.kubeAPI.burst }}"
         - name: IMEX_ISOLATION
           value: "{{ .Values.resources.computeDomains.imex.isolation }}"
         - name: IMEX_SCOPE
