@@ -156,6 +156,13 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		kubeletplugin.RegistrarDirectoryPath(config.flags.kubeletRegistrarDirectoryPath),
 		kubeletplugin.PluginDataDirectoryPath(config.DriverPluginPath()),
 	}
+	if podUID := config.flags.podUID; podUID != "" {
+		// Per-pod socket names let the kubelet reach two instances during a
+		// rolling update. pu.lock still serializes Prepare and Unprepare
+		// across the instances, so the library serialization stays off.
+		klog.Infof("Using per-pod socket names for rolling updates (pod UID %s)", podUID)
+		opts = append(opts, kubeletplugin.RollingUpdate(types.UID(podUID)))
+	}
 	// KEP-5304: Enable Device Metadata support for the kubelet plugin implementation.
 	// See: https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/5304-dra-attributes-downward-api
 	if featuregates.Enabled(featuregates.DeviceMetadata) {
