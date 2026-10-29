@@ -828,7 +828,7 @@ func TestUnprepareDevicesHostManagedSkipsRemoveNodeLabel(t *testing.T) {
 		allocationResult("channel-request", DriverName, "channel-0", nil),
 	})
 
-	require.NoError(t, state.unprepareDevices(context.Background(), &status))
+	require.NoError(t, state.unprepareDevices(context.Background(), "claim-uid", &status, checkpointWithClaims(nil)))
 }
 
 func testDeviceState() *DeviceState {
