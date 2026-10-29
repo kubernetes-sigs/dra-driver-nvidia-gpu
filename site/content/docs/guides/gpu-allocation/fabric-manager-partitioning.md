@@ -60,6 +60,24 @@ Use one `ResourceClaim` for one Fabric Manager partition.
 Separate claims cannot use a `matchAttribute` constraint to ensure that their
 combined GPUs form one partition.
 
+## Persistence during activation
+
+Before activating an inactive partition, the driver disables persistence on
+that claim's GPUs using `nvidia-smi`. This handles both daemon-managed and
+legacy persistence and applies to full-GPU and VFIO claims. If disabling
+persistence fails, the driver returns an error without activating the partition.
+
+An already-active partition skips this step. The driver rejects activation
+of a partition that overlaps another active partition before changing
+persistence. GPUs outside the requested partition are not changed.
+Full-GPU cleanup enables legacy persistence after successful partition
+deactivation, once no other claim uses the GPUs. This also applies to cleanup
+of partially prepared claims. If enabling persistence fails, cleanup returns an
+error and retries even when the partition is already inactive.
+VFIO cleanup continues to enable persistence when returning GPUs to the
+NVIDIA driver. Both paths enable persistence rather than restoring its original
+setting; the next partition activation disables it again.
+
 ## Prerequisites
 
 Before enabling the feature:

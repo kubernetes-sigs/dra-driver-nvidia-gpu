@@ -1594,7 +1594,7 @@ func (l deviceLib) enableGPUPersistenceMode(pciAddress string) error {
 	}
 
 	// Check if persistence mode is already enabled.
-	mode, ret := nvml.DeviceGetPersistenceMode(device)
+	mode, ret := device.GetPersistenceMode()
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("error getting persistence mode: %w", ret)
 	}

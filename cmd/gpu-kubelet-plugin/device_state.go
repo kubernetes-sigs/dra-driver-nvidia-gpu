@@ -1540,6 +1540,18 @@ func (s *DeviceState) deactivateFabricPartition(claimUID string, pc *PreparedCla
 	if err := s.fmManager.DeactivatePartition(partitionID); err != nil {
 		return fmt.Errorf("deactivating fabric partition %d: %w", partitionID, err)
 	}
+	// Full GPUs stay on the NVIDIA driver and do not pass through VFIO
+	// Unconfigure, which restores persistence. Enable it only after the
+	// partition is inactive, including on retries after partial cleanup.
+	for _, device := range s.getAllocatableDevicesForClaim(claimUID, *pc) {
+		if device.Type() != GpuDeviceType {
+			continue
+		}
+		gpu := device.Gpu
+		if err := s.nvdevlib.enableGPUPersistenceMode(gpu.pciBusID); err != nil {
+			return fmt.Errorf("enabling persistence for GPU %s (PCI %s): %w", gpu.UUID, gpu.pciBusID, err)
+		}
+	}
 	return nil
 }
 
@@ -1591,7 +1603,19 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 	// step failed) that hits an already-active partition is a no-op rather than
 	// an FM in-use error.
 	klog.V(2).Infof("Fabric Manager: activating partition %d for %d-GPU claim %s", partitionID, len(gpus), ResourceClaimToString(claim))
-	if err := s.fmManager.ActivatePartition(partitionID); err != nil {
+	if err := s.fmManager.ActivatePartition(partitionID, func() error {
+		// FM can fail with NV_ERR_IN_USE while persistence keeps a GPU
+		// initialized. VFIO Configure disables persistence too, but runs
+		// after activation and does not cover full-GPU container claims.
+		for _, gpu := range gpus {
+			// Use nvidia-smi even without a persistenced socket: VFIO cleanup
+			// can enable legacy persistence directly through NVML.
+			if err := s.nvdevlib.disableGPUPersistenceMode(gpu.pciBusID); err != nil {
+				return fmt.Errorf("disabling persistence for GPU %s (PCI %s): %w", gpu.UUID, gpu.pciBusID, err)
+			}
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("activating fabric partition %d: %w", partitionID, err)
 	}
 	return nil
