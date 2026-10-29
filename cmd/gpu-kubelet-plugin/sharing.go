@@ -54,23 +54,7 @@ const (
 	MpsControlFilesDirName       = "mps"
 	MpsControlDaemonTemplatePath = "/templates/mps-control-daemon.tmpl.yaml"
 	MpsControlDaemonNameFmt      = "mps-control-daemon-%v" // Fill with ClaimUID
-	MpsDefaultShmMountPath       = "/dev/shm"
-
-	// driverRootMountDir is the directory where the driver root is mounted inside the kubelet plugin container.
-	driverRootMountDir = "/driver-root"
 )
-
-// fileChecker checks whether a file exists at the given path.
-type fileChecker interface {
-	Stat(path string) error
-}
-
-type osFileChecker struct{}
-
-func (osFileChecker) Stat(path string) error {
-	_, err := os.Stat(path)
-	return err
-}
 
 type TimeSlicingManager struct {
 	nvdevlib *deviceLib
@@ -115,18 +99,20 @@ type MpsControlDaemonTemplateData struct {
 	MpsImagePullSecretNames         []string
 	ServiceAccountName              string
 	FeatureGates                    map[string]bool
-	MpsShmMountPath                 string
+	ChrootDriverRoot                bool
 }
 
-// setMpsShmMountPath returns the container path at which the MPS shm should be mounted in the MPS control daemon pod.
-// If <driverRootMountDir>/dev/shm exists, the MPS daemon runs inside a chroot and shm must be mounted there.
-// Otherwise (e.g. GKE COS) the daemon runs directly in the container namespace and expects /dev/shm.
-func setMpsShmMountPath(checker fileChecker) string {
-	chrootShmPath := filepath.Join(driverRootMountDir, "dev", "shm")
-	if checker.Stat(chrootShmPath) == nil {
-		return chrootShmPath
+// driverRootHasShell reports whether the MPS control daemon can chroot into
+// the driver root. The daemon command, its MPS state mounts, and its probe all
+// follow this single decision.
+func driverRootHasShell(driverRoot string) bool {
+	for _, sh := range []string{"bin/sh", "usr/bin/sh"} {
+		info, err := os.Stat(filepath.Join(driverRoot, sh))
+		if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			return true
+		}
 	}
-	return MpsDefaultShmMountPath
+	return false
 }
 
 func NewTimeSlicingManager(deviceLib *deviceLib) *TimeSlicingManager {
@@ -246,7 +232,7 @@ func (m *MpsControlDaemon) Start(ctx context.Context, config *configapi.MpsConfi
 		MpsImagePullSecretNames:         m.manager.config.imagePullSecretNames,
 		ServiceAccountName:              m.manager.config.flags.serviceAccountName,
 		FeatureGates:                    featuregates.ToMap(),
-		MpsShmMountPath:                 setMpsShmMountPath(osFileChecker{}),
+		ChrootDriverRoot:                driverRootHasShell(m.manager.config.flags.containerDriverRoot),
 	}
 
 	if config != nil && config.DefaultActiveThreadPercentage != nil {
