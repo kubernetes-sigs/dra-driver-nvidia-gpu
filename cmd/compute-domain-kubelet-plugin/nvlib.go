@@ -188,6 +188,9 @@ func (l deviceLib) enumerateComputeDomainChannels(config *Config) (AllocatableDe
 		devices[computeDomainChannelInfo.CanonicalName()] = deviceInfo
 	}
 
+	shared := &ComputeDomainChannelInfo{ID: sharedChannelID}
+	devices[shared.CanonicalName()] = &AllocatableDevice{Channel: shared}
+
 	return devices, nil
 }
 
