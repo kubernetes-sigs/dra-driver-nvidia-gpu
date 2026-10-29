@@ -1,3 +1,4 @@
+{{- $root := "" }}{{ if .ChrootDriverRoot }}{{ $root = "/driver-root" }}{{ end -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -39,22 +40,28 @@ spec:
         args:
         - |-
           set -e
-          rm -f /driver-root/var/log/nvidia-mps/startup.log
+          rm -f {{ $root }}/var/log/nvidia-mps/startup.log
+          {{- if .ChrootDriverRoot }}
 
-          if [ -x /driver-root/bin/sh ] || [ -x /driver-root/usr/bin/sh ]; then
-            # Use chroot to avoid library mismatch between container and host
-            # when driver root is / (default value) or /run/nvidia/driver (default location for driver installation by GPU Operator)
-            RUN="chroot /driver-root sh -c"
-          else
-            # No shell in driver root (e.g. GKE COS): run directly with PATH/LD_LIBRARY_PATH
-            export PATH="/driver-root/usr/bin:/driver-root/bin:/driver-root/usr/local/bin:$PATH"
-            export LD_LIBRARY_PATH="/driver-root/lib64:/driver-root/lib:/driver-root/usr/lib64:/driver-root/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-            RUN="sh -c"
+          # Run against the driver root's own libc and loader.
+          RUN="chroot /driver-root sh -c"
+          {{- else }}
 
-            # Point MPS to mounted paths (not set in Deployment spec as for chroot approach /driver-root/... paths don't exist inside chroot)
-            export CUDA_MPS_PIPE_DIRECTORY=/driver-root/tmp/nvidia-mps
-            export CUDA_MPS_LOG_DIRECTORY=/driver-root/var/log/nvidia-mps
-          fi
+          # No shell in the driver root (e.g. GKE COS): expose only NVIDIA
+          # libraries so the driver root's libc never reaches the loader.
+          export PATH="/driver-root/usr/bin:/driver-root/bin:/driver-root/usr/local/bin:$PATH"
+          mkdir -p /tmp/nvidia-libs
+          for dir in /driver-root/usr/lib64 /driver-root/usr/lib/x86_64-linux-gnu /driver-root/usr/lib/aarch64-linux-gnu /driver-root/usr/lib /driver-root/lib64 /driver-root/lib/x86_64-linux-gnu /driver-root/lib/aarch64-linux-gnu /driver-root/lib; do
+            for lib in "$dir"/libcuda.so* "$dir"/libnvidia-*.so*; do
+              link="/tmp/nvidia-libs/${lib##*/}"
+              if [ -e "$lib" ] && [ ! -e "$link" ] && [ ! -L "$link" ]; then
+                ln -s "$lib" "$link"
+              fi
+            done
+          done
+          export LD_LIBRARY_PATH=/tmp/nvidia-libs
+          RUN="sh -c"
+          {{- end }}
 
           $RUN "nvidia-cuda-mps-control -d{{ if .MultiUser }} -M{{ end }}"
           {{- if .DefaultActiveThreadPercentage }}
@@ -64,14 +71,14 @@ spec:
           $RUN "echo set_default_device_pinned_mem_limit {{ $id }} {{ $limit }} | nvidia-cuda-mps-control"
           {{- end}}
 
-          echo "startup complete" > /driver-root/var/log/nvidia-mps/startup.log
+          echo "startup complete" > {{ $root }}/var/log/nvidia-mps/startup.log
 
-          tail -n +1 -f /driver-root/var/log/nvidia-mps/control.log
+          tail -n +1 -f {{ $root }}/var/log/nvidia-mps/control.log
         startupProbe:
           exec:
             command:
             - cat
-            - /driver-root/var/log/nvidia-mps/startup.log
+            - {{ $root }}/var/log/nvidia-mps/startup.log
           initialDelaySeconds: 1
           periodSeconds: 1
         env:
@@ -85,12 +92,15 @@ spec:
         volumeMounts:
         - name: driver-root
           mountPath: /driver-root
+          {{- if not .ChrootDriverRoot }}
+          readOnly: true
+          {{- end }}
         - name: mps-shm-directory
-          mountPath: {{ .MpsShmMountPath }}
+          mountPath: {{ $root }}/dev/shm
         - name: mps-pipe-directory
-          mountPath: /driver-root/tmp/nvidia-mps
+          mountPath: {{ $root }}/tmp/nvidia-mps
         - name: mps-log-directory
-          mountPath: /driver-root/var/log/nvidia-mps
+          mountPath: {{ $root }}/var/log/nvidia-mps
       volumes:
       - name: driver-root
         hostPath:
