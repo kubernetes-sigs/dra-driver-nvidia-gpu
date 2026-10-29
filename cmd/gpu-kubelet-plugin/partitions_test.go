@@ -31,9 +31,9 @@ import (
 // newTestGpuInfo fixture.
 func newPartTestGpu(maxCapacities PartCapacityMap, memSliceCount int) *GpuInfo {
 	gpu := newTestGpuInfo(newScalarNumaNodeAttribute(0))
-	gpu.memoryBytes = ptr.To(uint64(4096))
-	gpu.maxCapacities = maxCapacities
-	gpu.memSliceCount = memSliceCount
+	gpu.MemoryBytes = ptr.To(uint64(4096))
+	gpu.MaxCapacities = maxCapacities
+	gpu.MemSliceCount = memSliceCount
 	return gpu
 }
 
@@ -52,6 +52,14 @@ func newPartTestMigSpec(parent *GpuInfo, start, size uint32) *MigSpec {
 		},
 		Placement: nvml.GpuInstancePlacement{Start: start, Size: size},
 	}
+}
+
+func newPartTestVfio(parent *GpuInfo) *VfioDeviceInfo {
+	vfio := newTestVfioDeviceInfo(parent, nil)
+	if parent != nil {
+		vfio.NumaNodeAttr = parent.NumaNodeAttr
+	}
+	return vfio
 }
 
 // resource.Quantity caches a format string, so require.Equal on two logically
@@ -91,7 +99,7 @@ func TestPartCapacities(t *testing.T) {
 
 	t.Run("nil when memory size is unknown too", func(t *testing.T) {
 		gpu := newPartTestGpu(nil, 0)
-		gpu.memoryBytes = nil
+		gpu.MemoryBytes = nil
 
 		require.Nil(t, gpu.PartCapacities())
 	})
@@ -188,7 +196,7 @@ func TestPartGpuInfoGetDevice(t *testing.T) {
 	// only once discovered.
 	require.NotContains(t, dev.Attributes, deviceattribute.StandardDeviceAttributePCIeRoot)
 
-	gpu.pcieRootAttr = &deviceattribute.DeviceAttribute{
+	gpu.PcieRootAttr = &deviceattribute.DeviceAttribute{
 		Name:  deviceattribute.StandardDeviceAttributePCIeRoot,
 		Value: resourceapi.DeviceAttribute{StringValue: ptr.To("pci0000:0d")},
 	}
@@ -209,6 +217,9 @@ func TestPartAllocatableDeviceGetDevice(t *testing.T) {
 			MigDynamic: newPartTestMigSpec(newPartTestGpu(nil, 0), 2, 2),
 		}
 		require.Equal(t, "gpu-0-mig-1g10gb-19-2", mig.PartGetDevice(nil).Name)
+
+		vfio := &AllocatableDevice{Vfio: newPartTestVfio(newPartTestGpu(nil, 0))}
+		require.Equal(t, "gpu-vfio-0", vfio.PartGetDevice(nil).Name)
 	})
 
 	for _, tc := range []struct {
@@ -218,8 +229,6 @@ func TestPartAllocatableDeviceGetDevice(t *testing.T) {
 	}{
 		{"static MIG", &AllocatableDevice{MigStatic: &MigDeviceInfo{}},
 			"PartGetDevice() called for MigStaticDeviceType"},
-		{"VFIO", &AllocatableDevice{Vfio: &VfioDeviceInfo{}},
-			"not yet implemented"},
 		{"an unset device", &AllocatableDevice{},
 			"unexpected type for AllocatableDevice"},
 	} {

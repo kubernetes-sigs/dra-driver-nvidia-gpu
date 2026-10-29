@@ -40,9 +40,9 @@ func setDynamicMIG(t *testing.T, enabled bool) {
 	})
 }
 
-func newMigSpec(parentMinor, profileID, placementStart int, pci string) *MigSpec {
+func newMigSpec(parentIndex, parentMinor, profileID, placementStart int, pci string) *MigSpec {
 	return &MigSpec{
-		Parent:            &GpuInfo{minor: parentMinor, pciBusID: pci},
+		Parent:            &GpuInfo{Index: parentIndex, Minor: parentMinor, PciBusID: pci},
 		CandidateProfiles: []nvdev.MigProfile{&nvdev.MigProfileInfo{C: 1, G: 1, GB: 5}},
 		GIProfileInfo:     nvml.GpuInstanceProfileInfo{Id: uint32(profileID)},
 		Placement:         nvml.GpuInstancePlacement{Start: uint32(placementStart)},
@@ -71,22 +71,25 @@ func TestAllocatableDeviceType(t *testing.T) {
 
 func TestCanonicalName(t *testing.T) {
 	t.Run("gpu", func(t *testing.T) {
-		d := &AllocatableDevice{Gpu: &GpuInfo{minor: 3}}
+		d := &AllocatableDevice{Gpu: &GpuInfo{Index: 3}}
 		assert.Equal(t, "gpu-3", d.CanonicalName())
 	})
 
 	// Static and dynamic specs must name the identical configuration.
 	t.Run("mig-static and mig-dynamic agree", func(t *testing.T) {
 		static := &AllocatableDevice{MigStatic: &MigDeviceInfo{
-			Profile: "1g.5gb", ParentMinor: 2, GiProfileID: 19, PlacementStart: 0,
+			Parent:         &GpuInfo{Index: 2},
+			Profile:        "1g.5gb",
+			GiProfileID:    19,
+			PlacementStart: 0,
 		}}
-		dynamic := &AllocatableDevice{MigDynamic: newMigSpec(2, 19, 0, "0000:65:00.0")}
+		dynamic := &AllocatableDevice{MigDynamic: newMigSpec(2, 2, 19, 0, "0000:65:00.0")}
 		assert.Equal(t, "gpu-2-mig-1g5gb-19-0", static.CanonicalName())
 		assert.Equal(t, "gpu-2-mig-1g5gb-19-0", dynamic.CanonicalName())
 	})
 
 	t.Run("vfio", func(t *testing.T) {
-		d := &AllocatableDevice{Vfio: &VfioDeviceInfo{index: 7}}
+		d := &AllocatableDevice{Vfio: &VfioDeviceInfo{Index: 7}}
 		assert.Equal(t, "gpu-vfio-7", d.CanonicalName())
 	})
 
@@ -120,10 +123,10 @@ func TestGetGPUPCIBusID(t *testing.T) {
 		dev  AllocatableDevice
 		want string
 	}{
-		"gpu":         {AllocatableDevice{Gpu: &GpuInfo{pciBusID: "0000:01:00.0"}}, "0000:01:00.0"},
-		"mig-static":  {AllocatableDevice{MigStatic: &MigDeviceInfo{parent: &GpuInfo{pciBusID: "0000:02:00.0"}}}, "0000:02:00.0"},
-		"mig-dynamic": {AllocatableDevice{MigDynamic: &MigSpec{Parent: &GpuInfo{pciBusID: "0000:03:00.0"}}}, "0000:03:00.0"},
-		"vfio":        {AllocatableDevice{Vfio: &VfioDeviceInfo{PciBusID: "0000:04:00.0"}}, "0000:04:00.0"},
+		"gpu":         {AllocatableDevice{Gpu: &GpuInfo{Index: 0, Minor: 0, PciBusID: "0000:01:00.0"}}, "0000:01:00.0"},
+		"mig-static":  {AllocatableDevice{MigStatic: &MigDeviceInfo{Parent: &GpuInfo{Index: 1, Minor: 1, PciBusID: "0000:02:00.0"}}}, "0000:02:00.0"},
+		"mig-dynamic": {AllocatableDevice{MigDynamic: &MigSpec{Parent: &GpuInfo{Index: 2, Minor: 2, PciBusID: "0000:03:00.0"}}}, "0000:03:00.0"},
+		"vfio":        {AllocatableDevice{Vfio: &VfioDeviceInfo{Index: 3, PciBusID: "0000:04:00.0"}}, "0000:04:00.0"},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -139,7 +142,7 @@ func TestGetDevice(t *testing.T) {
 	// Empty Config leaves AllowMultipleAllocations unset.
 	t.Run("vfio", func(t *testing.T) {
 		d := &AllocatableDevice{Vfio: &VfioDeviceInfo{
-			index: 5, UUID: "GPU-vfio", deviceID: "0x1234", vendorID: "0x10de",
+			Index: 5, UUID: "GPU-vfio", DeviceID: "0x1234", VendorID: "0x10de",
 		}}
 		dev := d.GetDevice(&Config{})
 		assert.Equal(t, "gpu-vfio-5", dev.Name)
@@ -149,8 +152,8 @@ func TestGetDevice(t *testing.T) {
 	t.Run("gpu", func(t *testing.T) {
 		// Version fields must be valid semver.
 		d := &AllocatableDevice{Gpu: &GpuInfo{
-			minor: 1, UUID: "GPU-1",
-			cudaComputeCapability: "8.0.0", driverVersion: "550.54.15", cudaDriverVersion: "12.4.0",
+			Index: 1, Minor: 1, UUID: "GPU-1",
+			CudaComputeCapability: "8.0.0", DriverVersion: "550.54.15", CudaDriverVersion: "12.4.0",
 		}}
 		dev := d.GetDevice(&Config{})
 		assert.Equal(t, "gpu-1", dev.Name)
@@ -160,10 +163,11 @@ func TestGetDevice(t *testing.T) {
 	t.Run("mig-static", func(t *testing.T) {
 		d := &AllocatableDevice{MigStatic: &MigDeviceInfo{
 			UUID: "MIG-1", Profile: "1g.5gb", ParentMinor: 2, GiProfileID: 19, PlacementStart: 0,
-			parent: &GpuInfo{
-				cudaComputeCapability: "8.0.0", driverVersion: "550.54.15", cudaDriverVersion: "12.4.0",
+			Parent: &GpuInfo{
+				Index:                 2,
+				CudaComputeCapability: "8.0.0", DriverVersion: "550.54.15", CudaDriverVersion: "12.4.0",
 			},
-			giProfileInfo: &nvml.GpuInstanceProfileInfo{},
+			GiProfileInfo: &nvml.GpuInstanceProfileInfo{},
 		}}
 		dev := d.GetDevice(&Config{})
 		assert.Equal(t, "gpu-2-mig-1g5gb-19-0", dev.Name)
@@ -180,12 +184,12 @@ func TestGetDevice(t *testing.T) {
 
 func buildMixedDevices() AllocatableDevices {
 	return AllocatableDevices{
-		"gpu-1":  {Gpu: &GpuInfo{minor: 1, UUID: "GPU-bbb"}},
-		"gpu-0":  {Gpu: &GpuInfo{minor: 0, UUID: "GPU-aaa"}},
-		"vfio-1": {Vfio: &VfioDeviceInfo{index: 1, UUID: "GPU-vfio-yyy"}},
-		"vfio-0": {Vfio: &VfioDeviceInfo{index: 0, UUID: "GPU-vfio-xxx"}},
-		"mig-0":  {MigStatic: &MigDeviceInfo{UUID: "MIG-mmm", Profile: "1g.5gb", ParentMinor: 0, GiProfileID: 19}},
-		"mig-d":  {MigDynamic: newMigSpec(3, 19, 0, "0000:66:00.0")},
+		"gpu-1":  {Gpu: &GpuInfo{Index: 1, Minor: 1, UUID: "GPU-bbb"}},
+		"gpu-0":  {Gpu: &GpuInfo{Index: 0, Minor: 0, UUID: "GPU-aaa"}},
+		"vfio-1": {Vfio: &VfioDeviceInfo{Index: 1, UUID: "GPU-vfio-yyy"}},
+		"vfio-0": {Vfio: &VfioDeviceInfo{Index: 0, UUID: "GPU-vfio-xxx"}},
+		"mig-0":  {MigStatic: &MigDeviceInfo{UUID: "MIG-mmm", Profile: "1g.5gb", Parent: &GpuInfo{Index: 0, Minor: 0}, GiProfileID: 19}},
+		"mig-d":  {MigDynamic: newMigSpec(3, 3, 19, 0, "0000:66:00.0")},
 	}
 }
 
@@ -225,8 +229,8 @@ func TestAllocatableDevicesFilters(t *testing.T) {
 func TestUUIDsSortedAcrossTypes(t *testing.T) {
 	// UUIDs() panics on MigDynamic/unknown, so use only UUID-bearing types.
 	devices := AllocatableDevices{
-		"gpu-1": {Gpu: &GpuInfo{UUID: "GPU-bbb"}},
-		"gpu-0": {Gpu: &GpuInfo{UUID: "GPU-aaa"}},
+		"gpu-1": {Gpu: &GpuInfo{Index: 1, Minor: 1, UUID: "GPU-bbb"}},
+		"gpu-0": {Gpu: &GpuInfo{Index: 0, Minor: 0, UUID: "GPU-aaa"}},
 		"mig-0": {MigStatic: &MigDeviceInfo{UUID: "MIG-mmm"}},
 	}
 	assert.Equal(t, []string{"GPU-aaa", "GPU-bbb", "MIG-mmm"}, devices.UUIDs())
@@ -236,7 +240,7 @@ func TestMigDeviceUUIDs(t *testing.T) {
 	t.Run("static only, sorted", func(t *testing.T) {
 		setDynamicMIG(t, false)
 		devices := AllocatableDevices{
-			"gpu-0": {Gpu: &GpuInfo{UUID: "GPU-excluded"}},
+			"gpu-0": {Gpu: &GpuInfo{Index: 0, Minor: 0, UUID: "GPU-excluded"}},
 			"mig-1": {MigStatic: &MigDeviceInfo{UUID: "MIG-bbb"}},
 			"mig-0": {MigStatic: &MigDeviceInfo{UUID: "MIG-aaa"}},
 			"vfio":  {Vfio: &VfioDeviceInfo{UUID: "GPU-vfio-excluded"}},
@@ -261,7 +265,7 @@ func TestPerGPUAddGPUAllocatables(t *testing.T) {
 
 	require.Error(t, p.AddGPUAllocatables("0000:01:00.0", nil), "nil allocatables must error")
 
-	gpu := &AllocatableDevice{Gpu: &GpuInfo{minor: 0, UUID: "GPU-a", pciBusID: "0000:01:00.0"}}
+	gpu := &AllocatableDevice{Gpu: &GpuInfo{Index: 0, Minor: 0, UUID: "GPU-a", PciBusID: "0000:01:00.0"}}
 	require.NoError(t, p.AddGPUAllocatables("0000:01:00.0", AllocatableDevices{"gpu-0": gpu}))
 
 	got := p.GetGPUDeviceByPCIBusID("0000:01:00.0")
@@ -271,7 +275,7 @@ func TestPerGPUAddGPUAllocatables(t *testing.T) {
 	assert.Nil(t, p.GetGPUDeviceByPCIBusID("0000:99:00.0"), "unknown bus id returns nil")
 
 	require.NoError(t, p.AddGPUAllocatables("0000:02:00.0",
-		AllocatableDevices{"vfio-0": {Vfio: &VfioDeviceInfo{index: 0, PciBusID: "0000:02:00.0"}}}))
+		AllocatableDevices{"vfio-0": {Vfio: &VfioDeviceInfo{Index: 0, PciBusID: "0000:02:00.0"}}}))
 	assert.Nil(t, p.GetGPUDeviceByPCIBusID("0000:02:00.0"))
 }
 
@@ -280,7 +284,7 @@ func TestPerGPUAddAllocatableDevice(t *testing.T) {
 
 	require.Error(t, p.AddAllocatableDevice(nil), "nil device must error")
 
-	gpu := &AllocatableDevice{Gpu: &GpuInfo{minor: 4, UUID: "GPU-d", pciBusID: "0000:05:00.0"}}
+	gpu := &AllocatableDevice{Gpu: &GpuInfo{Index: 4, Minor: 4, UUID: "GPU-d", PciBusID: "0000:05:00.0"}}
 	require.NoError(t, p.AddAllocatableDevice(gpu))
 
 	// Keyed by CanonicalName ("gpu-4").
@@ -293,11 +297,11 @@ func TestPerGPUAddAllocatableDevice(t *testing.T) {
 func TestPerGPUGetAllDevicesMerges(t *testing.T) {
 	p := newPerGPU()
 	require.NoError(t, p.AddAllocatableDevice(
-		&AllocatableDevice{Gpu: &GpuInfo{minor: 0, UUID: "GPU-0", pciBusID: "0000:01:00.0"}}))
+		&AllocatableDevice{Gpu: &GpuInfo{Index: 0, Minor: 0, UUID: "GPU-0", PciBusID: "0000:01:00.0"}}))
 	require.NoError(t, p.AddAllocatableDevice(
-		&AllocatableDevice{Gpu: &GpuInfo{minor: 1, UUID: "GPU-1", pciBusID: "0000:02:00.0"}}))
+		&AllocatableDevice{Gpu: &GpuInfo{Index: 1, Minor: 1, UUID: "GPU-1", PciBusID: "0000:02:00.0"}}))
 	require.NoError(t, p.AddAllocatableDevice(
-		&AllocatableDevice{Vfio: &VfioDeviceInfo{index: 0, UUID: "VF-0", PciBusID: "0000:02:00.0"}}))
+		&AllocatableDevice{Vfio: &VfioDeviceInfo{Index: 0, UUID: "VF-0", PciBusID: "0000:01:00.0"}}))
 
 	all := p.GetAllDevices()
 	require.Len(t, all, 3)
@@ -306,41 +310,9 @@ func TestPerGPUGetAllDevicesMerges(t *testing.T) {
 	assert.Contains(t, all, "gpu-vfio-0")
 }
 
-func TestPerGPURemoveSiblingDevices(t *testing.T) {
-	pci := "0000:01:00.0"
-	gpu := &AllocatableDevice{Gpu: &GpuInfo{minor: 0, UUID: "GPU-0", pciBusID: pci}}
-	vfio := &AllocatableDevice{Vfio: &VfioDeviceInfo{index: 0, UUID: "VF-0", PciBusID: pci}}
-
-	newBucket := func(t *testing.T) *PerGPUAllocatableDevices {
-		p := newPerGPU()
-		require.NoError(t, p.AddAllocatableDevice(gpu))
-		require.NoError(t, p.AddAllocatableDevice(vfio))
-		require.Len(t, p.GetAllDevices(), 2)
-		return p
-	}
-
-	t.Run("gpu selected removes vfio sibling", func(t *testing.T) {
-		p := newBucket(t)
-		p.RemoveSiblingDevices(gpu)
-		all := p.GetAllDevices()
-		require.Len(t, all, 1)
-		assert.Contains(t, all, "gpu-0")
-		assert.NotContains(t, all, "gpu-vfio-0")
-	})
-
-	t.Run("vfio selected removes gpu sibling", func(t *testing.T) {
-		p := newBucket(t)
-		p.RemoveSiblingDevices(vfio)
-		all := p.GetAllDevices()
-		require.Len(t, all, 1)
-		assert.Contains(t, all, "gpu-vfio-0")
-		assert.NotContains(t, all, "gpu-0")
-	})
-}
-
 func TestTaintsReturnsClone(t *testing.T) {
 	d := &AllocatableDevice{
-		taints: []resourceapi.DeviceTaint{
+		DeviceTaints: []resourceapi.DeviceTaint{
 			{Key: "xid", Value: "48", Effect: resourceapi.DeviceTaintEffectNoSchedule},
 		},
 	}
@@ -350,14 +322,14 @@ func TestTaintsReturnsClone(t *testing.T) {
 
 	// Mutating the result must not affect internal state.
 	got[0].Value = "mutated"
-	assert.Equal(t, "48", d.taints[0].Value)
-	assert.Len(t, d.taints, 1)
+	assert.Equal(t, "48", d.DeviceTaints[0].Value)
+	assert.Len(t, d.DeviceTaints, 1)
 
 	assert.Empty(t, (&AllocatableDevice{}).Taints())
 }
 
 func TestRemoveTaint(t *testing.T) {
-	d := &AllocatableDevice{taints: []resourceapi.DeviceTaint{
+	d := &AllocatableDevice{DeviceTaints: []resourceapi.DeviceTaint{
 		{Key: "xid", Value: "48"},
 		{Key: "ecc", Value: "1"},
 	}}
@@ -365,10 +337,10 @@ func TestRemoveTaint(t *testing.T) {
 	removed, ok := d.RemoveTaint("xid")
 	assert.True(t, ok)
 	assert.Equal(t, "48", removed.Value)
-	require.Len(t, d.taints, 1)
-	assert.Equal(t, "ecc", d.taints[0].Key, "only the matching taint is removed")
+	require.Len(t, d.DeviceTaints, 1)
+	assert.Equal(t, "ecc", d.DeviceTaints[0].Key, "only the matching taint is removed")
 
 	_, ok = d.RemoveTaint("absent")
 	assert.False(t, ok)
-	require.Len(t, d.taints, 1)
+	require.Len(t, d.DeviceTaints, 1)
 }

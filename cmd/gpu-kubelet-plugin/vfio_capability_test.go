@@ -91,7 +91,7 @@ func TestDeviceStateVfioCapability(t *testing.T) {
 				setVfioTestFeatureGate(t, featuregates.DynamicMIG, false)
 				pci := &nvpci.InterfaceMock{GetGPUsFunc: func() ([]*nvpci.NvidiaPCIDevice, error) { return nil, nil }}
 				lib := &deviceLib{vfioEnabled: capable, nvmllib: emptyVfioTestNVML{}, Interface: emptyVfioTestDevices{}, nvpci: pci}
-				perGPUAllocatable, err := lib.enumerateAllPossibleDevices()
+				perGPUAllocatable, err := lib.enumerateAllPossibleDevices(nil)
 				require.NoError(t, err)
 				require.Equal(t, capable, lib.IsVfioEnabled())
 				if gate && capable {
@@ -119,8 +119,8 @@ func TestVfioUnavailableResourceGeneration(t *testing.T) {
 				t.Run(fmt.Sprintf("gate=%t/capable=%t/split=%t", gate, capable, split), func(t *testing.T) {
 					setVfioTestFeatureGate(t, featuregates.PassthroughSupport, gate)
 					setVfioTestFeatureGate(t, featuregates.DynamicMIG, true)
-					gpu := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0000", productName: "NVIDIA Test GPU", brand: "Test", architecture: "Test", cudaComputeCapability: "8.0", driverVersion: "550.0", cudaDriverVersion: "12.0", pciBusID: "0000:00:00.0", vfioEnabled: true}}
-					state := &DeviceState{nvdevlib: &deviceLib{vfioEnabled: capable}, perGPUAllocatable: &PerGPUAllocatableDevices{allocatablesMap: map[PCIBusID]AllocatableDevices{gpu.Gpu.pciBusID: {gpu.CanonicalName(): gpu}}}}
+					gpu := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0000", ProductName: "NVIDIA Test GPU", Brand: "Test", Architecture: "Test", CudaComputeCapability: "8.0", DriverVersion: "550.0", CudaDriverVersion: "12.0", PciBusID: "0000:00:00.0", VfioEnabled: true}}
+					state := &DeviceState{nvdevlib: &deviceLib{vfioEnabled: capable}, perGPUAllocatable: &PerGPUAllocatableDevices{allocatablesMap: map[PCIBusID]AllocatableDevices{gpu.Gpu.PciBusID: {gpu.CanonicalName(): gpu}}}}
 					// GPU-local eligibility must not override the feature gate or node capability.
 					require.NoError(t, state.discoverSiblingAllocatables(gpu))
 					require.Empty(t, state.perGPUAllocatable.GetAllDevices().GetVfioDevices())

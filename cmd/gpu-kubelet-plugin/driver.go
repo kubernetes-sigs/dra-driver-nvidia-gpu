@@ -76,6 +76,14 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 
 	useSplitSlices := false
+	if featuregates.Enabled(featuregates.DynamicMIG) || featuregates.Enabled(featuregates.PassthroughSupport) {
+		// Read Kubernetes API server version to determine which ResourceSlice
+		// model to use.
+		useSplitSlices, err = shouldUseSplitResourceSlices(config.clientsets.Core)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine ResourceSlice model: %w", err)
+		}
+	}
 
 	if featuregates.Enabled(featuregates.DynamicMIG) {
 		if !state.IsMigCapable() {
@@ -110,14 +118,6 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 			// scheduler state is equivalent. TODO: review if this logic is correct;
 			// or if it potentially is too invasive for certain edge cases.
 			state.DestroyUnknownMIGDevices(ctx)
-
-			// Read Kubernetes API server version to determine which ResourceSlice
-			// model to use.
-			var err error
-			useSplitSlices, err = shouldUseSplitResourceSlices(config.clientsets.Core)
-			if err != nil {
-				return nil, fmt.Errorf("failed to determine ResourceSlice model: %w", err)
-			}
 		}
 	}
 
@@ -234,6 +234,7 @@ func (d *driver) generateSplitResourceSlices(nodeName string) resourceslice.Driv
 		allocatable := d.state.perGPUAllocatable.allocatablesMap[pciBusID]
 		var deviceSlice resourceslice.Slice
 		var gpuInfo *GpuInfo
+		var vfioDeviceInfo *VfioDeviceInfo
 
 		// Stable sort order by devicename
 		for _, devname := range slices.Sorted(maps.Keys(allocatable)) {
@@ -252,6 +253,9 @@ func (d *driver) generateSplitResourceSlices(nodeName string) resourceslice.Driv
 					gpuInfo = device.Gpu
 				case device.MigDynamic != nil:
 					gpuInfo = device.MigDynamic.Parent
+				case device.Vfio != nil:
+					gpuInfo = device.Vfio.Parent
+					vfioDeviceInfo = device.Vfio
 				}
 			}
 
@@ -259,7 +263,13 @@ func (d *driver) generateSplitResourceSlices(nodeName string) resourceslice.Driv
 			deviceSlice.Devices = append(deviceSlice.Devices, device.PartGetDevice(d.state.config))
 		}
 		if gpuInfo != nil {
+			klog.V(4).Infof("Adding shared counter sets for GPU %s", gpuInfo.CanonicalName())
 			allCounterSets = append(allCounterSets, gpuInfo.PartSharedCounterSets()...)
+		} else if vfioDeviceInfo != nil {
+			// If we didnt get GPUInfo but we have VfioDeviceInfo, then it means the GPU is used
+			// in passthrough mode and we don't have its parent GPU snapshot.
+			klog.V(4).Infof("Adding shared counter sets for Vfio GPU %s", vfioDeviceInfo.CanonicalName())
+			allCounterSets = append(allCounterSets, vfioDeviceInfo.PartSharedCounterSets()...)
 		}
 		gpuslices = append(gpuslices, deviceSlice)
 	}
@@ -290,6 +300,7 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 		allocatable := d.state.perGPUAllocatable.allocatablesMap[pciBusID]
 		var slice resourceslice.Slice
 		var gpuInfo *GpuInfo
+		var vfioDeviceInfo *VfioDeviceInfo
 
 		// Stable sort order by devicename -- makes the order of devices
 		// presented in a resource slice reproducible. Good for debuggability /
@@ -311,6 +322,9 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 					gpuInfo = device.Gpu
 				case device.MigDynamic != nil:
 					gpuInfo = device.MigDynamic.Parent
+				case device.Vfio != nil:
+					gpuInfo = device.Vfio.Parent
+					vfioDeviceInfo = device.Vfio
 				}
 			}
 
@@ -322,6 +336,11 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 
 		if gpuInfo != nil {
 			slice.SharedCounters = gpuInfo.PartSharedCounterSets()
+		} else if vfioDeviceInfo != nil {
+			// If we didnt get GPUInfo but we have VfioDeviceInfo, then it means the GPU is used
+			// in passthrough mode and we don't have its parent GPU snapshot.
+			klog.V(4).Infof("Adding shared counter sets for Vfio GPU %s", vfioDeviceInfo.CanonicalName())
+			slice.SharedCounters = vfioDeviceInfo.PartSharedCounterSets()
 		}
 		gpuslices = append(gpuslices, slice)
 	}
@@ -496,7 +515,7 @@ func (d *driver) nodeUnprepareResource(ctx context.Context, claimRef kubeletplug
 
 func (d *driver) publishResources(ctx context.Context, config *Config) error {
 
-	if featuregates.Enabled(featuregates.DynamicMIG) {
+	if featuregates.Enabled(featuregates.DynamicMIG) || featuregates.Enabled(featuregates.PassthroughSupport) {
 		// From KEP 4815: "we will add client-side validation in the
 		// ResourceSlice controller helper, so that any errors in the
 		// ResourceSlices will be caught before they even are applied to the
@@ -504,7 +523,7 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 		//
 		// TODO: implement error handler for bad slices:
 		// https://github.com/kubernetes/kubernetes/commit/a171795e313ee9f407fef4897c1a1e2052120991
-		klog.V(4).Infof("featuregates.DynamicMIG enabled: construct ResourceSlice objects according to KEP 4815 (partitionable devices)")
+		klog.V(4).Infof("construct ResourceSlice objects according to KEP 4815 (partitionable devices)")
 		resources := d.GenerateDriverResources(config.flags.nodeName)
 		if err := d.pluginhelper.PublishResources(ctx, resources); err != nil {
 			return err

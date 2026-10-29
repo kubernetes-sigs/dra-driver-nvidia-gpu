@@ -38,7 +38,7 @@ func a100FabricIdentityFixture() ([]fabricmanager.Partition, map[int]*GpuInfo) {
 	for i, module := range modules {
 		uuid := fmt.Sprintf("GPU-00000000-0000-0000-0000-%012d", module)
 		members[i] = fabricmanager.PartitionGPU{PhysicalID: i + 9, UUID: uuid, PCIBusID: "00000000:" + buses[i] + ":00.0"}
-		gpus[module] = &GpuInfo{UUID: uuid, pciBusID: "0000:" + buses[i] + ":00.0", gpuModuleID: module}
+		gpus[module] = &GpuInfo{UUID: uuid, PciBusID: "0000:" + buses[i] + ":00.0", GpuModuleID: module}
 	}
 	partitions := []fabricmanager.Partition{
 		{ID: 2, GPUs: members},
@@ -107,8 +107,8 @@ func TestFabricPartitionAttributesGPUIdentity(t *testing.T) {
 		if module == 5 {
 			want = map[int]int{1: 27, 2: 15, 4: 9, 8: 2}
 		}
-		require.Equal(t, want, gpu.partitionsBySize)
-		require.Equal(t, module, gpu.gpuModuleID)
+		require.Equal(t, want, gpu.PartitionsBySize)
+		require.Equal(t, module, gpu.GpuModuleID)
 		attrs := make(map[resourceapi.QualifiedName]resourceapi.DeviceAttribute)
 		gpu.addFabricManagerAttributes(attrs)
 		require.Equal(t, int64(module), *attrs["gpuModuleID"].IntValue)
@@ -134,9 +134,9 @@ func TestFabricPartitionLifecycleGPUIdentity(t *testing.T) {
 			gpu := gpus[3]
 			device := &AllocatableDevice{Gpu: gpu}
 			if vfio {
-				device = &AllocatableDevice{Vfio: &VfioDeviceInfo{UUID: "synthetic-vfio-uuid", parent: gpu}}
+				device = &AllocatableDevice{Vfio: &VfioDeviceInfo{UUID: "synthetic-vfio-uuid", Parent: gpu}}
 			}
-			state := &DeviceState{fmManager: manager, config: &Config{flags: &Flags{}}, perGPUAllocatable: &PerGPUAllocatableDevices{allocatablesMap: map[PCIBusID]AllocatableDevices{PCIBusID(gpu.pciBusID): {"device": device}}}}
+			state := &DeviceState{fmManager: manager, config: &Config{flags: &Flags{}}, perGPUAllocatable: &PerGPUAllocatableDevices{allocatablesMap: map[PCIBusID]AllocatableDevices{PCIBusID(gpu.PciBusID): {"device": device}}}}
 			claim := &resourceapi.ResourceClaim{Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{Devices: resourceapi.DeviceAllocationResult{Results: []resourceapi.DeviceRequestAllocationResult{{Driver: DriverName, Device: "device"}}}}}}
 			require.NoError(t, state.activateFabricPartition(claim))
 			require.Equal(t, []int{33}, client.activatedIDs)
@@ -153,14 +153,14 @@ func TestResolveFabricPartitionIdentityValidation(t *testing.T) {
 		mutate    func(*GpuInfo)
 		wantError bool
 	}{
-		"no NVML module ID":                    {mutate: func(g *GpuInfo) { g.gpuModuleID = 0 }},
-		"module ID already equals physical ID": {mutate: func(g *GpuInfo) { g.gpuModuleID = 15 }},
+		"no NVML module ID":                    {mutate: func(g *GpuInfo) { g.GpuModuleID = 0 }},
+		"module ID already equals physical ID": {mutate: func(g *GpuInfo) { g.GpuModuleID = 15 }},
 		"UUID unavailable":                     {mutate: func(g *GpuInfo) { g.UUID = "" }},
-		"PCI unavailable":                      {mutate: func(g *GpuInfo) { g.pciBusID = "" }},
+		"PCI unavailable":                      {mutate: func(g *GpuInfo) { g.PciBusID = "" }},
 		"conflicting UUID":                     {mutate: func(g *GpuInfo) { g.UUID = "GPU-other" }, wantError: true},
-		"unknown GPU":                          {mutate: func(g *GpuInfo) { g.UUID = "GPU-other"; g.pciBusID = "0000:ff:00.0" }, wantError: true},
-		"malformed PCI":                        {mutate: func(g *GpuInfo) { g.pciBusID = "0f:00.0" }, wantError: true},
-		"missing identity":                     {mutate: func(g *GpuInfo) { g.UUID = ""; g.pciBusID = "" }, wantError: true},
+		"unknown GPU":                          {mutate: func(g *GpuInfo) { g.UUID = "GPU-other"; g.PciBusID = "0000:ff:00.0" }, wantError: true},
+		"malformed PCI":                        {mutate: func(g *GpuInfo) { g.PciBusID = "0f:00.0" }, wantError: true},
+		"missing identity":                     {mutate: func(g *GpuInfo) { g.UUID = ""; g.PciBusID = "" }, wantError: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			partitions, gpus := a100FabricIdentityFixture()
@@ -210,8 +210,8 @@ func TestFabricPartitionWithoutFMIdentity(t *testing.T) {
 			state := &DeviceState{fmManager: manager}
 			for module, gpu := range gpus {
 				require.NoError(t, state.attachFabricManagerPartitions(gpu))
-				require.Len(t, gpu.partitionsBySize, 4)
-				require.Equal(t, module, gpu.gpuModuleID)
+				require.Len(t, gpu.PartitionsBySize, 4)
+				require.Equal(t, module, gpu.GpuModuleID)
 			}
 			for _, tc := range []struct {
 				modules []int

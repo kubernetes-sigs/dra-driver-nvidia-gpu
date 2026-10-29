@@ -24,6 +24,7 @@ import (
 	nvcdspec "github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi/spec"
 	resourceapi "k8s.io/api/resource/v1"
 	utilcache "k8s.io/apimachinery/pkg/util/cache"
+	"k8s.io/utils/ptr"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 )
@@ -111,13 +112,13 @@ func TestRequiresNVIDIADeviceNodes(t *testing.T) {
 func TestValidateClaimCDIDeviceNodes(t *testing.T) {
 	devices := AllocatableDevices{
 		"gpu-0": {
-			Gpu: &GpuInfo{UUID: "GPU-0", minor: 0},
+			Gpu: &GpuInfo{UUID: "GPU-0", Minor: 0},
 		},
 		"mig-static": {
 			MigStatic: &MigDeviceInfo{ParentUUID: "GPU-1", ParentMinor: 1},
 		},
 		"mig-dynamic": {
-			MigDynamic: &MigSpec{Parent: &GpuInfo{UUID: "GPU-2", minor: 2}},
+			MigDynamic: &MigSpec{Parent: &GpuInfo{UUID: "GPU-2", Minor: 2}},
 		},
 		"vfio-0": {
 			Vfio: &VfioDeviceInfo{},
@@ -305,7 +306,7 @@ func TestCreateClaimSpecFileRejectsMismatchedGPUDeviceMinor(t *testing.T) {
 	preparedDevices := PreparedDevices{{
 		Devices: PreparedDeviceList{{
 			Gpu: &PreparedGpu{
-				Info: &GpuInfo{UUID: "GPU-0", minor: 0},
+				Info: &GpuLiveTuple{UUID: "GPU-0", Minor: ptr.To(0)},
 				Device: &CheckpointedDevice{
 					DeviceName: "gpu-0",
 				},
@@ -316,6 +317,36 @@ func TestCreateClaimSpecFileRejectsMismatchedGPUDeviceMinor(t *testing.T) {
 	err := handler.CreateClaimSpecFile("claim", preparedDevices)
 	require.ErrorContains(t, err, "expected device node /dev/nvidia0")
 	require.Equal(t, 2, fake.deviceSpecCalls)
+}
+
+func TestCreateClaimSpecFileRejectsMissingGpuDeviceMinor(t *testing.T) {
+	fake := &fakeNVCDI{
+		getCommonEdits: func() (*cdiapi.ContainerEdits, error) {
+			return containerEdits("/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools"), nil
+		},
+		getDeviceSpecs: func(...string) ([]cdispec.Device, error) {
+			return deviceSpecs("/dev/nvidia1"), nil
+		},
+	}
+	handler := &CDIHandler{
+		nvcdiClaim: fake,
+		specCache:  utilcache.NewExpiring(),
+		cdiRoot:    t.TempDir(),
+	}
+	preparedDevices := PreparedDevices{{
+		Devices: PreparedDeviceList{{
+			Gpu: &PreparedGpu{
+				Info: &GpuLiveTuple{UUID: "GPU-0", Minor: nil},
+				Device: &CheckpointedDevice{
+					DeviceName: "gpu-0",
+				},
+			},
+		}},
+	}}
+
+	err := handler.CreateClaimSpecFile("claim", preparedDevices)
+	require.ErrorContains(t, err, "minor cannot be unset for prepared device \"gpu-0\"")
+	require.Equal(t, 0, fake.deviceSpecCalls)
 }
 
 func TestGetDeviceSpecsByUUIDAndMinorRefreshesStaleCache(t *testing.T) {

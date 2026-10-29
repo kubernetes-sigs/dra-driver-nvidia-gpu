@@ -95,10 +95,6 @@ type DeviceState struct {
 // NVSwitch/NVLink fabric. It returns (nil, nil) when Fabric Manager is not
 // applicable (feature disabled, mock NVML in use, or no fabric detected).
 func newFabricManager(nvdevlib *deviceLib, driver *root.Driver) (*fabricmanager.Manager, error) {
-	if !featuregates.Enabled(featuregates.FabricManagerPartitioning) {
-		return nil, nil
-	}
-
 	if common.UsingAltProcDevices() {
 		klog.Infof("Mock NVML proc is in use; skipping Fabric Manager")
 		return nil, nil
@@ -134,10 +130,53 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
 	}
 
-	perGPUAllocatable, err := nvdevlib.enumerateAllPossibleDevices()
+	checkpointManager, err := checkpointmanager.NewCheckpointManager(config.DriverPluginPath())
+	if err != nil {
+		return nil, fmt.Errorf("unable to create checkpoint manager: %w", err)
+	}
+
+	cpLockPath := filepath.Join(config.DriverPluginPath(), "cp.lock")
+
+	state := &DeviceState{
+		config:            config,
+		cplock:            flock.NewFlock(cpLockPath),
+		checkpointManager: checkpointManager,
+		/*fmManager:         fmManager,
+		tsManager:         tsManager,
+		mpsManager:        mpsManager,
+		vfioPciManager:    vfioPciManager,
+		perGPUAllocatable: perGPUAllocatable,*/
+		nvdevlib: nvdevlib,
+	}
+	state.checkpointCleanupManager = NewCheckpointCleanupManager(state, config.clientsets.Resource)
+
+	checkpoints, err := checkpointManager.ListCheckpoints()
+	if err != nil {
+		return nil, fmt.Errorf("unable to list checkpoints: %w", err)
+	}
+
+	var deviceCheckpoint *Checkpoint
+	for _, c := range checkpoints {
+		if c == DriverPluginCheckpointFileBasename {
+			cp, err := state.getCheckpoint(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("unable to get checkpoint: %w", err)
+			}
+			deviceCheckpoint = cp
+			break
+		}
+	}
+
+	cpPerGPUAllocatable, err := state.getPerGPUAllocatableDevicesFromCheckpoint(deviceCheckpoint)
+	if err != nil {
+		return nil, fmt.Errorf("error restoring per-GPU allocatable devices from checkpoint: %w", err)
+	}
+
+	perGPUAllocatable, err := nvdevlib.enumerateAllPossibleDevices(cpPerGPUAllocatable)
 	if err != nil {
 		return nil, fmt.Errorf("error enumerating all possible devices: %w", err)
 	}
+	state.perGPUAllocatable = perGPUAllocatable
 
 	hostDriverRoot := config.flags.hostDriverRoot
 
@@ -166,10 +205,12 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		}
 		cdiOptions = append(cdiOptions, WithVfioCDIHandler(vfioCDIHandler))
 	}
+
 	cdi, err := NewCDIHandler(cdiOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create CDI handler: %w", err)
 	}
+	state.cdi = cdi
 
 	var fullGPUuuids []string
 	for _, devices := range perGPUAllocatable.allocatablesMap {
@@ -183,46 +224,25 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	klog.V(2).Infof("Warming up CDI device spec cache for GPUs %v", fullGPUuuids)
 	cdi.WarmupDevSpecCache(fullGPUuuids)
 
-	var tsManager *TimeSlicingManager
 	if featuregates.Enabled(featuregates.TimeSlicingSettings) {
-		tsManager = NewTimeSlicingManager(nvdevlib)
+		state.tsManager = NewTimeSlicingManager(nvdevlib)
 	}
 
-	var mpsManager *MpsManager
 	if featuregates.Enabled(featuregates.MPSSupport) {
-		mpsManager = NewMpsManager(config, nvdevlib, hostDriverRoot, MpsControlDaemonTemplatePath)
+		state.mpsManager = NewMpsManager(config, nvdevlib, hostDriverRoot, MpsControlDaemonTemplatePath)
 	}
 
-	var vfioPciManager *VfioPciManager
 	if featuregates.Enabled(featuregates.PassthroughSupport) && nvdevlib.IsVfioEnabled() {
-		vfioPciManager = NewVfioPciManager(driver.Root, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
+		state.vfioPciManager = NewVfioPciManager(driver.Root, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
 	}
 
-	fmManager, err := newFabricManager(nvdevlib, driver)
-	if err != nil {
-		return nil, err
+	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
+		fmManager, err := newFabricManager(nvdevlib, driver)
+		if err != nil {
+			return nil, err
+		}
+		state.fmManager = fmManager
 	}
-
-	checkpointManager, err := checkpointmanager.NewCheckpointManager(config.DriverPluginPath())
-	if err != nil {
-		return nil, fmt.Errorf("unable to create checkpoint manager: %w", err)
-	}
-
-	cpLockPath := filepath.Join(config.DriverPluginPath(), "cp.lock")
-
-	state := &DeviceState{
-		cdi:               cdi,
-		tsManager:         tsManager,
-		mpsManager:        mpsManager,
-		vfioPciManager:    vfioPciManager,
-		perGPUAllocatable: perGPUAllocatable,
-		config:            config,
-		nvdevlib:          nvdevlib,
-		checkpointManager: checkpointManager,
-		fmManager:         fmManager,
-		cplock:            flock.NewFlock(cpLockPath),
-	}
-	state.checkpointCleanupManager = NewCheckpointCleanupManager(state, config.clientsets.Resource)
 
 	// Attach Fabric Manager partition mappings to every discovered GPU. The
 	// FM Manager (owned by DeviceState) matches GPU identities to the partition
@@ -233,11 +253,6 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 				return nil, fmt.Errorf("attaching fabric manager partitions for GPU %s: %w", gpu.CanonicalName(), err)
 			}
 		}
-	}
-
-	checkpoints, err := state.checkpointManager.ListCheckpoints()
-	if err != nil {
-		return nil, fmt.Errorf("unable to list checkpoints: %w", err)
 	}
 
 	currentBootID, err := bootid.GetCurrentBootID()
@@ -375,9 +390,6 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 				klog.Warningf("allocatable not found for device: %v", device.DeviceName)
 				continue
 			}
-			// Remove all other device types on the parent GPU of the prepared device.
-			// When vfio type is prepared, gpu type should not be advertised and vice versa.
-			s.perGPUAllocatable.RemoveSiblingDevices(allocatableDevice)
 		}
 	}
 
@@ -485,8 +497,8 @@ func (s *DeviceState) DestroyUnknownMIGDevices(ctx context.Context) {
 
 	// For now, let this be best-effort. Upon error, proceed with the program,
 	// do not crash it. TODO: maybe this should be timeout-controlled.
-	if err := s.nvdevlib.obliterateStaleMIGDevices(expectedDeviceNames); err != nil {
-		klog.Errorf("%s: obliterateStaleMIGDevices failed: %s", logpfx, err)
+	if err := s.nvdevlib.ObliterateStaleMIGDevices(expectedDeviceNames); err != nil {
+		klog.Errorf("%s: ObliterateStaleMIGDevices failed: %s", logpfx, err)
 	}
 
 	klog.Infof("%s: done", logpfx)
@@ -839,6 +851,107 @@ func (s *DeviceState) getCheckpoint(ctx context.Context) (*Checkpoint, error) {
 	return checkpoint.ToLatestVersion(), nil
 }
 
+func (s *DeviceState) getPerGPUAllocatableDevicesFromCheckpoint(deviceCheckpoint *Checkpoint) (*PerGPUAllocatableDevices, error) {
+	perGPUAllocatable := &PerGPUAllocatableDevices{
+		allocatablesMap: make(map[PCIBusID]AllocatableDevices),
+	}
+	if deviceCheckpoint == nil {
+		return perGPUAllocatable, nil
+	}
+
+	for _, preparedClaim := range deviceCheckpoint.V2.PreparedClaims {
+		// Here we purposely only look at claims in the PrepareCompleted state.
+		// Partially prepared claims do not have any device information stored.
+		// So we do a best-effort alignment of the devices to the ones allocated
+		// to the claim during regular device enumeration.
+		if preparedClaim.CheckpointState != ClaimCheckpointStatePrepareCompleted {
+			continue
+		}
+		for _, group := range preparedClaim.PreparedDevices {
+			for _, preparedDevice := range group.Devices {
+				switch preparedDevice.Type() {
+				case GpuDeviceType:
+					gpuDevName := preparedDevice.Gpu.Device.DeviceName
+					glt := preparedDevice.Gpu.Info
+					gst, err := NewGpuSpecTupleFromCanonicalName(gpuDevName)
+					if err != nil {
+						return nil, fmt.Errorf("failed to parse gpu device name %q: %w", gpuDevName, err)
+					}
+					allDevs := perGPUAllocatable.GetAllDevices()
+					gpuDev := allDevs.GetGPUDeviceByUUID(glt.UUID)
+					// Check if the GPU device is already discovered.
+					// This can happen if there are a mix of admin and non-admin claims.
+					if gpuDev == nil {
+						allocatable, err := s.nvdevlib.DiscoverGpuDeviceByUUID(gst.Index, glt.UUID)
+						if err != nil {
+							return nil, fmt.Errorf("failed to discover gpu device (uuid: %q) %q: %w", glt.UUID, gpuDevName, err)
+						}
+						err = perGPUAllocatable.AddAllocatableDevice(allocatable)
+						if err != nil {
+							return nil, fmt.Errorf("failed to add allocatable for gpu device %q (uuid: %q): %w", gpuDevName, glt.UUID, err)
+						}
+					}
+				case MigDynamicDeviceType, MigStaticDeviceType:
+					migDevName := preparedDevice.Mig.Device.DeviceName
+					mlt := preparedDevice.Mig.Concrete
+					mst, err := NewMigSpecTupleFromCanonicalName(migDevName)
+					if err != nil {
+						return nil, fmt.Errorf("failed to parse mig device name %q: %w", migDevName, err)
+					}
+					allDevs := perGPUAllocatable.GetAllDevices()
+					gpuDev := allDevs.GetGPUDeviceByUUID(mlt.ParentUUID)
+					// Check if the parent GPU device is already discovered.
+					// This can happen if there are a mix of admin and non-admin claims or
+					// another MIG device on the same parent GPU exists.
+					if gpuDev == nil {
+						allocatable, err := s.nvdevlib.DiscoverGpuDeviceByUUID(mst.ParentIndex, mlt.ParentUUID)
+						if err != nil {
+							return nil, fmt.Errorf("failed to discover gpu device (uuid: %q) for mig %q: %w", mlt.ParentUUID, migDevName, err)
+						}
+						err = perGPUAllocatable.AddAllocatableDevice(allocatable)
+						if err != nil {
+							return nil, fmt.Errorf("failed to add allocatable for gpu device %q (uuid: %q): %w", allocatable.CanonicalName(), mlt.ParentUUID, err)
+						}
+					}
+				case VfioDeviceType:
+					vfioDevName := preparedDevice.Vfio.Device.DeviceName
+					vlt := preparedDevice.Vfio.Info
+					snapshot := preparedDevice.Vfio.AllocatableDevicesSnapshot
+					// If we had just upgraded from a version before v0.6.0, then this snapshot will not be present.
+					if snapshot != nil {
+						devices, err := snapshot.Restore()
+						if err != nil {
+							return nil, fmt.Errorf("failed to restore allocatable devices snapshot for device %q: %w", vfioDevName, err)
+						} else {
+							err = perGPUAllocatable.AddGPUAllocatables(vlt.PciBusID, devices)
+							if err != nil {
+								return nil, fmt.Errorf("failed to add allocatable devices from snapshot for device %q: %w", vfioDevName, err)
+							}
+						}
+					} else {
+						// If the snapshot was not present, we rediscover the VFIO device so that it has
+						// the correct index.
+						vst, err := NewVfioSpecTupleFromCanonicalName(vfioDevName)
+						if err != nil {
+							return nil, fmt.Errorf("failed to parse vfio device name %q: %w", vfioDevName, err)
+						}
+						allocatable, err := s.nvdevlib.discoverVfioDeviceByPciBusID(vst.Index, vlt.PciBusID)
+						if err != nil {
+							klog.Warningf("Failed to discover vfio device %q: %v. Skipping...", vfioDevName, err)
+							continue
+						}
+						err = perGPUAllocatable.AddAllocatableDevice(allocatable)
+						if err != nil {
+							return nil, fmt.Errorf("failed to add allocatable for vfio device %q (pciBusID: %q): %w", allocatable.CanonicalName(), vlt.PciBusID, err)
+						}
+					}
+				}
+			}
+		}
+	}
+	return perGPUAllocatable, nil
+}
+
 // logCheckpointDiff is invoked when GetCheckpoint returns
 // CorruptCheckpointError: the on-disk JSON deserialized cleanly but the
 // checksum recomputed at verification time disagrees with the one encoded in
@@ -1083,7 +1196,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 			switch allocatableDevice.Type() {
 			case GpuDeviceType:
 				preparedDevice.Gpu = &PreparedGpu{
-					Info:   allocatableDevice.Gpu,
+					Info:   allocatableDevice.Gpu.LiveTuple(),
 					Device: device,
 				}
 			case MigStaticDeviceType:
@@ -1103,7 +1216,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 					// persist data to disk that may be useful for cleaning up a
 					// partial prepare more reliably (such as the MIG device UUID).
 					tcmig0 := time.Now()
-					migdev, err := s.nvdevlib.createMigDevice(migspec)
+					migdev, err := s.nvdevlib.CreateMigDevice(migspec)
 					klog.V(6).Infof("t_prep_create_mig_dev %.3f s (claim %s)", time.Since(tcmig0).Seconds(), ResourceClaimToString(claim))
 					if err != nil {
 						return nil, fmt.Errorf("error creating MIG device: %w", err)
@@ -1114,9 +1227,15 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 					}
 				}
 			case VfioDeviceType:
+				devices := s.perGPUAllocatable.GetAllDevices(allocatableDevice.GetGPUPCIBusID())
+				devicesSnapshot, err := devices.Snapshot()
+				if err != nil {
+					return nil, fmt.Errorf("error getting devices snapshot: %w", err)
+				}
 				preparedDevice.Vfio = &PreparedVfioDevice{
-					Info:   allocatableDevice.Vfio,
-					Device: device,
+					Info:                       allocatableDevice.Vfio.LiveTuple(),
+					Device:                     device,
+					AllocatableDevicesSnapshot: &devicesSnapshot,
 				}
 			}
 
@@ -1151,15 +1270,15 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 		for _, device := range group.Devices {
 			switch device.Type() {
 			case GpuDeviceType:
-				klog.V(4).Infof("Unprepare: regular GPU: noop (GPU %s)", device.Gpu.Info.String())
+				klog.V(4).Infof("Unprepare: regular GPU: noop (GPU %s)", device.Gpu.Device.DeviceName)
 			case PreparedMigDeviceType:
 				if featuregates.Enabled(featuregates.DynamicMIG) {
 					mig := device.Mig.Concrete
 					if isConsumableSharesEnabled(s.config) && isMigDeviceInUseByOtherClaims(checkpoint, claimUID, mig.MigUUID, device.Mig.Device.DeviceName) {
-						klog.V(4).Infof("Unprepare: dynamic MIG device '%s' still in use by other claims, skipping deletion", mig.MigUUID)
+						klog.V(4).Infof("Unprepare: dynamic MIG device %q still in use by other claims, skipping deletion", mig.MigUUID)
 						continue
 					}
-					klog.V(4).Infof("Unprepare: tear down MIG device '%s' for claim '%s'", mig.MigUUID, claimUID)
+					klog.V(4).Infof("Unprepare: tear down MIG device %q for claim '%s'", mig.MigUUID, claimUID)
 					// Errors during MIG device deletion are generally rare but
 					// have to be expected, and should fail the
 					// NodeUnprepareResources() operation. This may for example
@@ -1167,7 +1286,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 					// client' and resolve itself soon; when the conflicting
 					// party goes away. Log an explicit warning, in addition to
 					// returning an error.
-					err := s.nvdevlib.deleteMigDevice(mig)
+					err := s.nvdevlib.DeleteMigDevice(mig)
 					if err != nil {
 						klog.Warningf("Error deleting MIG device %s (UUID %s): %s", device.Mig.Device.DeviceName, mig.MigUUID, err)
 						return false, fmt.Errorf("failed to delete MIG device %s (UUID %s): %w", device.Mig.Device.DeviceName, mig.MigUUID, err)
@@ -1245,7 +1364,7 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) error {
 	switch device.Type() {
 	case GpuDeviceType:
-		if !featuregates.Enabled(featuregates.PassthroughSupport) || !s.nvdevlib.IsVfioEnabled() || !device.Gpu.vfioEnabled {
+		if !featuregates.Enabled(featuregates.PassthroughSupport) || !s.nvdevlib.IsVfioEnabled() || !device.Gpu.VfioEnabled {
 			return nil
 		}
 		vfioAllocatable, err := s.nvdevlib.discoverVfioDevice(device.Gpu)
@@ -1257,7 +1376,7 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 			return fmt.Errorf("error adding allocatable device: %w", err)
 		}
 	case VfioDeviceType:
-		gpu, _, err := s.nvdevlib.discoverGPUByPCIBusID(device.Vfio.PciBusID)
+		gpu, _, err := s.nvdevlib.DiscoverGPUByPCIBusID(device.Vfio.PciBusID)
 		if err != nil {
 			return fmt.Errorf("error discovering gpu by pci bus id: %w", err)
 		}
@@ -1265,7 +1384,7 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 		if err != nil {
 			return fmt.Errorf("error adding allocatable device: %w", err)
 		}
-		device.Vfio.parent = gpu.Gpu
+		device.Vfio.Parent = gpu.Gpu
 		// Always invalidate after rebinding, even if the minor is unchanged.
 		// getDeviceSpecsByUUIDAndMinor only refreshes entries with a mismatched
 		// minor, so a same-minor cache entry could hide a stale host device node.
@@ -1467,12 +1586,12 @@ func (s *DeviceState) resolveFabricPartition(gpus []*GpuInfo) (int, error) {
 		if gpu == nil {
 			return 0, fmt.Errorf("fabric manager: missing physical GPU identity")
 		}
-		physicalID, found, err := s.fmManager.PhysicalIDForGPU(gpu.UUID, gpu.pciBusID, gpu.gpuModuleID)
+		physicalID, found, err := s.fmManager.PhysicalIDForGPU(gpu.UUID, gpu.PciBusID, gpu.GpuModuleID)
 		if err != nil {
 			return 0, err
 		}
 		if !found {
-			return 0, fmt.Errorf("fabric manager: no member for GPU UUID %q PCI %q (NVML module ID %d)", gpu.UUID, gpu.pciBusID, gpu.gpuModuleID)
+			return 0, fmt.Errorf("fabric manager: no member for GPU UUID %q PCI %q (NVML module ID %d)", gpu.UUID, gpu.PciBusID, gpu.GpuModuleID)
 		}
 		physicalIDs = append(physicalIDs, physicalID)
 	}
@@ -1500,7 +1619,7 @@ func (s *DeviceState) gpuInfosFromPreparedClaim(results []resourceapi.DeviceRequ
 		case GpuDeviceType:
 			gpus = append(gpus, device.Gpu)
 		case VfioDeviceType:
-			gpus = append(gpus, device.Vfio.parent)
+			gpus = append(gpus, device.Vfio.Parent)
 		default:
 			klog.V(6).Infof("device %q has unsupported type %q; skipping for fabric partition", r.Device, device.Type())
 		}
@@ -1549,21 +1668,21 @@ func (s *DeviceState) attachFabricManagerPartitions(gpu *GpuInfo) error {
 	if !s.fabricManagerPartitioningEnabled() || gpu == nil {
 		return nil
 	}
-	physicalID, found, err := s.fmManager.PhysicalIDForGPU(gpu.UUID, gpu.pciBusID, gpu.gpuModuleID)
+	physicalID, found, err := s.fmManager.PhysicalIDForGPU(gpu.UUID, gpu.PciBusID, gpu.GpuModuleID)
 	if err != nil {
 		return err
 	}
 	if !found {
-		klog.Warningf("GPU UUID %q PCI %q has no Fabric Manager member; skipping partition attributes", gpu.UUID, gpu.pciBusID)
-		gpu.partitionsBySize = nil
+		klog.Warningf("GPU UUID %q PCI %q has no Fabric Manager member; skipping partition attributes", gpu.UUID, gpu.PciBusID)
+		gpu.PartitionsBySize = nil
 		return nil
 	}
 	bySize, err := s.fmManager.GetPartitionsBySizeByPhysicalID(physicalID)
 	if err != nil {
 		return fmt.Errorf("getting partition-by-size mapping for physical ID %d: %w", physicalID, err)
 	}
-	klog.V(4).Infof("Fabric Manager: GPU UUID %s PCI %s NVML module ID %d maps to physical ID %d", gpu.UUID, gpu.pciBusID, gpu.gpuModuleID, physicalID)
-	gpu.partitionsBySize = bySize
+	klog.V(4).Infof("Fabric Manager: GPU UUID %s PCI %s NVML module ID %d maps to physical ID %d", gpu.UUID, gpu.PciBusID, gpu.GpuModuleID, physicalID)
+	gpu.PartitionsBySize = bySize
 	return nil
 }
 
@@ -1987,7 +2106,7 @@ func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpec
 	}
 
 	klog.V(1).Infof("MIG device corresponding to name %s found with UUID %s -- attempt to tear down", dname, mlt.MigUUID)
-	if err := s.nvdevlib.deleteMigDevice(mlt); err != nil {
+	if err := s.nvdevlib.DeleteMigDevice(mlt); err != nil {
 		return fmt.Errorf("failed to delete MIG device %s (deleteMigDevice): %w", dname, err)
 	}
 
@@ -2037,7 +2156,7 @@ func (s *DeviceState) AddDeviceTaint(d *AllocatableDevice, taint *resourceapi.De
 // Used by the driver at startup to gate the DynamicMIG-specific code paths.
 func (s *DeviceState) IsMigCapable() bool {
 	for _, gpu := range s.nvdevlib.gpuInfosByUUID {
-		if gpu.migCapable {
+		if gpu.MigCapable {
 			return true
 		}
 	}

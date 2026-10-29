@@ -35,6 +35,14 @@ import (
 // representation is abstract. It does not carry MIG device identity (UUID), and
 // does not express whether that device currently exists.
 type MigSpecTuple struct {
+	// ParentIndex is the index of the parent GPU used in naming it.
+	// The name of a MIG device is encoded as
+	// `<parent-gpu-name>-mig-<profile-name>-<profile-id>-<placement-start>`.
+	// So given a MIG device name, we can infer this parent GPU index. And
+	// eventually lookup the parent GPU to get its minor/pciBusID properties.
+	// With Passthrough support, the parent GPU minor may change dynamically
+	// as vfio devices are prepared/unprepared but the index will remain the same.
+	ParentIndex    int
 	ParentMinor    GPUMinor
 	ParentPCIBusID PCIBusID
 	// What is commonly called "MIG profile ID" typically refers to the GPU
@@ -100,8 +108,9 @@ type MigSpec struct {
 
 func (m *MigSpec) Tuple() *MigSpecTuple {
 	return &MigSpecTuple{
-		ParentMinor:    m.Parent.minor,
-		ParentPCIBusID: m.Parent.pciBusID,
+		ParentIndex:    m.Parent.Index,
+		ParentMinor:    m.Parent.Minor,
+		ParentPCIBusID: m.Parent.PciBusID,
 		ProfileID:      int(m.GIProfileInfo.Id),
 		PlacementStart: int(m.Placement.Start),
 	}
@@ -118,7 +127,7 @@ func (m *MigSpec) Tuple() *MigSpecTuple {
 // iterates through devices from top to bottom and picks the first match.
 func (m *MigSpecTuple) ToCanonicalName(profileName string) DeviceName {
 	pname := toRFC1123Compliant(strings.ReplaceAll(profileName, ".", ""))
-	return fmt.Sprintf("gpu-%d-mig-%s-%d-%d", m.ParentMinor, pname, m.ProfileID, m.PlacementStart)
+	return fmt.Sprintf("gpu-%d-mig-%s-%d-%d", m.ParentIndex, pname, m.ProfileID, m.PlacementStart)
 }
 
 // CommonCapacitiesMig returns the relevant GPU instance profile properties. The
@@ -156,34 +165,34 @@ func CommonAttributesMig(parent *GpuInfo, profileName string) map[resourceapi.Qu
 			StringValue: ptr.To(profileName),
 		},
 		"productName": {
-			StringValue: &parent.productName,
+			StringValue: &parent.ProductName,
 		},
 		"brand": {
-			StringValue: &parent.brand,
+			StringValue: &parent.Brand,
 		},
 		"architecture": {
-			StringValue: &parent.architecture,
+			StringValue: &parent.Architecture,
 		},
 		"cudaComputeCapability": {
-			VersionValue: ptr.To(semver.MustParse(parent.cudaComputeCapability).String()),
+			VersionValue: ptr.To(semver.MustParse(parent.CudaComputeCapability).String()),
 		},
 		"driverVersion": {
-			VersionValue: ptr.To(semver.MustParse(parent.driverVersion).String()),
+			VersionValue: ptr.To(semver.MustParse(parent.DriverVersion).String()),
 		},
 		"cudaDriverVersion": {
-			VersionValue: ptr.To(semver.MustParse(parent.cudaDriverVersion).String()),
+			VersionValue: ptr.To(semver.MustParse(parent.CudaDriverVersion).String()),
 		},
 	}
 
-	if parent.addressingMode != nil {
+	if parent.AddressingMode != nil {
 		attrs["addressingMode"] = resourceapi.DeviceAttribute{
-			StringValue: parent.addressingMode,
+			StringValue: parent.AddressingMode,
 		}
 	}
 
-	addDeviceAttribute(attrs, parent.pciBusIDAttr)
-	addDeviceAttribute(attrs, parent.pcieRootAttr)
-	addDeviceAttribute(attrs, parent.numaNodeAttr)
+	addDeviceAttribute(attrs, parent.PciBusIDAttr)
+	addDeviceAttribute(attrs, parent.PcieRootAttr)
+	addDeviceAttribute(attrs, parent.NumaNodeAttr)
 
 	return attrs
 }
@@ -197,7 +206,7 @@ func NewMigSpecTupleFromCanonicalName(n DeviceName) (*MigSpecTuple, error) {
 	}
 
 	// matches[0]: the whole string
-	// matches[1]: ParentMinor
+	// matches[1]: ParentIndex
 	// matches[2]: MIG profile name (ignore this for building the struct)
 	// matches[3]: ProfileID
 	// matches[4]: PlacementStart
@@ -205,7 +214,7 @@ func NewMigSpecTupleFromCanonicalName(n DeviceName) (*MigSpecTuple, error) {
 	// The regex guarantees that these groups are digits, and the expected
 	// values are small. That is, Atoi() errors are not expected. Handle them
 	// anyway for correctness.
-	parentMinor, err1 := strconv.Atoi(matches[1])
+	parentIndex, err1 := strconv.Atoi(matches[1])
 	profileID, err2 := strconv.Atoi(matches[3])
 	placementStart, err3 := strconv.Atoi(matches[4])
 
@@ -214,7 +223,7 @@ func NewMigSpecTupleFromCanonicalName(n DeviceName) (*MigSpecTuple, error) {
 	}
 
 	return &MigSpecTuple{
-		ParentMinor:    GPUMinor(parentMinor),
+		ParentIndex:    parentIndex,
 		ProfileID:      profileID,
 		PlacementStart: placementStart,
 	}, nil
@@ -259,12 +268,12 @@ func (m *MigSpec) validateMigProfiles() error {
 }
 
 type MigProfileInfo struct {
-	profile    nvdev.MigProfile
-	placements []*MigDevicePlacement
+	Profile    nvdev.MigProfile
+	Placements []*MigDevicePlacement
 }
 
 func (p MigProfileInfo) String() string {
-	return p.profile.String()
+	return p.Profile.String()
 }
 
 type MigDevicePlacement struct {

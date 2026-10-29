@@ -44,6 +44,7 @@ type GPUMinor = int
 
 type deviceLib struct {
 	nvdev.Interface
+	gpuIndexer        GPUIndexer
 	nvmllib           nvml.Interface
 	nvpci             nvpci.Interface
 	nvpasst           nvpassthrough.Interface
@@ -56,7 +57,6 @@ type deviceLib struct {
 	vfioEnabled       bool
 	gpuInfosByUUID    map[string]*GpuInfo
 	gpuUUIDbyPCIBusID map[PCIBusID]string
-	devhandleByUUID   map[string]nvml.Device
 }
 
 func newDeviceLib(driver *root.Driver, hostRoot string) (*deviceLib, error) {
@@ -96,6 +96,7 @@ func newDeviceLib(driver *root.Driver, hostRoot string) (*deviceLib, error) {
 
 	d := deviceLib{
 		Interface:         nvdev.New(nvmllib),
+		gpuIndexer:        NewGPUIndexer(maxIndices),
 		nvmllib:           nvmllib,
 		driverLibraryPath: driverLibraryPath,
 		devRoot:           driver.DevRoot,
@@ -107,16 +108,6 @@ func newDeviceLib(driver *root.Driver, hostRoot string) (*deviceLib, error) {
 		nvpasst:           nvpassthrough,
 		gpuInfosByUUID:    make(map[string]*GpuInfo),
 		gpuUUIDbyPCIBusID: make(map[PCIBusID]string),
-		devhandleByUUID:   make(map[string]nvml.Device),
-	}
-
-	// Current design: when DynamicMIG is enabled, use one long-lived NVML
-	// session.
-	if featuregates.Enabled(featuregates.DynamicMIG) {
-		klog.V(1).Infof("DynamicMIG enabled: initialize long-lived NVML session")
-		if err := d.Init(); err != nil {
-			return nil, fmt.Errorf("failed to initialize NVML: %w", err)
-		}
 	}
 
 	return &d, nil
@@ -177,16 +168,8 @@ func (l deviceLib) alwaysShutdown() {
 
 // ensureNVML() calls NVML Init() and returns an NVML shutdown function and an
 // error (nvml.Return). The caller is responsible for calling the shutdown
-// function (via defer). This is a noop when DynamicMIG is enabled.
+// function (via defer).
 func (l deviceLib) ensureNVML() (func(), nvml.Return) {
-	// Long-lived NVML: no init needed, return no-op shutdown func. We could
-	// achieve the same by just calling init() once more than shutdown because
-	// NVML keeps an internal reference count. I however find it more readable
-	// to explicitly initialize NVML only once when DynamicMIG is enabled.
-	if featuregates.Enabled(featuregates.DynamicMIG) {
-		return func() {}, nvml.SUCCESS
-	}
-
 	klog.V(6).Infof("Initializing NVML")
 	t0 := time.Now()
 	// Its possible there are no GPUs available in NVML.
@@ -203,9 +186,9 @@ func (l deviceLib) ensureNVML() (func(), nvml.Return) {
 	return func() { l.alwaysShutdown() }, nvml.SUCCESS
 }
 
-// Discover devices that are allocatable, on this node.
-func (l deviceLib) enumerateAllPossibleDevices() (*PerGPUAllocatableDevices, error) {
-	perGPUAllocatable, err := l.GetPerGpuAllocatableDevices()
+// Discover devices that are allocatable on this node.
+func (l deviceLib) enumerateAllPossibleDevices(knownPerGPUAllocatable *PerGPUAllocatableDevices) (*PerGPUAllocatableDevices, error) {
+	perGPUAllocatable, err := l.GetPerGpuAllocatableDevices(knownPerGPUAllocatable)
 	if err != nil {
 		return nil, fmt.Errorf("error enumerating allocatable devices: %w", err)
 	}
@@ -226,7 +209,7 @@ func (l deviceLib) enumerateAllPossibleDevices() (*PerGPUAllocatableDevices, err
 // discovery, and assembles the set of allocatable devices that will be
 // announced by this DRA driver. A list of GPU indices can optionally be
 // provided to limit the discovery to a set of physical GPUs.
-func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatableDevices, error) {
+func (l deviceLib) GetPerGpuAllocatableDevices(knownPerGPUAllocatable *PerGPUAllocatableDevices) (*PerGPUAllocatableDevices, error) {
 	klog.Infof("Traverse GPU devices")
 
 	shutdown, ret := l.ensureNVML()
@@ -238,12 +221,16 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 	perGPUAllocatable := &PerGPUAllocatableDevices{
 		allocatablesMap: make(map[PCIBusID]AllocatableDevices),
 	}
+	if knownPerGPUAllocatable != nil {
+		for pciBusID, allocatables := range knownPerGPUAllocatable.allocatablesMap {
+			err := perGPUAllocatable.AddGPUAllocatables(pciBusID, allocatables)
+			if err != nil {
+				return nil, fmt.Errorf("failed to add known allocatables for GPU PCI bus ID %q: %w", pciBusID, err)
+			}
+		}
+	}
 
 	err := l.VisitDevices(func(i int, d nvdev.Device) error {
-		if indices != nil && !slices.Contains(indices, i) {
-			return nil
-		}
-
 		// Prepare data structure for conceptually allocatable devices on this
 		// one physical GPU.
 		thisGPUAllocatable := make(AllocatableDevices)
@@ -253,13 +240,56 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 			return fmt.Errorf("error getting info for GPU %v: %w", i, err)
 		}
 
-		parentdev := &AllocatableDevice{
-			Gpu: gpuInfo,
+		// Check if the GPU index is already known.
+		var parentDev *AllocatableDevice
+		allocatableDevices := perGPUAllocatable.GetAllDevices(gpuInfo.PciBusID)
+		gpuDevs := allocatableDevices.GetGPUs()
+		if len(gpuDevs) > 0 {
+			parentDev = gpuDevs[0]
+		}
+		if parentDev == nil {
+			// Check if there's already a VFIO device for this GPU.
+			// this can happen if its been prepared in passthrough-mode
+			// for an active workload.
+			if featuregates.Enabled(featuregates.PassthroughSupport) {
+				vfioDevs := allocatableDevices.GetVfioDevices()
+				if len(vfioDevs) > 0 {
+					// Pick the index for the GPU from the VFIO device.
+					gpuInfo.Index = vfioDevs[0].Vfio.Index
+				}
+			}
+
+			// We don't have a cached VFIO device nor a GPU device, so we need
+			// to reserve the first available index for this GPU.
+			// Prefer the GPU minor number when discovering the GPU from scratch
+			// for idle or checkpointed in PrepareStarted state. This will
+			// preserve the existing naming convention of the GPU/MIG device as
+			// much as possible.
+			if idx := l.gpuIndexer.Reserve(gpuInfo.Index, gpuInfo.PciBusID); idx == -1 {
+				// Indexer has a max capacity of 16. We're not expected to reach it as
+				// nodes can only have at most 16 GPUs.
+				return fmt.Errorf("no free index found for GPU %v", i)
+			} else {
+				gpuInfo.Index = idx
+			}
+
+			parentDev = &AllocatableDevice{
+				Gpu: gpuInfo,
+			}
+		} else {
+			// If allocatable already exists, then update its gpuInfo object.
+			gpuInfo.Index = parentDev.Gpu.Index
+			parentDev.Gpu = gpuInfo
+		}
+
+		// Enable VFIO if node has the capability.
+		if featuregates.Enabled(featuregates.PassthroughSupport) && l.IsVfioEnabled() {
+			gpuInfo.VfioEnabled = true
 		}
 
 		// Store gpuInfo object for later re-use (lookup by UUID).
 		l.gpuInfosByUUID[gpuInfo.UUID] = gpuInfo
-		l.gpuUUIDbyPCIBusID[gpuInfo.pciBusID] = gpuInfo.UUID
+		l.gpuUUIDbyPCIBusID[gpuInfo.PciBusID] = gpuInfo.UUID
 
 		if featuregates.Enabled(featuregates.DynamicMIG) {
 			dynamicMIGCapable, err := isDynamicMIGCapable(gpuInfo, d)
@@ -277,8 +307,8 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 			if dynamicMIGCapable {
 				// Best-effort handle cache warmup: store mapping between full-GPU
 				// UUID and NVML device handle in a map. Ignore failures.
-				if _, ret := l.DeviceGetHandleByUUID(gpuInfo.UUID); ret != nvml.SUCCESS {
-					klog.Warningf("DeviceGetHandleByUUID failed: %s", ret)
+				if _, ret := l.deviceGetHandleByUUID(gpuInfo.UUID); ret != nvml.SUCCESS {
+					klog.Warningf("deviceGetHandleByUUID failed: %s", ret)
 				}
 
 				// For this full device, inspect all MIG profiles and their possible
@@ -301,8 +331,8 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 				// We're inside the dynamicMIGCapable=true branch, which already excludes
 				// vGPUs masquerading as full GPUs, so supportsMIGModeToggle(d) here precisely means
 				// "non-vGPU Hopper+".
-				if !gpuInfo.migEnabled || supportsMIGModeToggle(d) {
-					thisGPUAllocatable[gpuInfo.CanonicalName()] = parentdev
+				if !gpuInfo.MigEnabled || supportsMIGModeToggle(d) {
+					thisGPUAllocatable[gpuInfo.CanonicalName()] = parentDev
 				}
 				for name, migspec := range migspecs {
 					dev := &AllocatableDevice{
@@ -311,9 +341,9 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 					thisGPUAllocatable[name] = dev
 				}
 
-				err = perGPUAllocatable.AddGPUAllocatables(gpuInfo.pciBusID, thisGPUAllocatable)
+				err = perGPUAllocatable.AddGPUAllocatables(gpuInfo.PciBusID, thisGPUAllocatable)
 				if err != nil {
-					return fmt.Errorf("error adding allocatables for PCI bus ID %q: %w", gpuInfo.pciBusID, err)
+					return fmt.Errorf("error adding allocatables for PCI bus ID %q: %w", gpuInfo.PciBusID, err)
 				}
 
 				// Terminate this function -- this is mutually exclusive with static MIG and vfio/passthrough.
@@ -329,18 +359,20 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 		if featuregates.Enabled(featuregates.PassthroughSupport) && l.IsVfioEnabled() {
 			// Only if no MIG devices are found, allow VFIO devices.
 			klog.Infof("PassthroughSupport enabled, and %d MIG devices found", len(migdevs))
-			gpuInfo.vfioEnabled = len(migdevs) == 0
+			if len(migdevs) > 0 {
+				gpuInfo.VfioEnabled = false
+			}
 		}
 
-		if !gpuInfo.migEnabled {
+		if !gpuInfo.MigEnabled {
 			klog.Infof("Adding device %s to allocatable devices", gpuInfo.CanonicalName())
 			// No static MIG devices prepared for this physical GPU. Announce
 			// physical GPU to be allocatable, and terminate discovery for this
 			// phyical GPU.
-			thisGPUAllocatable[gpuInfo.CanonicalName()] = parentdev
-			err = perGPUAllocatable.AddGPUAllocatables(gpuInfo.pciBusID, thisGPUAllocatable)
+			thisGPUAllocatable[gpuInfo.CanonicalName()] = parentDev
+			err = perGPUAllocatable.AddGPUAllocatables(gpuInfo.PciBusID, thisGPUAllocatable)
 			if err != nil {
-				return fmt.Errorf("error adding allocatables for PCI bus ID %q: %w", gpuInfo.pciBusID, err)
+				return fmt.Errorf("error adding allocatables for PCI bus ID %q: %w", gpuInfo.PciBusID, err)
 			}
 			return nil
 		}
@@ -356,9 +388,9 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 			klog.Warningf("Physical GPU %s has MIG mode enabled but no configured MIG devices", gpuInfo.CanonicalName())
 		}
 
-		err = perGPUAllocatable.AddGPUAllocatables(gpuInfo.pciBusID, thisGPUAllocatable)
+		err = perGPUAllocatable.AddGPUAllocatables(gpuInfo.PciBusID, thisGPUAllocatable)
 		if err != nil {
-			return fmt.Errorf("error adding allocatables for PCI bus ID %s: %w", gpuInfo.pciBusID, err)
+			return fmt.Errorf("error adding allocatables for PCI bus ID %s: %w", gpuInfo.PciBusID, err)
 		}
 
 		return nil
@@ -388,11 +420,12 @@ func (l deviceLib) discoverMigDevicesByGPU(gpuInfo *GpuInfo) ([]*AllocatableDevi
 }
 
 // TODO: Need go-nvlib util for this.
-func (l deviceLib) discoverGPUByPCIBusID(pciBusID string) (*AllocatableDevice, []*AllocatableDevice, error) {
-	if err := l.Init(); err != nil {
-		return nil, nil, err
+func (l deviceLib) DiscoverGPUByPCIBusID(pciBusID string) (*AllocatableDevice, []*AllocatableDevice, error) {
+	shutdown, ret := l.ensureNVML()
+	if ret != nvml.SUCCESS {
+		return nil, nil, fmt.Errorf("ensureNVML failed: %w", ret)
 	}
-	defer l.alwaysShutdown()
+	defer shutdown()
 
 	var gpu *AllocatableDevice
 	var migs []*AllocatableDevice
@@ -408,12 +441,76 @@ func (l deviceLib) discoverGPUByPCIBusID(pciBusID string) (*AllocatableDevice, [
 		if err != nil {
 			return fmt.Errorf("error getting info for GPU %d: %w", i, err)
 		}
+		// Store gpuInfo object for later re-use (lookup by UUID).
+		l.gpuInfosByUUID[gpuInfo.UUID] = gpuInfo
+		l.gpuUUIDbyPCIBusID[gpuInfo.PciBusID] = gpuInfo.UUID
+
+		// Enable VFIO if node has the capability.
+		if featuregates.Enabled(featuregates.PassthroughSupport) && l.IsVfioEnabled() {
+			gpuInfo.VfioEnabled = true
+		}
+		if featuregates.Enabled(featuregates.DynamicMIG) {
+			dynamicMIGCapable, err := isDynamicMIGCapable(gpuInfo, d)
+			if err != nil {
+				return fmt.Errorf("error determining DynamicMIG support for GPU %v: %w", i, err)
+			}
+
+			// gpuInfo.migEnabled is captured once during enumeration and is
+			// never re-read. The branches below rely on this snapshot:
+			// toggling MIG mode on Ampere requires a GPU reset that this
+			// plugin does not initiate, so within a single plugin lifetime
+			// the value cannot change underneath us. A future refactor that
+			// moves the migEnabled read past enumeration (or starts
+			// re-reading it) must reconsider these branches.
+			if dynamicMIGCapable {
+				// Best-effort handle cache warmup: store mapping between full-GPU
+				// UUID and NVML device handle in a map. Ignore failures.
+				if _, ret := l.deviceGetHandleByUUID(gpuInfo.UUID); ret != nvml.SUCCESS {
+					klog.Warningf("deviceGetHandleByUUID failed: %s", ret)
+				}
+
+				// For this full device, inspect all MIG profiles and their possible
+				// placements. Side effect: this enriches `gpuInfo` with additional
+				// properties (such as the memory slice count, and the maximum
+				// capacities as reported by individual MIG profiles).
+				migspecs, err := l.inspectMigProfilesAndPlacements(gpuInfo, d)
+				if err != nil {
+					return fmt.Errorf("error getting MIG info for GPU %v: %w", i, err)
+				}
+
+				// When migEnabled is true, parentdev is intentionally NOT added
+				// to thisGPUAllocatable — the full GPU is not allocatable on
+				// Ampere when MIG cannot be toggled without a GPU reset. The
+				// per-GPU shared CounterSet that MIG partitions reference by
+				// name is still emitted by the ResourceSlice generators in
+				// driver.go, which derive the parent GpuInfo from
+				// MigDynamic.Parent when no full-GPU entry exists.
+
+				// We're inside the dynamicMIGCapable=true branch, which already excludes
+				// vGPUs masquerading as full GPUs, so supportsMIGModeToggle(d) here precisely means
+				// "non-vGPU Hopper+".
+				if !gpuInfo.MigEnabled || supportsMIGModeToggle(d) {
+					gpu = &AllocatableDevice{
+						Gpu: gpuInfo,
+					}
+				}
+				for _, migspec := range migspecs {
+					dev := &AllocatableDevice{
+						MigDynamic: migspec,
+					}
+					migs = append(migs, dev)
+				}
+
+				// Terminate this function -- this is mutually exclusive with static MIG and vfio/passthrough.
+				return nil
+			}
+		}
 		migs, err = l.discoverMigDevicesByGPU(gpuInfo)
 		if err != nil {
 			return fmt.Errorf("error discovering MIG devices for GPU %q: %w", gpuInfo.CanonicalName(), err)
 		}
 		// If no MIG devices are found, allow VFIO devices.
-		gpuInfo.vfioEnabled = len(migs) == 0
+		gpuInfo.VfioEnabled = len(migs) == 0
 		gpu = &AllocatableDevice{
 			Gpu: gpuInfo,
 		}
@@ -425,6 +522,57 @@ func (l deviceLib) discoverGPUByPCIBusID(pciBusID string) (*AllocatableDevice, [
 	return gpu, migs, nil
 }
 
+func (l deviceLib) DiscoverGpuDeviceByUUID(index int, uuid string) (*AllocatableDevice, error) {
+	shutdown, ret := l.ensureNVML()
+	if ret != nvml.SUCCESS {
+		return nil, fmt.Errorf("ensureNVML failed: %w", ret)
+	}
+	defer shutdown()
+
+	gpuDev, err := l.NewDeviceByUUID(uuid)
+	if err != nil {
+		return nil, fmt.Errorf("error getting device by UUID: %w", err)
+	}
+	gpuInfo, err := l.getGpuInfo(index, gpuDev)
+	if err != nil {
+		return nil, fmt.Errorf("error getting info for GPU %d: %w", index, err)
+	}
+	if idx := l.gpuIndexer.Reserve(index, gpuInfo.PciBusID); idx == -1 {
+		return nil, fmt.Errorf("failed to reserve index %d for GPU %s", index, uuid)
+	} else {
+		gpuInfo.Index = idx
+	}
+
+	// Store gpuInfo object for later re-use (lookup by UUID).
+	l.gpuInfosByUUID[gpuInfo.UUID] = gpuInfo
+	l.gpuUUIDbyPCIBusID[gpuInfo.PciBusID] = gpuInfo.UUID
+
+	allocatable := &AllocatableDevice{
+		Gpu: gpuInfo,
+	}
+	return allocatable, nil
+}
+
+func (l deviceLib) discoverVfioDeviceByPciBusID(index int, pciBusID string) (*AllocatableDevice, error) {
+	device, err := l.nvpci.GetGPUByPciBusID(pciBusID)
+	if err != nil {
+		return nil, fmt.Errorf("error getting GPU by PCI bus ID %q: %w", pciBusID, err)
+	}
+	vfioDeviceInfo, err := l.getVfioDeviceInfo(index, device)
+	if err != nil {
+		return nil, fmt.Errorf("error getting VFIO device info: %w", err)
+	}
+	if idx := l.gpuIndexer.Reserve(index, pciBusID); idx == -1 {
+		return nil, fmt.Errorf("failed to reserve index %d for VFIO device %s", index, pciBusID)
+	} else {
+		vfioDeviceInfo.Index = idx
+	}
+	allocatable := &AllocatableDevice{
+		Vfio: vfioDeviceInfo,
+	}
+	return allocatable, nil
+}
+
 // TODO: Need go-nvlib util for this.
 func (l deviceLib) discoverVfioDevice(gpuInfo *GpuInfo) (*AllocatableDevice, error) {
 	gpus, err := l.nvpci.GetGPUs()
@@ -432,25 +580,30 @@ func (l deviceLib) discoverVfioDevice(gpuInfo *GpuInfo) (*AllocatableDevice, err
 		return nil, fmt.Errorf("error getting GPU PCI devices: %w", err)
 	}
 	for idx, gpu := range gpus {
-		if gpu.Address != gpuInfo.pciBusID {
+		if gpu.Address != gpuInfo.PciBusID {
 			continue
 		}
 		vfioDeviceInfo, err := l.getVfioDeviceInfo(idx, gpu)
 		if err != nil {
 			return nil, fmt.Errorf("error getting VFIO device info: %w", err)
 		}
-		vfioDeviceInfo.parent = gpuInfo
+		vfioDeviceInfo.Parent = gpuInfo
 		return &AllocatableDevice{
 			Vfio: vfioDeviceInfo,
 		}, nil
 	}
-	return nil, fmt.Errorf("error discovering VFIO device by PCI bus ID: %s", gpuInfo.pciBusID)
+	return nil, fmt.Errorf("error discovering VFIO device by PCI bus ID: %s", gpuInfo.PciBusID)
 }
 
 // Tear down any MIG devices that are present and don't belong to completed
 // claims. This can be improved for tearing down partial state (GI without CI,
 // for example).
-func (l deviceLib) obliterateStaleMIGDevices(expectedDeviceNames []DeviceName) error {
+func (l deviceLib) ObliterateStaleMIGDevices(expectedDeviceNames []DeviceName) error {
+	shutdown, ret := l.ensureNVML()
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("ensureNVML failed: %w", ret)
+	}
+	defer shutdown()
 	err := l.VisitDevices(func(i int, d nvdev.Device) error {
 		ginfo, err := l.getGpuInfo(i, d)
 		if err != nil {
@@ -467,7 +620,7 @@ func (l deviceLib) obliterateStaleMIGDevices(expectedDeviceNames []DeviceName) e
 			expected := slices.Contains(expectedDeviceNames, name)
 			if !expected {
 				klog.Warningf("Found unexpected MIG device (%s), attempt to tear down", name)
-				if err := l.deleteMigDevice(mdi.LiveTuple()); err != nil {
+				if err := l.DeleteMigDevice(mdi.LiveTuple()); err != nil {
 					return fmt.Errorf("could not delete unexpected MIG device (%s): %w", name, err)
 				}
 			}
@@ -626,8 +779,8 @@ func (l deviceLib) getGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 				}
 
 				profileInfo := &MigProfileInfo{
-					profile:    migProfile,
-					placements: migDevicePlacements,
+					Profile:    migProfile,
+					Placements: migDevicePlacements,
 				}
 
 				migProfiles = append(migProfiles, profileInfo)
@@ -637,27 +790,28 @@ func (l deviceLib) getGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 
 	gpuInfo := &GpuInfo{
 		UUID:                  uuid,
-		minor:                 minor,
-		migCapable:            migCapable,
-		migEnabled:            migEnabled,
-		memoryBytes:           memoryBytes,
-		productName:           productName,
-		brand:                 brand,
-		architecture:          architecture,
-		cudaComputeCapability: cudaComputeCapability,
-		driverVersion:         driverVersion,
-		cudaDriverVersion:     fmt.Sprintf("%v.%v", cudaDriverVersion/1000, (cudaDriverVersion%1000)/10),
-		pciBusID:              pciBusID,
-		pciBusIDAttr:          pciBusIDAttr,
-		pcieRootAttr:          pcieRootAttr,
-		numaNodeAttr:          numaNodeAttr,
-		migProfiles:           migProfiles,
-		addressingMode:        addressingMode,
+		Index:                 index,
+		Minor:                 minor,
+		MigCapable:            migCapable,
+		MigEnabled:            migEnabled,
+		MemoryBytes:           memoryBytes,
+		ProductName:           productName,
+		Brand:                 brand,
+		Architecture:          architecture,
+		CudaComputeCapability: cudaComputeCapability,
+		DriverVersion:         driverVersion,
+		CudaDriverVersion:     fmt.Sprintf("%v.%v", cudaDriverVersion/1000, (cudaDriverVersion%1000)/10),
+		PciBusID:              pciBusID,
+		PciBusIDAttr:          pciBusIDAttr,
+		PcieRootAttr:          pcieRootAttr,
+		NumaNodeAttr:          numaNodeAttr,
+		MigProfiles:           migProfiles,
+		AddressingMode:        addressingMode,
 	}
 
 	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
 		if moduleID, ret := device.GetModuleId(); ret == nvml.SUCCESS {
-			gpuInfo.gpuModuleID = moduleID
+			gpuInfo.GpuModuleID = moduleID
 		} else {
 			klog.V(4).Infof("GPU %s: could not resolve gpuModuleID from NVML: %v", gpuInfo.CanonicalName(), ret)
 		}
@@ -679,7 +833,7 @@ func (l deviceLib) enumerateGpuVfioDevices(perGPUAllocatable *PerGPUAllocatableD
 		klog.Infof("Adding VFIO device for discovered GPU PCI device: %s", pci.Address)
 
 		parent := perGPUAllocatable.GetGPUDeviceByPCIBusID(pci.Address)
-		if parent != nil && !parent.Gpu.vfioEnabled {
+		if parent != nil && !parent.Gpu.VfioEnabled {
 			klog.Infof("Skipping VFIO device for discovered GPU PCI device: %s, vfio is not enabled", pci.Address)
 			continue
 		}
@@ -690,7 +844,7 @@ func (l deviceLib) enumerateGpuVfioDevices(perGPUAllocatable *PerGPUAllocatableD
 		}
 
 		if parent != nil {
-			vfioDeviceInfo.parent = parent.Gpu
+			vfioDeviceInfo.Parent = parent.Gpu
 		} else {
 			// Its likely that the parent is nil because the GPU is prepared in passthrough mode.
 			klog.V(4).Infof("Skipping association with parent GPU device for VFIO device: %s", pci.Address)
@@ -742,35 +896,29 @@ func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*V
 	deviceUUID := uuid.NewSHA1(uuid.NameSpaceDNS, []byte(device.Address)).String()
 	vfioDeviceInfo := &VfioDeviceInfo{
 		UUID:                   deviceUUID,
-		index:                  idx,
-		productName:            device.DeviceName,
+		Index:                  idx,
+		ProductName:            device.DeviceName,
 		PciBusID:               device.Address,
-		pciBusIDAttr:           pciBusIDAttr,
-		pcieRootAttr:           pcieRootAttr,
-		deviceID:               fmt.Sprintf("0x%04x", device.Device),
-		vendorID:               fmt.Sprintf("0x%04x", device.Vendor),
-		numaNodeAttr:           numaNodeAttr,
-		iommuGroup:             device.IommuGroup,
-		iommuFDEnabled:         iommuFDEnabled,
-		addressableMemoryBytes: memoryBytes,
-		vfioModule:             vfioModule,
+		PciBusIDAttr:           pciBusIDAttr,
+		PcieRootAttr:           pcieRootAttr,
+		DeviceID:               fmt.Sprintf("0x%04x", device.Device),
+		VendorID:               fmt.Sprintf("0x%04x", device.Vendor),
+		NumaNodeAttr:           numaNodeAttr,
+		IommuGroup:             device.IommuGroup,
+		IommuFDEnabled:         iommuFDEnabled,
+		AddressableMemoryBytes: memoryBytes,
+		VfioModule:             vfioModule,
 	}
 
 	return vfioDeviceInfo, nil
 }
 
 func (l deviceLib) getMigDevices(gpuInfo *GpuInfo) (map[string]*MigDeviceInfo, error) {
-	if !gpuInfo.migEnabled {
+	if !gpuInfo.MigEnabled {
 		return nil, nil
 	}
 
-	shutdown, ret := l.ensureNVML()
-	if ret != nvml.SUCCESS {
-		return nil, fmt.Errorf("ensureNVML failed: %w", ret)
-	}
-	defer shutdown()
-
-	device, ret := l.DeviceGetHandleByUUID(gpuInfo.UUID)
+	device, ret := l.deviceGetHandleByUUID(gpuInfo.UUID)
 	if ret != nvml.SUCCESS {
 		return nil, fmt.Errorf("error getting GPU device handle: %w", ret)
 	}
@@ -809,8 +957,8 @@ func (l deviceLib) getMigDevices(gpuInfo *GpuInfo) (map[string]*MigDeviceInfo, e
 		var migProfile *MigProfileInfo
 		var giProfileInfo *nvml.GpuInstanceProfileInfo
 		var ciProfileInfo *nvml.ComputeInstanceProfileInfo
-		for _, profile := range gpuInfo.migProfiles {
-			profileInfo := profile.profile.GetInfo()
+		for _, profile := range gpuInfo.MigProfiles {
+			profileInfo := profile.Profile.GetInfo()
 			gipInfo, ret := device.GetGpuInstanceProfileInfo(profileInfo.GIProfileID)
 			if ret != nvml.SUCCESS {
 				continue
@@ -840,18 +988,18 @@ func (l deviceLib) getMigDevices(gpuInfo *GpuInfo) (map[string]*MigDeviceInfo, e
 		infos[uuid] = &MigDeviceInfo{
 			UUID:           uuid,
 			Profile:        migProfile.String(),
-			ParentMinor:    gpuInfo.minor,
+			ParentMinor:    gpuInfo.Minor,
 			ParentUUID:     gpuInfo.UUID,
 			CIID:           int(ciInfo.Id),
 			GIID:           int(giInfo.Id),
 			PlacementStart: int(placement.Start),
 			PlacementSize:  int(placement.Size),
 			GiProfileID:    int(giProfileInfo.Id),
-			parent:         gpuInfo,
-			giProfileInfo:  giProfileInfo,
-			gIInfo:         &giInfo,
-			ciProfileInfo:  ciProfileInfo,
-			cIInfo:         &ciInfo,
+			Parent:         gpuInfo,
+			GiProfileInfo:  giProfileInfo,
+			GIInfo:         &giInfo,
+			CiProfileInfo:  ciProfileInfo,
+			CIInfo:         &ciInfo,
 		}
 		return nil
 	})
@@ -935,25 +1083,7 @@ func (l deviceLib) setComputeMode(uuids []string, mode string) error {
 // DynamicMIG mode, this function maintains an NVML handle cache and hence
 // guarantees fast lookups. This is meant to only be called for physical, full
 // GPUs (not MIG devices).
-func (l deviceLib) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.Return) {
-	shutdown, ret := l.ensureNVML()
-	if ret != nvml.SUCCESS {
-		return nil, ret
-	}
-	defer shutdown()
-
-	// For now, only use long-lived NVML with cached handles when DynamicMIG is
-	// enabled. In all other cases, do not cache handles (this is something we
-	// may want to do in the future).
-	if !featuregates.Enabled(featuregates.DynamicMIG) {
-		return l.nvmllib.DeviceGetHandleByUUID(uuid)
-	}
-
-	dev, exists := l.devhandleByUUID[uuid]
-	if exists {
-		return dev, nvml.SUCCESS
-	}
-
+func (l deviceLib) deviceGetHandleByUUID(uuid string) (nvml.Device, nvml.Return) {
 	klog.V(6).Infof("DeviceGetHandleByUUID called for %s, cache miss", uuid)
 	// Note(JP): This call can be slow. Hence, the decision to use long-lived
 	// handles (at least for DynamicMIG). In theory here we need a request
@@ -966,20 +1096,24 @@ func (l deviceLib) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.Return)
 	// and that we currently have no expiry (but a long-lived map), that will
 	// work.
 	t0 := time.Now()
-	dev, ret = l.nvmllib.DeviceGetHandleByUUID(uuid)
+	dev, ret := l.nvmllib.DeviceGetHandleByUUID(uuid)
 	klog.V(7).Infof("t_device_get_handle_by_uuid %.3f s", time.Since(t0).Seconds())
 
 	if ret != nvml.SUCCESS {
 		return nil, ret
 	}
 
-	// Populate `devhandleByUUID` for fast lookup.
-	l.devhandleByUUID[uuid] = dev
 	return dev, ret
 }
 
 // Assume long-lived NVML session.
-func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
+func (l deviceLib) CreateMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
+	shutdown, ret := l.ensureNVML()
+	if ret != nvml.SUCCESS {
+		return nil, fmt.Errorf("ensure NVMLfailed: %w", ret)
+	}
+	defer shutdown()
+
 	gpu := migspec.Parent
 	err := migspec.validateMigProfiles()
 	if err != nil {
@@ -989,7 +1123,7 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 
 	tdhbu0 := time.Now()
 	// Without handle caching, I've seen this to take up O(10 s).
-	device, ret := l.DeviceGetHandleByUUID(gpu.UUID)
+	device, ret := l.deviceGetHandleByUUID(gpu.UUID)
 	if ret != nvml.SUCCESS {
 		return nil, fmt.Errorf("error getting GPU device handle: %w", ret)
 	}
@@ -1097,15 +1231,15 @@ func (l deviceLib) createMigDevice(migspec *MigSpec) (*MigDeviceInfo, error) {
 		UUID:           uuid,
 		CIID:           int(ciInfo.Id),
 		GIID:           int(giInfo.Id),
-		ParentMinor:    gpu.minor,
+		ParentMinor:    gpu.Minor,
 		ParentUUID:     gpu.UUID,
 		Profile:        profileName,
 		PlacementStart: int(placement.Start),
 		PlacementSize:  int(placement.Size),
 		GiProfileID:    int(giProfileInfo.Id),
-		gIInfo:         &giInfo,
-		cIInfo:         &ciInfo,
-		parent:         gpu,
+		GIInfo:         &giInfo,
+		CIInfo:         &ciInfo,
+		Parent:         gpu,
 	}
 
 	klog.V(6).Infof("%s: MIG device created on %s: %+v", logpfx, gpu.String(), migDevInfo.LiveTuple())
@@ -1191,8 +1325,13 @@ func (l deviceLib) selectCIProfile(gi nvml.GpuInstance, profiles []nvdev.MigProf
 	return validCIProfiles[0], nil
 }
 
-// Assume long-lived NVML session.
-func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
+func (l deviceLib) DeleteMigDevice(miglt *MigLiveTuple) error {
+	shutdown, ret := l.ensureNVML()
+	if ret != nvml.SUCCESS {
+		return fmt.Errorf("ensureNVML failed: %w", ret)
+	}
+	defer shutdown()
+
 	parentUUID := miglt.ParentUUID
 	giId := miglt.GIID
 	ciId := miglt.CIID
@@ -1201,7 +1340,7 @@ func (l deviceLib) deleteMigDevice(miglt *MigLiveTuple) error {
 	migStr := fmt.Sprintf("MIG(parent: %s, %+v)", parentUUID, miglt)
 	klog.V(6).Infof("Delete %s", migStr)
 
-	parentNvmlDev, ret := l.DeviceGetHandleByUUID(parentUUID)
+	parentNvmlDev, ret := l.deviceGetHandleByUUID(parentUUID)
 	if ret != nvml.SUCCESS {
 		return fmt.Errorf("error getting device from UUID '%v': %w", parentUUID, ret)
 	}
@@ -1313,7 +1452,7 @@ func (l deviceLib) maybeDisableMigMode(uuid string, nvmldev nvml.Device) error {
 	// On Ampere/A100, SetMigMode sets a pending mode that requires a GPU reset to activate — leave MIG enabled.
 	if !supportsMIGModeToggle(nvmldev) {
 		klog.V(6).Infof("GPU %s (%s): skipping MIG mode disable (architecture does not support reset-less MIG toggling)",
-			gpu.String(), gpu.architecture)
+			gpu.String(), gpu.Architecture)
 		return nil
 	}
 
@@ -1426,17 +1565,17 @@ func (l deviceLib) FindMigDevBySpec(ms *MigSpecTuple) (*MigLiveTuple, error) {
 	// This may be unset if the mig spec was constructed from the
 	// allocated device name.
 	if ms.ParentPCIBusID == "" {
-		gpuInfo, err := l.getGpuInfoByMinor(ms.ParentMinor)
+		gpuInfo, err := l.getGpuInfoByIndex(ms.ParentIndex)
 		if err != nil {
 			return nil, err
 		}
 		parentUUID = gpuInfo.UUID
-		parentPCIBusID = gpuInfo.pciBusID
+		parentPCIBusID = gpuInfo.PciBusID
 	} else {
 		parentUUID = l.gpuUUIDbyPCIBusID[parentPCIBusID]
 	}
 
-	parent, ret := l.DeviceGetHandleByUUID(parentUUID)
+	parent, ret := l.deviceGetHandleByUUID(parentUUID)
 	if ret != nvml.SUCCESS {
 		return nil, fmt.Errorf("error getting device handle by UUID for %s: %w", parentUUID, ret)
 	}
@@ -1516,13 +1655,13 @@ func (l deviceLib) FindMigDevBySpec(ms *MigSpecTuple) (*MigLiveTuple, error) {
 	return nil, nil
 }
 
-func (l deviceLib) getGpuInfoByMinor(minor GPUMinor) (*GpuInfo, error) {
+func (l deviceLib) getGpuInfoByIndex(index int) (*GpuInfo, error) {
 	for _, gpuInfo := range l.gpuInfosByUUID {
-		if gpuInfo.minor == minor {
+		if gpuInfo.Index == index {
 			return gpuInfo, nil
 		}
 	}
-	return nil, fmt.Errorf("gpu info not found for minor %d", minor)
+	return nil, fmt.Errorf("gpu info not found for index %d", index)
 }
 
 // Mutate map `m` in-place: insert into map if the current QualifiedName does
@@ -1633,7 +1772,7 @@ func supportsMIGModeToggle(dev nvml.Device) bool {
 }
 
 func isDynamicMIGCapable(gpuInfo *GpuInfo, dev nvdev.Device) (bool, error) {
-	if !gpuInfo.migCapable {
+	if !gpuInfo.MigCapable {
 		klog.Warningf("GPU %s: hardware does not support MIG - skipping DynamicMIG", gpuInfo.String())
 		return false, nil
 	}
@@ -1659,7 +1798,7 @@ func isDynamicMIGCapable(gpuInfo *GpuInfo, dev nvdev.Device) (bool, error) {
 
 	// On Ampere/A100, once MIG is enabled we can still advertise the dynamic MIG
 	// profiles, but not the full GPU because disabling MIG would require a GPU reset.
-	if gpuInfo.migEnabled {
+	if gpuInfo.MigEnabled {
 		klog.Infof("GPU %s: MIG mode is enabled and cannot be toggled without GPU reset", gpuInfo.String())
 		return true, nil
 	}
