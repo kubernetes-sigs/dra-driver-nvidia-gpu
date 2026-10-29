@@ -220,6 +220,12 @@ func NewMigSpecTupleFromCanonicalName(n DeviceName) (*MigSpecTuple, error) {
 	}, nil
 }
 
+// sameDevice reports whether m and o describe the same MIG device.
+// ParentPCIBusID is skipped: tuples parsed from device names do not have it.
+func (m *MigSpecTuple) sameDevice(o *MigSpecTuple) bool {
+	return m.ParentMinor == o.ParentMinor && m.ProfileID == o.ProfileID && m.PlacementStart == o.PlacementStart
+}
+
 func (m *MigSpec) CanonicalName() DeviceName {
 	// All profiles are expected to have the same profile name.
 	// So pick the first one.
