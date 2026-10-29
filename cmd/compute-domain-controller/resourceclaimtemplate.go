@@ -35,6 +35,7 @@ import (
 	"k8s.io/klog/v2"
 
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 )
 
 const (
@@ -54,6 +55,8 @@ type ResourceClaimTemplateTemplateData struct {
 	DriverName              string
 	ChannelConfig           *nvapi.ComputeDomainChannelConfig
 	DaemonConfig            *nvapi.ComputeDomainDaemonConfig
+	ChannelID               *int
+	FabricDomainID          string
 }
 
 type BaseResourceClaimTemplateManager struct {
@@ -364,10 +367,7 @@ func NewWorkloadResourceClaimTemplateManager(config *ManagerConfig, getComputeDo
 // channelAllocationModeFor decides the AllocationMode to request in the
 // workload ResourceClaimTemplate for a ComputeDomain.
 //
-// Under host-managed IMEX this always forces AllocationMode Single (channel
-// 0), regardless of what the ComputeDomain requested: host-managed IMEX only
-// ever has channel 0 to give out today. TODO: once the controller can assign
-// a unique IMEX channel per ComputeDomain, request that channel here instead.
+// Host-managed IMEX injects only the channel reserved for the ComputeDomain.
 //
 // Otherwise (driver-managed), the ComputeDomain's own AllocationMode is used
 // as-is.
@@ -379,6 +379,16 @@ func channelAllocationModeFor(cd *nvapi.ComputeDomain, hostManaged bool) string 
 }
 
 func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, namespace, name string, cd *nvapi.ComputeDomain) (*resourceapi.ResourceClaimTemplate, error) {
+	var channelID *int
+	var fabricDomainID string
+	if m.config.imexConfig.EffectiveHostManaged() {
+		reservation, err := m.reserveHostChannel(ctx, string(cd.UID))
+		if err != nil {
+			return nil, err
+		}
+		channelID = &reservation.ChannelID
+		fabricDomainID = reservation.FabricDomainID
+	}
 	rcts, err := getByComputeDomainUID[*resourceapi.ResourceClaimTemplate](ctx, m.mutationCache, string(cd.UID))
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving ResourceClaimTemplate: %w", err)
@@ -387,6 +397,12 @@ func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, names
 		return nil, fmt.Errorf("more than one ResourceClaimTemplate found with same ComputeDomain UID")
 	}
 	if len(rcts) == 1 {
+		if channelID != nil {
+			requests := rcts[0].Spec.Spec.Devices.Requests
+			if !hostChannelRequestMatchesReservation(requests, fabricDomainID, *channelID) {
+				return nil, fmt.Errorf("existing host-managed ResourceClaimTemplate does not match reserved channel %d; drain workloads and recreate the ComputeDomain", *channelID)
+			}
+		}
 		return rcts[0], nil
 	}
 
@@ -405,6 +421,11 @@ func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, names
 		DeviceClassName:         computeDomainDefaultChannelDeviceClass,
 		DriverName:              DriverName,
 		ChannelConfig:           channelConfig,
+		ChannelID:               channelID,
+		FabricDomainID:          fabricDomainID,
+	}
+	if channelID != nil {
+		templateData.DeviceClassName = computeDomainChannelDeviceClass
 	}
 
 	rct, err := m.BaseResourceClaimTemplateManager.Create(ctx, WorkloadResourceClaimTemplateTemplatePath, &templateData)
@@ -413,4 +434,32 @@ func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, names
 	}
 
 	return rct, nil
+}
+
+func hostChannelSelector(id int) string {
+	return fmt.Sprintf("device.attributes['compute-domain.nvidia.com'].id == %d", id)
+}
+
+func hostFabricDomainSelector(fabricDomainID string) string {
+	return fmt.Sprintf("device.attributes[\"compute-domain.nvidia.com\"].%s == %q", imex.FabricDomainIDAttribute, fabricDomainID)
+}
+
+func hostChannelRequestMatchesReservation(requests []resourceapi.DeviceRequest, fabricDomainID string, channelID int) bool {
+	if len(requests) != 1 || requests[0].Exactly == nil || requests[0].Exactly.DeviceClassName != computeDomainChannelDeviceClass {
+		return false
+	}
+	expected := []string{hostChannelSelector(channelID)}
+	if fabricDomainID != "" {
+		expected = append(expected, hostFabricDomainSelector(fabricDomainID))
+	}
+	selectors := requests[0].Exactly.Selectors
+	if len(selectors) != len(expected) {
+		return false
+	}
+	for i := range expected {
+		if selectors[i].CEL == nil || selectors[i].CEL.Expression != expected[i] {
+			return false
+		}
+	}
+	return true
 }

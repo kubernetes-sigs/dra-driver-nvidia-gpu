@@ -1,0 +1,11 @@
+{{- if .Values.resources.computeDomains.enabled }}
+---
+apiVersion: {{ include "dra-driver-nvidia-gpu.resourceApiVersion" . }}
+kind: DeviceClass
+metadata:
+  name: compute-domain-channel.nvidia.com
+spec:
+  selectors:
+  - cel:
+      expression: "device.driver == 'compute-domain.nvidia.com' && device.attributes['compute-domain.nvidia.com'].type == 'channel'"
+{{- end }}
