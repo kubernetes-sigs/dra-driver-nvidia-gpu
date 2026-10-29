@@ -99,6 +99,11 @@ func newFabricManager(nvdevlib *deviceLib, driver *root.Driver) (*fabricmanager.
 		return nil, nil
 	}
 
+	if !nvdevlib.supportsFabricManagerPartitioning() {
+		klog.Infof("FabricManagerPartitioning requires Hopper or newer GPUs; treating the feature as disabled on this node")
+		return nil, nil
+	}
+
 	if common.UsingAltProcDevices() {
 		klog.Infof("Mock NVML proc is in use; skipping Fabric Manager")
 		return nil, nil
@@ -122,6 +127,18 @@ func newFabricManager(nvdevlib *deviceLib, driver *root.Driver) (*fabricmanager.
 		return nil, fmt.Errorf("FabricManagerPartitioning enabled but Fabric Manager could not be opened: %w", err)
 	}
 	return fmManager, nil
+}
+
+func (l *deviceLib) supportsFabricManagerPartitioning() bool {
+	if l == nil || len(l.gpuInfosByUUID) == 0 {
+		return false
+	}
+	for _, gpu := range l.gpuInfosByUUID {
+		if !gpu.supportsFabricManagerPartitioning() {
+			return false
+		}
+	}
+	return true
 }
 
 func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
