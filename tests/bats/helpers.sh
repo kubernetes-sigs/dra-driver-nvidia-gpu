@@ -401,6 +401,15 @@ get_current_controller_pod_name() {
 }
 
 
+# cd_claim_admission_enabled reports whether the controller admits channel
+# claims before their pods bind, which it does with channel reservations.
+cd_claim_admission_enabled() {
+  kubectl get pods -n dra-driver-nvidia-gpu \
+    -l dra-driver-nvidia-gpu-component=kubelet-plugin \
+    -o jsonpath='{..env[?(@.name=="FEATURE_GATES")].value}' | \
+    grep -q "ComputeDomainChannelReservations=true"
+}
+
 get_one_kubelet_plugin_pod_name() {
   kubectl get pod \
     -l dra-driver-nvidia-gpu-component=kubelet-plugin \
