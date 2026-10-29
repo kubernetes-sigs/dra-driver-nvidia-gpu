@@ -70,6 +70,7 @@ type Flags struct {
 	logVerbosityCDDaemon  int
 
 	imexMode            string
+	imexScope           string
 	imexIsolation       string
 	imexConfigOverrides string
 
@@ -163,10 +164,16 @@ func newApp() *cli.App {
 		},
 		&cli.StringFlag{
 			Name:        "imex-isolation",
-			Usage:       "IMEX isolation strategy: domain (default; all workloads in the same IMEX domain share channel 0) or channel (not yet supported).",
+			Usage:       "IMEX isolation strategy: domain (default; all workloads in the same IMEX domain share channel 0) or channel (each workload ResourceClaimTemplate gets its own channel).",
 			Value:       string(imex.IsolationIMEXDomain),
 			Destination: &flags.imexIsolation,
 			EnvVars:     []string{"IMEX_ISOLATION"},
+		},
+		&cli.StringFlag{
+			Name:        "imex-scope",
+			Usage:       "Whose IMEX daemons run on a node: computeDomain (default for driverManaged; one set per ComputeDomain) or cluster (shared by all ComputeDomains, implied by hostManaged).",
+			Destination: &flags.imexScope,
+			EnvVars:     []string{"IMEX_SCOPE"},
 		},
 		&cli.StringFlag{
 			Name:        "imex-config-overrides",
@@ -237,8 +244,11 @@ func newApp() *cli.App {
 				return fmt.Errorf("feature gate validation failed: %w", err)
 			}
 
-			imexConfig := imex.Config{Mode: imex.Mode(flags.imexMode), Isolation: imex.Isolation(flags.imexIsolation)}
-			if err := imexConfig.Validate(featuregates.Enabled(featuregates.HostManagedIMEXDaemon)); err != nil {
+			imexConfig := imex.Config{Mode: imex.Mode(flags.imexMode), Scope: imex.Scope(flags.imexScope), Isolation: imex.Isolation(flags.imexIsolation)}
+			if err := imexConfig.Validate(imex.Gates{
+				HostManagedIMEXDaemon:            featuregates.Enabled(featuregates.HostManagedIMEXDaemon),
+				ComputeDomainChannelReservations: featuregates.Enabled(featuregates.ComputeDomainChannelReservations),
+			}); err != nil {
 				return fmt.Errorf("imex configuration validation failed: %w", err)
 			}
 			imexConfigOverrides, err := imex.ParseConfigOverrides(flags.imexConfigOverrides)
