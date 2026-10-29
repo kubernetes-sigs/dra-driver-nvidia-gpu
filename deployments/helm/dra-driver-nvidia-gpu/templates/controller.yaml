@@ -110,6 +110,8 @@ spec:
           value: "{{ .Values.resources.computeDomains.imex.mode }}"
         - name: IMEX_ISOLATION
           value: "{{ .Values.resources.computeDomains.imex.isolation }}"
+        - name: IMEX_SCOPE
+          value: "{{ include "dra-driver-nvidia-gpu.imexScope" . }}"
         {{- if .Values.resources.computeDomains.imex.config }}
         - name: IMEX_CONFIG_OVERRIDES
           value: "{{ range $key, $value := .Values.resources.computeDomains.imex.config }}{{ $key }}={{ $value }},{{ end }}"
