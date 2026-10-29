@@ -99,6 +99,65 @@ func TestGetDriver(t *testing.T) {
 	})
 }
 
+func TestUnbindDevice(t *testing.T) {
+	const (
+		gpuAddress = "0000:01:00.0"
+		auxAddress = "0000:01:00.1"
+	)
+
+	tests := map[string]struct {
+		gpuBound bool
+	}{
+		"gpu bound to a driver": {gpuBound: true},
+		"gpu not bound":         {},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			pciDevicesPath := t.TempDir()
+			pciDriversPath := t.TempDir()
+			for _, addr := range []string{gpuAddress, auxAddress} {
+				require.NoError(t, os.MkdirAll(filepath.Join(pciDevicesPath, addr), 0o755))
+			}
+
+			nvidiaUnbind := filepath.Join(pciDriversPath, "nvidia", "unbind")
+			vfioUnbind := filepath.Join(pciDriversPath, "vfio-pci", "unbind")
+			for _, unbind := range []string{nvidiaUnbind, vfioUnbind} {
+				require.NoError(t, os.MkdirAll(filepath.Dir(unbind), 0o755))
+				require.NoError(t, os.WriteFile(unbind, nil, 0o644))
+			}
+			if tc.gpuBound {
+				require.NoError(t, os.WriteFile(filepath.Join(pciDevicesPath, gpuAddress, "driver_override"), []byte("nvidia"), 0o644))
+				require.NoError(t, os.Symlink(filepath.Dir(nvidiaUnbind), filepath.Join(pciDevicesPath, gpuAddress, "driver")))
+			}
+			auxOverride := filepath.Join(pciDevicesPath, auxAddress, "driver_override")
+			require.NoError(t, os.WriteFile(auxOverride, []byte("vfio-pci"), 0o644))
+			require.NoError(t, os.Symlink(filepath.Dir(vfioUnbind), filepath.Join(pciDevicesPath, auxAddress, "driver")))
+
+			require.NoError(t, unbindDevice(pciDevicesPath, gpuAddress))
+
+			override, err := os.ReadFile(filepath.Join(pciDevicesPath, gpuAddress, "driver_override"))
+			require.NoError(t, err)
+			require.Equal(t, "\n", string(override))
+			unbound, err := os.ReadFile(nvidiaUnbind)
+			require.NoError(t, err)
+			if tc.gpuBound {
+				require.Equal(t, gpuAddress, string(unbound))
+			} else {
+				require.Empty(t, unbound)
+			}
+
+			// The auxiliary function keeps its driver and override.
+			auxUnbound, err := os.ReadFile(vfioUnbind)
+			require.NoError(t, err)
+			require.Empty(t, auxUnbound)
+			auxOverrideValue, err := os.ReadFile(auxOverride)
+			require.NoError(t, err)
+			require.Equal(t, "vfio-pci", string(auxOverrideValue))
+		})
+	}
+}
+
 func TestTryChangeDriverWithTimeout(t *testing.T) {
 	vm := &VfioPciManager{
 		nvidiaEnabled: true,
