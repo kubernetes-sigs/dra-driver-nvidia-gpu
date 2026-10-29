@@ -79,6 +79,7 @@ type ComputeDomainManager struct {
 	daemonSetManager             *MultiNamespaceDaemonSetManager
 	resourceClaimTemplateManager *WorkloadResourceClaimTemplateManager
 	nodeManager                  *NodeManager
+	claimAdmissionManager        *ClaimAdmissionManager
 }
 
 // NewComputeDomainManager creates a new ComputeDomainManager.
@@ -99,6 +100,9 @@ func NewComputeDomainManager(config *ManagerConfig) *ComputeDomainManager {
 		m.nodeManager = NewNodeManager(config, m.Get)
 	}
 	m.resourceClaimTemplateManager = NewWorkloadResourceClaimTemplateManager(config, m.Get)
+	if config.claimAdmission {
+		m.claimAdmissionManager = NewClaimAdmissionManager(config, m.Get)
+	}
 
 	return m
 }
@@ -171,10 +175,21 @@ func (m *ComputeDomainManager) Start(ctx context.Context) (rerr error) {
 		}
 	}
 
+	if m.claimAdmissionManager != nil {
+		if err := m.claimAdmissionManager.Start(ctx); err != nil {
+			return fmt.Errorf("error starting ClaimAdmission manager: %w", err)
+		}
+	}
+
 	return nil
 }
 
 func (m *ComputeDomainManager) Stop() error {
+	if m.claimAdmissionManager != nil {
+		if err := m.claimAdmissionManager.Stop(); err != nil {
+			return fmt.Errorf("error stopping ClaimAdmission manager: %w", err)
+		}
+	}
 	if m.daemonSetManager != nil {
 		if err := m.daemonSetManager.Stop(); err != nil {
 			return fmt.Errorf("error stopping DaemonSet manager: %w", err)
