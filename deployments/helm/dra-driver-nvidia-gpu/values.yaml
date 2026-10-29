@@ -113,6 +113,10 @@ resources:
       # Requires the host's /etc/nvidia-imex/config.cfg to set IMEX_CMD_ENABLED to 1 and
       # IMEX_CMD_UNIX_DOMAIN_PATH to this same path.
       hostSocketPath: "/etc/nvidia-imex/imex_ctrl.sock"
+      # maxChannels bounds the IMEX channel IDs [0, maxChannels) the controller
+      # assigns in each NVLink clique, at most 2048 (the GPU driver limit).
+      # Requires featureGates.ComputeDomainChannelReservations=true.
+      maxChannels: 2048
       # config lets you override, or add, arbitrary nvidia-imex daemon
       # config file settings as a map of setting name to value (see NVIDIA's
       # IMEX documentation for available settings). Applied on top of the
@@ -251,6 +255,11 @@ controller:
     enabled: false
     # minAvailable: 1
     # maxUnavailable: 1
+  # kubeAPI sets the controller's API client rate limits. Admitting the IMEX
+  # channels of ComputeDomain workloads writes once per pod.
+  kubeAPI:
+    qps: 100
+    burst: 200
   leaderElection:
     enabled: false
     leaseDuration: "15s"

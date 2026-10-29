@@ -73,6 +73,7 @@ type Flags struct {
 	imexScope           string
 	imexIsolation       string
 	imexConfigOverrides string
+	imexMaxChannels     int
 
 	httpEndpoint string
 	metricsPath  string
@@ -181,6 +182,13 @@ func newApp() *cli.App {
 			Destination: &flags.imexConfigOverrides,
 			EnvVars:     []string{"IMEX_CONFIG_OVERRIDES"},
 		},
+		&cli.IntFlag{
+			Name:        "imex-max-channels",
+			Usage:       "IMEX channel IDs [0, N) assigned in each NVLink clique (ComputeDomainChannelReservations feature gate). At most the IMEX channels of the nodes.",
+			Value:       imex.DefaultMaxChannels,
+			Destination: &flags.imexMaxChannels,
+			EnvVars:     []string{"IMEX_MAX_CHANNELS"},
+		},
 		&cli.StringFlag{
 			Category:    "HTTP server:",
 			Name:        "http-endpoint",
@@ -257,6 +265,9 @@ func newApp() *cli.App {
 			}
 			if err := imex.ValidateConfigOverrides(imexConfigOverrides); err != nil {
 				return fmt.Errorf("invalid imex-config-overrides: %w", err)
+			}
+			if err := imex.ValidateMaxChannels(flags.imexMaxChannels); err != nil {
+				return err
 			}
 			if imexConfig.EffectiveHostManaged() {
 				// The driver never creates per-ComputeDomain IMEX DaemonSets or
