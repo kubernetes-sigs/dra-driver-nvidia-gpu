@@ -23,6 +23,8 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 
 	"github.com/stretchr/testify/assert"
+
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 )
 
 func deviceNames(devices []resourceapi.Device) []string {
@@ -34,6 +36,13 @@ func deviceNames(devices []resourceapi.Device) []string {
 	return names
 }
 
+func driverManagedConfig() *Config {
+	return &Config{
+		flags:      &Flags{},
+		imexConfig: imex.Config{Mode: imex.ModeDriverManaged, Isolation: imex.IsolationIMEXDomain},
+	}
+}
+
 func TestComputeDomainPublishedDevices(t *testing.T) {
 	allocatable := AllocatableDevices{
 		"channel-0": &AllocatableDevice{Channel: &ComputeDomainChannelInfo{ID: 0}},
@@ -43,10 +52,11 @@ func TestComputeDomainPublishedDevices(t *testing.T) {
 
 	t.Run("driver-managed publishes channel 0 and the daemon device", func(t *testing.T) {
 		// Non-zero channels are always excluded (advertised from the control plane).
-		assert.Equal(t, []string{"channel-0", "daemon-0"}, deviceNames(computeDomainPublishedDevices(allocatable, false)))
+		assert.Equal(t, []string{"channel-0", "daemon-0"}, deviceNames(computeDomainPublishedDevices(allocatable, driverManagedConfig(), channelDeviceState{})))
 	})
 
 	t.Run("host-managed omits the daemon device", func(t *testing.T) {
-		assert.Equal(t, []string{"channel-0"}, deviceNames(computeDomainPublishedDevices(allocatable, true)))
+		assert.Equal(t, []string{"channel-0"}, deviceNames(computeDomainPublishedDevices(allocatable, hostManagedConfig(), channelDeviceState{})))
 	})
+
 }

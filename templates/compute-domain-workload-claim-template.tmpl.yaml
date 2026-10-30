@@ -16,6 +16,13 @@ spec:
       - name: channel
         exactly:
           deviceClassName: {{ .DeviceClassName }}
+{{- if .Owner }}
+          tolerations:
+          - key: {{ .OwnerTaintKey }}
+            operator: Equal
+            value: "{{ .Owner }}"
+            effect: NoSchedule
+{{- end }}
       config:
       - requests: ["channel"]
         opaque:
@@ -25,3 +32,6 @@ spec:
             kind: {{ .ChannelConfig.Kind }}
             domainID: {{ .ChannelConfig.DomainID }}
             allocationMode: {{ .ChannelConfig.AllocationMode }}
+{{- if .ChannelConfig.ResourceClaimTemplateName }}
+            resourceClaimTemplateName: {{ .ChannelConfig.ResourceClaimTemplateName }}
+{{- end }}

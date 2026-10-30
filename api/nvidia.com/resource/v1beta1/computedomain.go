@@ -58,6 +58,7 @@ type ComputeDomainList struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="self == oldSelf", message="A computeDomain.spec is immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.channel) != has(self.channels)", message="exactly one of channel and channels must be set"
 
 // ComputeDomainSpec provides the spec for a ComputeDomain.
 type ComputeDomainSpec struct {
@@ -88,8 +89,20 @@ type ComputeDomainSpec struct {
 	// +kubebuilder:default:=0
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Optional
-	NumNodes int                       `json:"numNodes,omitempty"`
-	Channel  *ComputeDomainChannelSpec `json:"channel"`
+	NumNodes int `json:"numNodes,omitempty"`
+	// A single workload ResourceClaimTemplate. Exactly one of channel and
+	// channels must be set.
+	// +kubebuilder:validation:Optional
+	Channel *ComputeDomainChannelSpec `json:"channel,omitempty"`
+	// Workload ResourceClaimTemplates, each backed by its own IMEX channel.
+	// Pods using the same template share its channel. Requires the
+	// ComputeDomainChannelReservations feature gate.
+	// +listType=atomic
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=128
+	// +kubebuilder:validation:XValidation:rule="self.all(c, self.exists_one(d, d.resourceClaimTemplate.name == c.resourceClaimTemplate.name))", message="resourceClaimTemplate names must be unique"
+	// +kubebuilder:validation:Optional
+	Channels []ComputeDomainChannelEntry `json:"channels,omitempty"`
 }
 
 // ComputeDomainChannelSpec provides the spec for a channel used to run a workload inside a ComputeDomain.
@@ -103,9 +116,32 @@ type ComputeDomainChannelSpec struct {
 	AllocationMode string `json:"allocationMode,omitempty"`
 }
 
+// ComputeDomainChannelEntry provides the spec for one of several channels of
+// a ComputeDomain.
+type ComputeDomainChannelEntry struct {
+	ResourceClaimTemplate ComputeDomainResourceClaimTemplate `json:"resourceClaimTemplate"`
+}
+
 // ComputeDomainResourceClaimTemplate provides the details of the ResourceClaimTemplate to generate.
 type ComputeDomainResourceClaimTemplate struct {
+	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
+}
+
+// GetChannels returns channel or channels as a list, so that callers handle
+// both forms alike.
+func (s *ComputeDomainSpec) GetChannels() []ComputeDomainChannelSpec {
+	if s.Channel != nil {
+		return []ComputeDomainChannelSpec{*s.Channel}
+	}
+	channels := make([]ComputeDomainChannelSpec, 0, len(s.Channels))
+	for _, c := range s.Channels {
+		channels = append(channels, ComputeDomainChannelSpec{
+			ResourceClaimTemplate: c.ResourceClaimTemplate,
+			AllocationMode:        ComputeDomainChannelAllocationModeSingle,
+		})
+	}
+	return channels
 }
 
 // ComputeDomainStatus provides the status for a ComputeDomain.

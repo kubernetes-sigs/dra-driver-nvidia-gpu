@@ -49,11 +49,13 @@ When GPU allocation is enabled, the chart also creates DeviceClass resources for
 | Value | Default | Description |
 |---|---|---|
 | `resources.computeDomains.imex.mode` | `driverManaged` | Selects who manages the `nvidia-imex` daemon lifecycle: `driverManaged` creates a per-ComputeDomain daemon DaemonSet, while `hostManaged` uses a host service that you manage and requires the [`HostManagedIMEXDaemon`](feature-gates.md) feature gate. |
-| `resources.computeDomains.imex.isolation` | `domain` | Selects IMEX isolation, where `domain` shares channel 0 among workloads in the same IMEX domain and `channel` is reserved but unsupported. |
+| `resources.computeDomains.imex.scope` | `computeDomain` | Selects whose IMEX daemons run on a node, where `computeDomain` runs one set per ComputeDomain and `cluster` shares them among all ComputeDomains. `hostManaged` always uses `cluster`. |
+| `resources.computeDomains.imex.isolation` | `domain` | Selects IMEX isolation, where `domain` shares channel 0 among workloads in the same IMEX domain and `channel` gives each workload `ResourceClaimTemplate` its own channel, shared by the pods using it, which requires the `ComputeDomainChannelReservations` feature gate. |
 | `resources.computeDomains.imex.hostSocketPath` | `/etc/nvidia-imex/imex_ctrl.sock` | Sets the path under `nvidiaDriverRoot` to the host IMEX command socket that the ComputeDomain kubelet plugin queries for a `READY` response during claim preparation in `hostManaged` mode. |
 | `resources.computeDomains.imex.config` | `{}` | A map of arbitrary `nvidia-imex` daemon config file setting names to values, overriding or adding to the defaults rendered by dynamically launched compute-domain-daemon pods. Only applies in `driverManaged` mode; ignored in `hostManaged` mode. See [NVIDIA's IMEX documentation](https://docs.nvidia.com/multi-node-nvlink-systems/imex-guide/) for the full list of settings. |
+| `resources.computeDomains.imex.maxChannels` | `2048` | The number of IMEX channels of each NVLink clique, starting at channel 0, at most 2048, that the controller assigns to workload templates. Only used with the [`ComputeDomainChannelReservations`](feature-gates.md) feature gate. |
 
-Drain ComputeDomain workload pods and delete existing `ComputeDomain` resources before you change `resources.computeDomains.imex.mode` or `resources.computeDomains.imex.isolation`.
+Drain ComputeDomain workload pods and delete existing `ComputeDomain` resources before you change `resources.computeDomains.imex.mode`, `resources.computeDomains.imex.scope` or `resources.computeDomains.imex.isolation`.
 
 ## Kubernetes API version
 
@@ -123,7 +125,9 @@ Deployed when `resources.computeDomains.enabled=true`.
 | Value | Default | Description |
 |---|---|---|
 | `controller.replicas` | `1` | Number of controller pod replicas. |
-| `controller.leaderElection.enabled` | `false` | Enable leader election when running multiple replicas. |
+| `controller.leaderElection.enabled` | `false` | Enable leader election when running multiple replicas. Without it, the controller is updated without a surge pod (`maxSurge: 0`). |
+| `controller.kubeAPI.qps` | `100` | Rate limit of the controller's Kubernetes API client. Admitting ComputeDomain channels writes once per pod. |
+| `controller.kubeAPI.burst` | `200` | Burst of the controller's Kubernetes API client. |
 | `controller.leaderElection.leaseDuration` | `15s` | How long the leader holds the lease before renewal is required. |
 | `controller.leaderElection.renewDeadline` | `10s` | How long the leader retries renewal before giving up. |
 | `controller.leaderElection.retryPeriod` | `2s` | Interval between leader-election retries. |

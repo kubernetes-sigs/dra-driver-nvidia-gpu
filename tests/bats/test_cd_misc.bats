@@ -113,30 +113,46 @@ bats::on_failure() {
   local POD
   POD=$(kubectl create -f "${SPEC}" | grep pod | awk '{print $1;}')
 
-  # Confirm ContainerCreating state (no failure yet though).
-  kubectl wait \
-    --for=jsonpath='{.status.containerStatuses[0].state.waiting.reason}'=ContainerCreating \
-    --timeout=10s \
-    "${POD}"
+  if cd_claim_admission_enabled; then
+    # The controller rejects the claim before the pod is bound.
+    local i
+    for i in $(seq 30); do
+      kubectl logs \
+        -l dra-driver-nvidia-gpu-component=controller \
+        -n dra-driver-nvidia-gpu \
+        --tail=-1 | \
+          grep 'batssuite-rc-bad-opaque-config' | grep 'InvalidConfig' | \
+          grep -q 'strict decoding error: unknown field "unexpectedField"' && break
+      sleep 1
+    done
+    [ "${i}" -lt 30 ]
+    kubectl wait --for=jsonpath='{.status.phase}'=Pending --timeout=10s "${POD}"
+  else
+    # Confirm ContainerCreating state (no failure yet though).
+    kubectl wait \
+      --for=jsonpath='{.status.containerStatuses[0].state.waiting.reason}'=ContainerCreating \
+      --timeout=10s \
+      "${POD}"
 
-  # Rather quickly, we expect an event with reason
-  # `FailedPrepareDynamicResources`. That's not typically the method users
-  # discover the error.
-  wait_for_pod_event "${POD}" FailedPrepareDynamicResources 10
+    # Rather quickly, we expect an event with reason
+    # `FailedPrepareDynamicResources`. That's not typically the method users
+    # discover the error.
+    wait_for_pod_event "${POD}" FailedPrepareDynamicResources 10
 
-  # This is how users probably see this error first.
-  kubectl describe "${POD}" | grep FailedPrepareDynamicResources | \
-    grep "error preparing devices"  | \
-    grep 'strict decoding error: unknown field "unexpectedField"'
-
-  # Confirm that precise root cause can also be inferred from
-  # CD kubelet plugin logs.
-  kubectl logs \
-    -l dra-driver-nvidia-gpu-component=kubelet-plugin \
-    -n dra-driver-nvidia-gpu \
-    --prefix --tail=-1 | \
-      grep 'Permanent error' | \
+    # This is how users probably see this error first.
+    kubectl describe "${POD}" | grep FailedPrepareDynamicResources | \
+      grep "error preparing devices"  | \
       grep 'strict decoding error: unknown field "unexpectedField"'
+
+    # Confirm that precise root cause can also be inferred from
+    # CD kubelet plugin logs.
+    kubectl logs \
+      -l dra-driver-nvidia-gpu-component=kubelet-plugin \
+      -n dra-driver-nvidia-gpu \
+      --prefix --tail=-1 | \
+        grep 'Permanent error' | \
+        grep 'strict decoding error: unknown field "unexpectedField"'
+  fi
 
   # Clean up.
   kubectl delete "${POD}"
@@ -149,6 +165,7 @@ bats::on_failure() {
 @test "CDs: self-initiated unprepare of stale RCs in PrepareStarted" {
   if [ "${MOCK_NVML:-}" = "true" ]; then skip "requires IMEX daemon"; fi
   iupgrade_wait "${TEST_CHART_REPO}" "${TEST_CHART_VERSION}" NOARGS
+  if cd_claim_admission_enabled; then skip "invalid claims are rejected before Prepare with claim admission"; fi
 
   # Stage 1: provoke partially prepared claim.
   #
