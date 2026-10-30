@@ -75,7 +75,7 @@ docker exec \
   "${MOCK_GPU_BUILDER_NAME}" \
   bash -c '
     apt-get update -qq
-    apt-get install -y -qq ca-certificates curl gnupg patchelf sudo
+    apt-get install -y -qq ca-certificates curl gnupg patchelf python3 sudo
     mkdir -p /work/k8s-test-infra /work/dra-driver-mock-nvml
   '
 
@@ -88,6 +88,12 @@ docker cp \
 docker cp \
   "${SCRIPT_DIR}/setup-mock-gpu.sh" \
   "${MOCK_GPU_BUILDER_NAME}:${BUILDER_SCRIPTS_ROOT}/setup-mock-gpu.sh"
+docker cp \
+  "${SCRIPT_DIR}/apply-health-control.sh" \
+  "${MOCK_GPU_BUILDER_NAME}:${BUILDER_SCRIPTS_ROOT}/apply-health-control.sh"
+docker cp \
+  "${SCRIPT_DIR}/healthcontrol" \
+  "${MOCK_GPU_BUILDER_NAME}:${BUILDER_SCRIPTS_ROOT}/healthcontrol"
 
 echo "Building mock NVML and rendering the mock driver filesystem..."
 docker exec \
