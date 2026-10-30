@@ -63,6 +63,19 @@ func (d *PreparedDevice) CanonicalName() string {
 	panic("unexpected type for AllocatableDevice")
 }
 
+// DeviceName is the name of the allocated device. It differs from
+// CanonicalName for the shared channel device, whose Info records the
+// channel of the claim.
+func (d *PreparedDevice) DeviceName() string {
+	switch d.Type() {
+	case ComputeDomainChannelType:
+		return d.Channel.Device.DeviceName
+	case ComputeDomainDaemonType:
+		return d.Daemon.Device.DeviceName
+	}
+	panic("unexpected type for PreparedDevice")
+}
+
 func (d *PreparedDevice) CanonicalIndex() string {
 	switch d.Type() {
 	case ComputeDomainChannelType:

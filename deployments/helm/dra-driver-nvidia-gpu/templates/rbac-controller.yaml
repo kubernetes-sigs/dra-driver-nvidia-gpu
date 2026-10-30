@@ -11,9 +11,31 @@ rules:
 - apiGroups: ["resource.nvidia.com"]
   resources: ["computedomains/status"]
   verbs: ["update"]
+- apiGroups: ["resource.nvidia.com"]
+  resources: ["computedomaindaemonsets"]
+  verbs: ["get", "list", "watch", "update"]
+- apiGroups: ["resource.nvidia.com"]
+  resources: ["computedomaindaemonsets/status"]
+  verbs: ["update"]
 - apiGroups: ["resource.k8s.io"]
   resources: ["resourceclaimtemplates"]
   verbs: ["get", "list", "watch", "create", "update", "delete"]
+# ComputeDomain channel reservations: claim admission, and the NVLink clique of
+# each node from its ResourceSlice.
+- apiGroups: ["resource.k8s.io"]
+  resources: ["resourceclaims"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["resource.k8s.io"]
+  resources: ["resourceslices"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["resource.k8s.io"]
+  resources: ["resourceclaims/status"]
+  verbs: ["update"]
+# Required to set the binding conditions in status.devices.
+- apiGroups: ["resource.k8s.io"]
+  resources: ["resourceclaims/driver"]
+  resourceNames: ["compute-domain.nvidia.com"]
+  verbs: ["arbitrary-node:update"]
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
   verbs: ["get", "create", "update"]
@@ -62,7 +84,11 @@ rules:
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: ["resource.nvidia.com"]
   resources: ["computedomaincliques"]
-  verbs: ["get", "list", "watch", "update"]
+  verbs: ["get", "list", "watch", "update", "delete"]
+# Static IMEX daemons are restarted by clique.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

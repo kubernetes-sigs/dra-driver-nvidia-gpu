@@ -240,13 +240,17 @@ PHONY: .shell
 		--user $$(id -u):$$(id -g) \
 		$(BUILDIMAGE)
 
-.PHONY: bats bats-cd bats-gpu
+.PHONY: bats bats-cd bats-cd-modes bats-gpu
 bats:
 	make -f tests/bats/Makefile tests
 
 # Run compute domain specific tests
 bats-cd:
 	make -f tests/bats/Makefile tests-cd
+
+# Run compute domain tests once per IMEX mode
+bats-cd-modes:
+	make -f tests/bats/Makefile tests-cd-modes
 
 # Run GPU plugin specific tests
 bats-gpu:

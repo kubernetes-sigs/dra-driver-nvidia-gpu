@@ -103,6 +103,20 @@ const (
 	// via --consumable-shares. Note: MPS sharing is not supported when consumable
 	// shares is enabled.
 	ConsumableShares featuregate.Feature = "ConsumableShares"
+
+	// ComputeDomainChannelReservations assigns an IMEX channel per NVLink
+	// clique to each workload ResourceClaimTemplate of a ComputeDomain when
+	// its claims are admitted, which allows several templates per
+	// ComputeDomain (spec.channels). Kubelet plugins publish one shared
+	// channel device instead of one per channel. ComputeDomains sharing an
+	// IMEX domain get distinct channels and can share a node.
+	ComputeDomainChannelReservations featuregate.Feature = "ComputeDomainChannelReservations"
+
+	// ComputeDomainDaemonSet unlocks imex.scope=cluster under driver-managed
+	// IMEX: one static IMEX daemon per node, managed through the
+	// ComputeDomainDaemonSet object, is shared by all ComputeDomains, each with
+	// its own IMEX channels.
+	ComputeDomainDaemonSet featuregate.Feature = "ComputeDomainDaemonSet"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -205,6 +219,20 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(0, 5),
 		},
 	},
+	ComputeDomainChannelReservations: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 6),
+		},
+	},
+	ComputeDomainDaemonSet: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 6),
+		},
+	},
 }
 
 var (
@@ -253,6 +281,15 @@ func ValidateFeatureGates() error {
 	// ComputeDomainCliques requires IMEXDaemonsWithDNSNames
 	if Enabled(ComputeDomainCliques) && !Enabled(IMEXDaemonsWithDNSNames) {
 		return fmt.Errorf("feature gate %s requires %s to also be enabled", ComputeDomainCliques, IMEXDaemonsWithDNSNames)
+	}
+
+	// Static IMEX daemons register in cliques and serve reserved channels.
+	if Enabled(ComputeDomainDaemonSet) {
+		for _, required := range []featuregate.Feature{ComputeDomainCliques, ComputeDomainChannelReservations} {
+			if !Enabled(required) {
+				return fmt.Errorf("feature gate %s requires %s to also be enabled", ComputeDomainDaemonSet, required)
+			}
+		}
 	}
 
 	if Enabled(DynamicMIG) && Enabled(PassthroughSupport) {

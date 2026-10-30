@@ -36,6 +36,10 @@ func (c *FakeResourceV1beta1) ComputeDomainCliques(namespace string) v1beta1.Com
 	return &FakeComputeDomainCliques{c, namespace}
 }
 
+func (c *FakeResourceV1beta1) ComputeDomainDaemonSets() v1beta1.ComputeDomainDaemonSetInterface {
+	return &FakeComputeDomainDaemonSets{c}
+}
+
 // RESTClient returns a RESTClient that is used to communicate
 // with API server by this client implementation.
 func (c *FakeResourceV1beta1) RESTClient() rest.Interface {

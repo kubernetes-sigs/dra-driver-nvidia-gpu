@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,30 +33,79 @@ import (
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/dynamic-resource-allocation/resourceslice"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flock"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 	drametrics "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/workqueue"
 )
 
 // computeDomainPublishedDevices returns the devices the kubelet plugin should
-// advertise in its node ResourceSlice. IMEX channel devices other than
-// channel 0 are never advertised here (they are advertised as a network
-// resource from the control plane instead). ComputeDomain daemon devices are
-// additionally omitted when hostManaged is true, since daemon claims are
-// never valid in that mode (see applyComputeDomainDaemonConfig).
-func computeDomainPublishedDevices(allocatable AllocatableDevices, hostManaged bool) []resourceapi.Device {
+// advertise in its node ResourceSlices. Channel 0 is always advertised, for
+// claims of templates from before channel reservations. With them, one more
+// channel device is shared by all other channel claims on the node, while the
+// controller picks their channels.
+// ComputeDomain daemon devices are omitted when host-managed IMEX is used,
+// since daemon claims are never valid in that mode (see
+// applyComputeDomainDaemonConfig).
+func computeDomainPublishedDevices(allocatable AllocatableDevices, config *Config, state channelDeviceState) []resourceapi.Device {
+	hostManaged := config.imexConfig.EffectiveHostManaged()
+	reservations := channelReservationsEnabled()
 	var devices []resourceapi.Device
 	for _, device := range allocatable {
-		if device.Type() == ComputeDomainChannelType && device.Channel.ID != 0 {
-			continue
+		if device.Type() == ComputeDomainChannelType {
+			if device.Channel.ID > 0 || (device.Channel.Shared() && !reservations) {
+				continue
+			}
 		}
 		if hostManaged && device.Type() == ComputeDomainDaemonType {
 			continue
 		}
-		devices = append(devices, device.GetDevice())
+		dev := device.GetDevice()
+		if device.Channel.Shared() {
+			shareChannelDevice(&dev, config, state)
+		}
+		devices = append(devices, dev)
 	}
+	// Stable ordering keeps slice contents unchanged across plugin restarts.
+	slices.SortFunc(devices, func(a, b resourceapi.Device) int { return strings.Compare(a.Name, b.Name) })
 	return devices
+}
+
+// shareChannelDevice lets all channel claims on the node share the channel
+// device. It has no capacity: the device only brings claims to the kubelet
+// plugin, and the controller bounds the channels.
+func shareChannelDevice(dev *resourceapi.Device, config *Config, state channelDeviceState) {
+	dev.AllowMultipleAllocations = ptr.To(true)
+	// The controller assigns the channel of each claim before its pod
+	// binds, unique in the clique of the node.
+	dev.BindingConditions = []string{imex.ChannelAdmittedCondition}
+	dev.BindingFailureConditions = []string{imex.ChannelRejectedCondition}
+	if state.cliqueID != "" {
+		dev.Attributes[imex.ChannelCliqueAttribute] = resourceapi.DeviceAttribute{StringValue: ptr.To(state.cliqueID)}
+	}
+	// With per-ComputeDomain IMEX daemons, a node runs one ComputeDomain.
+	// The owner taint lets the scheduler skip nodes of other ComputeDomains,
+	// and the admission covers claims allocated before the taint shows.
+	// NoSchedule leaves claims already allocated alone.
+	if state.owner != "" && !config.imexConfig.SharedIMEXDomain() {
+		dev.Taints = []resourceapi.DeviceTaint{{
+			Key:    imex.ChannelOwnerTaintKey,
+			Value:  state.owner,
+			Effect: resourceapi.DeviceTaintEffectNoSchedule,
+		}}
+	}
+}
+
+// computeDomainPublishedSlices honors the per-slice device limit, which
+// matters for future device types only.
+func computeDomainPublishedSlices(allocatable AllocatableDevices, config *Config, state channelDeviceState) []resourceslice.Slice {
+	var result []resourceslice.Slice
+	for chunk := range slices.Chunk(computeDomainPublishedDevices(allocatable, config, state), resourceapi.ResourceSliceMaxDevices) {
+		result = append(result, resourceslice.Slice{Devices: chunk})
+	}
+	return result
 }
 
 const (
@@ -85,6 +136,7 @@ type driver struct {
 	state        *DeviceState
 	pulock       *flock.Flock
 	healthcheck  *healthcheck
+	publisher    *devicePublisher
 }
 
 func NewDriver(ctx context.Context, config *Config) (*driver, error) {
@@ -124,16 +176,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		return nil, err
 	}
 	driver.pluginhelper = helper
-
-	// Enumerate the set of ComputeDomain devices to publish.
-	var resourceSlice resourceslice.Slice
-	resourceSlice.Devices = computeDomainPublishedDevices(state.allocatable, config.imexConfig.EffectiveHostManaged())
-
-	resources := resourceslice.DriverResources{
-		Pools: map[string]resourceslice.Pool{
-			config.flags.nodeName: {Slices: []resourceslice.Slice{resourceSlice}},
-		},
-	}
+	driver.publisher = newDevicePublisher(config, state.allocatable, helper.PublishResources)
 
 	if err := state.computeDomainManager.Start(ctx); err != nil {
 		return nil, fmt.Errorf("error starting ComputeDomain manager: %w", err)
@@ -150,8 +193,8 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	}
 	driver.healthcheck = healthcheck
 
-	if err := driver.pluginhelper.PublishResources(ctx, resources); err != nil {
-		return nil, fmt.Errorf("error in PublishResources(): %w", err)
+	if err := driver.startPublishing(ctx, config); err != nil {
+		return nil, err
 	}
 
 	return driver, nil
@@ -172,6 +215,10 @@ func (d *driver) Shutdown() error {
 
 	if d.healthcheck != nil {
 		d.healthcheck.Stop()
+	}
+
+	if d.publisher != nil {
+		d.publisher.Stop()
 	}
 
 	d.pluginhelper.Stop()

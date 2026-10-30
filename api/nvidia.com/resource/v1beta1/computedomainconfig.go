@@ -53,6 +53,10 @@ type ComputeDomainChannelConfig struct {
 	metav1.TypeMeta `json:",inline"`
 	DomainID        string `json:"domainID"`
 	AllocationMode  string `json:"allocationMode,omitempty"`
+	// ResourceClaimTemplateName names the workload ResourceClaimTemplate of
+	// the claim. With channel reservations, claims of one template share
+	// a channel in each NVLink clique.
+	ResourceClaimTemplateName string `json:"resourceClaimTemplateName,omitempty"`
 }
 
 // DefaultComputeDomainChannelConfig provides the default ComputeDomainChannel configuration.
@@ -72,8 +76,13 @@ func (c *ComputeDomainChannelConfig) Normalize() error {
 
 // Validate ensures that ComputeDomainChannelConfig has a valid set of values.
 func (c *ComputeDomainChannelConfig) Validate() error {
+	if len(c.ResourceClaimTemplateName) > maxResourceClaimTemplateNameLength {
+		return fmt.Errorf("resourceClaimTemplateName is longer than %d characters", maxResourceClaimTemplateNameLength)
+	}
 	return ValidateDomainID(c.DomainID)
 }
+
+const maxResourceClaimTemplateNameLength = 253
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 

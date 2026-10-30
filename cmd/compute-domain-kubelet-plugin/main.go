@@ -69,6 +69,7 @@ type Flags struct {
 	klogVerbosity                 int
 	gpuCliqueLabelEnabled         bool
 	imexMode                      string
+	imexScope                     string
 	imexIsolation                 string
 	imexHostSocketPath            string
 }
@@ -188,10 +189,16 @@ func newApp() *cli.App {
 		},
 		&cli.StringFlag{
 			Name:        "imex-isolation",
-			Usage:       "IMEX isolation strategy: domain (default; all workloads in the same IMEX domain share channel 0) or channel (not yet supported).",
+			Usage:       "IMEX isolation strategy: domain (default; all workloads in the same IMEX domain share channel 0) or channel (each workload ResourceClaimTemplate gets its own channel).",
 			Value:       string(imex.IsolationIMEXDomain),
 			Destination: &flags.imexIsolation,
 			EnvVars:     []string{"IMEX_ISOLATION"},
+		},
+		&cli.StringFlag{
+			Name:        "imex-scope",
+			Usage:       "Whose IMEX daemons run on a node: computeDomain (default for driverManaged; one set per ComputeDomain) or cluster (shared by all ComputeDomains, from the ComputeDomainDaemonSet under driverManaged).",
+			Destination: &flags.imexScope,
+			EnvVars:     []string{"IMEX_SCOPE"},
 		},
 		&cli.StringFlag{
 			Name:        "imex-host-socket-path",
@@ -231,9 +238,18 @@ func newApp() *cli.App {
 				return fmt.Errorf("feature gate validation failed: %w", err)
 			}
 
-			imexConfig := imex.Config{Mode: imex.Mode(flags.imexMode), Isolation: imex.Isolation(flags.imexIsolation)}
-			if err := imexConfig.Validate(featuregates.Enabled(featuregates.HostManagedIMEXDaemon)); err != nil {
+			imexConfig := imex.Config{Mode: imex.Mode(flags.imexMode), Scope: imex.Scope(flags.imexScope), Isolation: imex.Isolation(flags.imexIsolation)}
+			if err := imexConfig.Validate(imex.Gates{
+				HostManagedIMEXDaemon:            featuregates.Enabled(featuregates.HostManagedIMEXDaemon),
+				ComputeDomainChannelReservations: featuregates.Enabled(featuregates.ComputeDomainChannelReservations),
+				ComputeDomainDaemonSet:           featuregates.Enabled(featuregates.ComputeDomainDaemonSet),
+			}); err != nil {
 				return fmt.Errorf("imex configuration validation failed: %w", err)
+			}
+			// Static IMEX daemons run on the nodes labeled with their clique.
+			if imexConfig.StaticDaemon() && !flags.gpuCliqueLabelEnabled {
+				klog.Infof("Enabling the %s node label for static IMEX daemons", gpuCliqueLabelKey)
+				flags.gpuCliqueLabelEnabled = true
 			}
 
 			clientSets, err := flags.kubeClientConfig.NewClientSets()

@@ -23,86 +23,83 @@ import (
 )
 
 func TestConfigValidate(t *testing.T) {
-	tests := []struct {
-		name        string
-		config      Config
-		gateEnabled bool
-		expectError bool
-		description string
+	all := Gates{HostManagedIMEXDaemon: true, ComputeDomainChannelReservations: true, ComputeDomainDaemonSet: true}
+	tests := map[string]struct {
+		config  Config
+		gates   Gates
+		wantErr string
 	}{
-		{
-			name:        "driverManaged with empty isolation defaults to domain",
-			config:      Config{Mode: ModeDriverManaged, Isolation: ""},
-			gateEnabled: false,
-			expectError: false,
-			description: "empty isolation is treated the same as the domain default",
+		"driverManaged defaults": {
+			config: Config{Mode: ModeDriverManaged},
 		},
-		{
-			name:        "driverManaged with explicit domain isolation succeeds",
-			config:      Config{Mode: ModeDriverManaged, Isolation: IsolationIMEXDomain},
-			gateEnabled: false,
-			expectError: false,
-			description: "domain is the default, supported isolation strategy under driverManaged too",
+		"driverManaged per ComputeDomain with domain isolation": {
+			config: Config{Mode: ModeDriverManaged, Scope: ScopeComputeDomain, Isolation: IsolationIMEXDomain},
 		},
-		{
-			name:        "driverManaged with channel isolation errors",
-			config:      Config{Mode: ModeDriverManaged, Isolation: IsolationIMEXChannel},
-			gateEnabled: false,
-			expectError: true,
-			description: "per-workload channel isolation is not implemented yet, regardless of mode",
+		"driverManaged per ComputeDomain with channel isolation": {
+			config: Config{Mode: ModeDriverManaged, Scope: ScopeComputeDomain, Isolation: IsolationIMEXChannel},
+			gates:  Gates{ComputeDomainChannelReservations: true},
 		},
-		{
-			name:        "driverManaged with unknown isolation errors",
-			config:      Config{Mode: ModeDriverManaged, Isolation: "bogus"},
-			gateEnabled: true,
-			expectError: true,
-			description: "isolation is validated regardless of mode",
+		"channel isolation requires channel reservations": {
+			config:  Config{Mode: ModeDriverManaged, Isolation: IsolationIMEXChannel},
+			gates:   Gates{ComputeDomainDaemonSet: true},
+			wantErr: "ComputeDomainChannelReservations",
 		},
-		{
-			name:        "hostManaged requires the feature gate",
-			config:      Config{Mode: ModeHostManaged, Isolation: IsolationIMEXDomain},
-			gateEnabled: false,
-			expectError: true,
-			description: "mode=hostManaged is rejected when HostManagedIMEXDaemon is disabled",
+		"driverManaged cluster scope runs static daemons": {
+			config: Config{Mode: ModeDriverManaged, Scope: ScopeCluster, Isolation: IsolationIMEXChannel},
+			gates:  Gates{ComputeDomainChannelReservations: true, ComputeDomainDaemonSet: true},
 		},
-		{
-			name:        "hostManaged with empty isolation defaults to domain",
-			config:      Config{Mode: ModeHostManaged, Isolation: ""},
-			gateEnabled: true,
-			expectError: false,
-			description: "empty isolation is treated the same as the domain default under hostManaged too",
+		"cluster scope requires the ComputeDomainDaemonSet gate": {
+			config:  Config{Mode: ModeDriverManaged, Scope: ScopeCluster, Isolation: IsolationIMEXChannel},
+			gates:   Gates{ComputeDomainChannelReservations: true},
+			wantErr: "ComputeDomainDaemonSet",
 		},
-		{
-			name:        "hostManaged with explicit domain isolation succeeds",
-			config:      Config{Mode: ModeHostManaged, Isolation: IsolationIMEXDomain},
-			gateEnabled: true,
-			expectError: false,
-			description: "domain is the default isolation strategy, supported under hostManaged",
+		"cluster scope requires channel isolation": {
+			config:  Config{Mode: ModeDriverManaged, Scope: ScopeCluster},
+			gates:   all,
+			wantErr: "isolated by their channels",
 		},
-		{
-			name:        "hostManaged with channel isolation errors for now",
-			config:      Config{Mode: ModeHostManaged, Isolation: IsolationIMEXChannel},
-			gateEnabled: true,
-			expectError: true,
-			description: "per-workload channel isolation is not implemented yet, so it errors out",
+		"hostManaged requires the feature gate": {
+			config:  Config{Mode: ModeHostManaged},
+			wantErr: "HostManagedIMEXDaemon",
 		},
-		{
-			name:        "unknown mode errors",
-			config:      Config{Mode: "bogus"},
-			gateEnabled: true,
-			expectError: true,
-			description: "an unrecognized mode value must be rejected",
+		"hostManaged defaults to cluster scope": {
+			config: Config{Mode: ModeHostManaged, Isolation: IsolationIMEXDomain},
+			gates:  Gates{HostManagedIMEXDaemon: true},
+		},
+		"hostManaged with channel isolation": {
+			config: Config{Mode: ModeHostManaged, Scope: ScopeCluster, Isolation: IsolationIMEXChannel},
+			gates:  Gates{HostManagedIMEXDaemon: true, ComputeDomainChannelReservations: true},
+		},
+		"hostManaged per ComputeDomain": {
+			config:  Config{Mode: ModeHostManaged, Scope: ScopeComputeDomain},
+			gates:   all,
+			wantErr: "shared by all ComputeDomains",
+		},
+		"unknown isolation": {
+			config:  Config{Mode: ModeDriverManaged, Isolation: "bogus"},
+			gates:   all,
+			wantErr: "unknown imex.isolation",
+		},
+		"unknown scope": {
+			config:  Config{Mode: ModeDriverManaged, Scope: "bogus"},
+			gates:   all,
+			wantErr: "unknown imex.scope",
+		},
+		"unknown mode": {
+			config:  Config{Mode: "bogus"},
+			gates:   all,
+			wantErr: "unknown imex.mode",
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.config.Validate(tt.gateEnabled)
-			if tt.expectError {
-				require.Error(t, err, tt.description)
-			} else {
-				require.NoError(t, err, tt.description)
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := tc.config.Validate(tc.gates)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
 			}
+			require.NoError(t, err)
 		})
 	}
 }
@@ -111,4 +108,21 @@ func TestConfigEffectiveHostManaged(t *testing.T) {
 	require.True(t, Config{Mode: ModeHostManaged}.EffectiveHostManaged())
 	require.False(t, Config{Mode: ModeDriverManaged}.EffectiveHostManaged())
 	require.False(t, Config{}.EffectiveHostManaged())
+}
+
+func TestConfigStaticDaemon(t *testing.T) {
+	static := Config{Mode: ModeDriverManaged, Scope: ScopeCluster, Isolation: IsolationIMEXChannel}
+	require.True(t, static.StaticDaemon())
+	require.True(t, static.SharedIMEXDomain())
+	require.Equal(t, "mode=driverManaged scope=cluster isolation=channel", static.String())
+
+	host := Config{Mode: ModeHostManaged, Isolation: IsolationIMEXChannel}
+	require.False(t, host.StaticDaemon())
+	require.True(t, host.SharedIMEXDomain())
+	require.Equal(t, ScopeCluster, host.EffectiveScope())
+
+	perComputeDomain := Config{Mode: ModeDriverManaged, Isolation: IsolationIMEXChannel}
+	require.False(t, perComputeDomain.StaticDaemon(), "channel isolation alone keeps per-ComputeDomain daemons")
+	require.False(t, perComputeDomain.SharedIMEXDomain())
+	require.Equal(t, ScopeComputeDomain, perComputeDomain.EffectiveScope())
 }

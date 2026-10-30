@@ -209,8 +209,21 @@ true
 {{- end -}}
 
 {{/*
-Validates resources.computeDomains.imex.mode / .isolation against
-featureGates.HostManagedIMEXDaemon so `helm install`/`helm template` fails fast
+Resolves resources.computeDomains.imex.scope. Host-managed IMEX daemons are
+always shared by all ComputeDomains.
+*/}}
+{{- define "dra-driver-nvidia-gpu.imexScope" -}}
+{{- $imex := .Values.resources.computeDomains.imex | default dict -}}
+{{- if eq (toString (dig "mode" "driverManaged" $imex)) "hostManaged" -}}
+cluster
+{{- else -}}
+{{- toString (dig "scope" "" $imex) | default "computeDomain" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Validates resources.computeDomains.imex.mode / .scope / .isolation against
+the feature gates that unlock them, so `helm install`/`helm template` fails fast
 with a clear message instead of the controller/kubelet-plugin pods crash-looping
 on an invalid combination. Produces no output on success.
 */}}
@@ -226,11 +239,23 @@ on an invalid combination. Produces no output on success.
 {{- else if ne $mode "driverManaged" -}}
   {{- fail (printf "unknown resources.computeDomains.imex.mode %q: must be \"driverManaged\" or \"hostManaged\"" $mode) -}}
 {{- end -}}
-{{- if and (ne $isolation "") (ne $isolation "domain") -}}
-  {{- if eq $isolation "channel" -}}
-    {{- fail "resources.computeDomains.imex.isolation=channel is not supported yet: per-workload IMEX channel allocation is not implemented. Use the default, \"domain\"." -}}
-  {{- else -}}
-    {{- fail (printf "unknown resources.computeDomains.imex.isolation %q: must be \"domain\" or \"channel\"" $isolation) -}}
+{{- $gates := .Values.featureGates | default dict -}}
+{{- if not (has $isolation (list "" "domain" "channel")) -}}
+  {{- fail (printf "unknown resources.computeDomains.imex.isolation %q: must be \"domain\" or \"channel\"" $isolation) -}}
+{{- end -}}
+{{- if and (eq $isolation "channel") (not (dig "ComputeDomainChannelReservations" false $gates)) -}}
+  {{- fail "resources.computeDomains.imex.isolation=channel requires featureGates.ComputeDomainChannelReservations=true" -}}
+{{- end -}}
+{{- $scope := include "dra-driver-nvidia-gpu.imexScope" . -}}
+{{- if not (has $scope (list "computeDomain" "cluster")) -}}
+  {{- fail (printf "unknown resources.computeDomains.imex.scope %q: must be \"computeDomain\" or \"cluster\"" $scope) -}}
+{{- end -}}
+{{- if and (eq $scope "cluster") (eq $mode "driverManaged") -}}
+  {{- if ne $isolation "channel" -}}
+    {{- fail "resources.computeDomains.imex.scope=cluster requires isolation=channel, as ComputeDomains sharing IMEX daemons are isolated by their channels" -}}
+  {{- end -}}
+  {{- if not (dig "ComputeDomainDaemonSet" false $gates) -}}
+    {{- fail "resources.computeDomains.imex.scope=cluster requires featureGates.ComputeDomainDaemonSet=true" -}}
   {{- end -}}
 {{- end -}}
 {{- end -}}

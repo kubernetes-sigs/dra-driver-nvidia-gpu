@@ -464,6 +464,26 @@ func TestValidateFeatureGates(t *testing.T) {
 			description: "should be valid when IMEXDaemonsWithDNSNames is enabled but ComputeDomainCliques is not",
 		},
 		{
+			name:         "ComputeDomainDaemonSet without ComputeDomainChannelReservations",
+			fgMap:        map[featuregate.Feature]bool{ComputeDomainDaemonSet: true, ComputeDomainCliques: true, IMEXDaemonsWithDNSNames: true},
+			expectError:  true,
+			errorMessage: "feature gate ComputeDomainDaemonSet requires ComputeDomainChannelReservations to also be enabled",
+			description:  "static IMEX daemons serve reserved channels",
+		},
+		{
+			name:         "ComputeDomainDaemonSet without ComputeDomainCliques",
+			fgMap:        map[featuregate.Feature]bool{ComputeDomainDaemonSet: true, ComputeDomainChannelReservations: true, ComputeDomainCliques: false},
+			expectError:  true,
+			errorMessage: "feature gate ComputeDomainDaemonSet requires ComputeDomainCliques to also be enabled",
+			description:  "static IMEX daemons register in cliques",
+		},
+		{
+			name:        "ComputeDomainDaemonSet with its dependencies",
+			fgMap:       map[featuregate.Feature]bool{ComputeDomainDaemonSet: true, ComputeDomainChannelReservations: true, ComputeDomainCliques: true, IMEXDaemonsWithDNSNames: true},
+			expectError: false,
+			description: "should be valid with cliques, DNS names and channel reservations",
+		},
+		{
 			name:         "DynamicMIG enabled with PassthroughSupport",
 			fgMap:        map[featuregate.Feature]bool{DynamicMIG: true, PassthroughSupport: true},
 			expectError:  true,

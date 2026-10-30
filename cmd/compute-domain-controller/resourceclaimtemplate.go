@@ -19,11 +19,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"text/template"
 
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -35,6 +37,8 @@ import (
 	"k8s.io/klog/v2"
 
 	nvapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 )
 
 const (
@@ -54,6 +58,11 @@ type ResourceClaimTemplateTemplateData struct {
 	DriverName              string
 	ChannelConfig           *nvapi.ComputeDomainChannelConfig
 	DaemonConfig            *nvapi.ComputeDomainDaemonConfig
+	// Owner, with per-ComputeDomain IMEX daemons, is the ComputeDomain whose
+	// OwnerTaintKey the channel request tolerates, so that it lands on nodes
+	// without, or with this, ComputeDomain's IMEX daemon.
+	Owner         string
+	OwnerTaintKey string
 }
 
 type BaseResourceClaimTemplateManager struct {
@@ -64,6 +73,8 @@ type BaseResourceClaimTemplateManager struct {
 
 	informer      cache.SharedIndexInformer
 	mutationCache cache.MutationCache
+
+	templatePath string
 
 	cleanupManager *CleanupManager[*resourceapi.ResourceClaimTemplate]
 }
@@ -157,6 +168,24 @@ func (m *BaseResourceClaimTemplateManager) Stop() error {
 }
 
 func (m *BaseResourceClaimTemplateManager) Create(ctx context.Context, templatePath string, templateData *ResourceClaimTemplateTemplateData) (*resourceapi.ResourceClaimTemplate, error) {
+	resourceClaimTemplate, err := renderResourceClaimTemplate(templatePath, templateData)
+	if err != nil {
+		return nil, err
+	}
+
+	rct, err := m.config.clientsets.Resource.ResourceClaimTemplates(resourceClaimTemplate.Namespace).Create(ctx, resourceClaimTemplate, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("error creating ResourceClaimTemplate: %w", err)
+	}
+
+	// Add the newly created ResourceClaimTemplate to the mutation cache
+	// This ensures subsequent calls will see it immediately
+	m.mutationCache.Mutation(rct)
+
+	return rct, nil
+}
+
+func renderResourceClaimTemplate(templatePath string, templateData *ResourceClaimTemplateTemplateData) (*resourceapi.ResourceClaimTemplate, error) {
 	tmpl, err := template.ParseFiles(templatePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse template file: %w", err)
@@ -179,58 +208,46 @@ func (m *BaseResourceClaimTemplateManager) Create(ctx context.Context, templateP
 		return nil, fmt.Errorf("failed to convert unstructured data to typed object: %w", err)
 	}
 
-	rct, err := m.config.clientsets.Resource.ResourceClaimTemplates(resourceClaimTemplate.Namespace).Create(ctx, &resourceClaimTemplate, metav1.CreateOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("error creating ResourceClaimTemplate: %w", err)
-	}
-
-	// Add the newly created ResourceClaimTemplate to the mutation cache
-	// This ensures subsequent calls will see it immediately
-	m.mutationCache.Mutation(rct)
-
-	return rct, nil
+	return &resourceClaimTemplate, nil
 }
 
+// Delete deletes all ResourceClaimTemplates of a ComputeDomain.
 func (m *BaseResourceClaimTemplateManager) Delete(ctx context.Context, cdUID string) error {
 	rcts, err := getByComputeDomainUID[*resourceapi.ResourceClaimTemplate](ctx, m.mutationCache, cdUID)
 	if err != nil {
 		return fmt.Errorf("error retrieving ResourceClaimTemplate: %w", err)
 	}
-	if len(rcts) > 1 {
-		return fmt.Errorf("more than one ResourceClaimTemplate found with same ComputeDomain UID")
-	}
-	if len(rcts) == 0 {
-		return nil
-	}
 
-	rct := rcts[0]
-
-	if rct.GetDeletionTimestamp() != nil {
-		return nil
-	}
-
-	err = m.config.clientsets.Resource.ResourceClaimTemplates(rct.Namespace).Delete(ctx, rct.Name, metav1.DeleteOptions{})
-	if err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("error deleting ResourceClaimTemplate: %w", err)
+	for _, rct := range rcts {
+		if rct.GetDeletionTimestamp() != nil {
+			continue
+		}
+		err = m.config.clientsets.Resource.ResourceClaimTemplates(rct.Namespace).Delete(ctx, rct.Name, metav1.DeleteOptions{})
+		if err != nil && !errors.IsNotFound(err) {
+			return fmt.Errorf("error deleting ResourceClaimTemplate %s/%s: %w", rct.Namespace, rct.Name, err)
+		}
 	}
 
 	return nil
 }
 
+// RemoveFinalizer removes the finalizer from all ResourceClaimTemplates of a
+// ComputeDomain.
 func (m *BaseResourceClaimTemplateManager) RemoveFinalizer(ctx context.Context, cdUID string) error {
 	rcts, err := getByComputeDomainUID[*resourceapi.ResourceClaimTemplate](ctx, m.mutationCache, cdUID)
 	if err != nil {
 		return fmt.Errorf("error retrieving ResourceClaimTemplate: %w", err)
 	}
-	if len(rcts) > 1 {
-		return fmt.Errorf("more than one ResourceClaimTemplate found with same ComputeDomain UID")
-	}
-	if len(rcts) == 0 {
-		return nil
-	}
 
-	rct := rcts[0]
+	for _, rct := range rcts {
+		if err := m.removeFinalizer(ctx, rct); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
+func (m *BaseResourceClaimTemplateManager) removeFinalizer(ctx context.Context, rct *resourceapi.ResourceClaimTemplate) error {
 	if rct.GetDeletionTimestamp() == nil {
 		return fmt.Errorf("attempting to remove finalizer before ResourceClaimTemplate marked for deletion")
 	}
@@ -246,7 +263,7 @@ func (m *BaseResourceClaimTemplateManager) RemoveFinalizer(ctx context.Context, 
 		return nil
 	}
 
-	if _, err = m.config.clientsets.Resource.ResourceClaimTemplates(rct.Namespace).Update(ctx, newRCT, metav1.UpdateOptions{}); err != nil {
+	if _, err := m.config.clientsets.Resource.ResourceClaimTemplates(rct.Namespace).Update(ctx, newRCT, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("error updating ResourceClaimTemplate: %w", err)
 	}
 
@@ -254,6 +271,29 @@ func (m *BaseResourceClaimTemplateManager) RemoveFinalizer(ctx context.Context, 
 	m.mutationCache.Mutation(newRCT)
 
 	return nil
+}
+
+// replace deletes an outdated ResourceClaimTemplate so that it can be
+// recreated, and reports whether it is gone. Claims already created from it
+// keep working.
+func (m *BaseResourceClaimTemplateManager) replace(ctx context.Context, rct *resourceapi.ResourceClaimTemplate) (bool, error) {
+	client := m.config.clientsets.Resource.ResourceClaimTemplates(rct.Namespace)
+	if rct.GetDeletionTimestamp() == nil {
+		if err := client.Delete(ctx, rct.Name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+			return false, fmt.Errorf("error deleting outdated ResourceClaimTemplate %s/%s: %w", rct.Namespace, rct.Name, err)
+		}
+		klog.Infof("Replacing outdated ResourceClaimTemplate %s/%s", rct.Namespace, rct.Name)
+		return false, nil
+	}
+	if err := m.removeFinalizer(ctx, rct); err != nil {
+		return false, err
+	}
+	// The mutation cache may still hold the deleted object.
+	_, err := client.Get(ctx, rct.Name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return true, nil
+	}
+	return false, err
 }
 
 func (m *BaseResourceClaimTemplateManager) AssertRemoved(ctx context.Context, cdUID string) error {
@@ -294,6 +334,7 @@ func NewDaemonSetResourceClaimTemplateManager(config *ManagerConfig, getComputeD
 
 	base := newBaseResourceClaimTemplateManager(config, getComputeDomain, labelSelector, config.driverNamespace)
 
+	base.templatePath = DaemonSetResourceClaimTemplateTemplatePath
 	m := &DaemonSetResourceClaimTemplateManager{
 		BaseResourceClaimTemplateManager: base,
 	}
@@ -313,6 +354,15 @@ func (m *DaemonSetResourceClaimTemplateManager) Create(ctx context.Context, cd *
 		return rcts[0], nil
 	}
 
+	rct, err := m.BaseResourceClaimTemplateManager.Create(ctx, m.templatePath, m.templateData(cd))
+	if err != nil {
+		return nil, fmt.Errorf("error creating ResourceClaimTemplate from base: %w", err)
+	}
+
+	return rct, nil
+}
+
+func (m *DaemonSetResourceClaimTemplateManager) templateData(cd *nvapi.ComputeDomain) *ResourceClaimTemplateTemplateData {
 	daemonConfig := nvapi.DefaultComputeDomainDaemonConfig()
 	daemonConfig.DomainID = string(cd.UID)
 
@@ -328,13 +378,7 @@ func (m *DaemonSetResourceClaimTemplateManager) Create(ctx context.Context, cd *
 		DriverName:              DriverName,
 		DaemonConfig:            daemonConfig,
 	}
-
-	rct, err := m.BaseResourceClaimTemplateManager.Create(ctx, DaemonSetResourceClaimTemplateTemplatePath, &templateData)
-	if err != nil {
-		return nil, fmt.Errorf("error creating ResourceClaimTemplate from base: %w", err)
-	}
-
-	return rct, nil
+	return &templateData
 }
 
 func NewWorkloadResourceClaimTemplateManager(config *ManagerConfig, getComputeDomain GetComputeDomainFunc) *WorkloadResourceClaimTemplateManager {
@@ -354,6 +398,7 @@ func NewWorkloadResourceClaimTemplateManager(config *ManagerConfig, getComputeDo
 
 	base := newBaseResourceClaimTemplateManager(config, getComputeDomain, labelSelector, "")
 
+	base.templatePath = WorkloadResourceClaimTemplateTemplatePath
 	m := &WorkloadResourceClaimTemplateManager{
 		BaseResourceClaimTemplateManager: base,
 	}
@@ -362,41 +407,84 @@ func NewWorkloadResourceClaimTemplateManager(config *ManagerConfig, getComputeDo
 }
 
 // channelAllocationModeFor decides the AllocationMode to request in the
-// workload ResourceClaimTemplate for a ComputeDomain.
+// workload ResourceClaimTemplate for a ComputeDomain channel.
 //
-// Under host-managed IMEX this always forces AllocationMode Single (channel
-// 0), regardless of what the ComputeDomain requested: host-managed IMEX only
-// ever has channel 0 to give out today. TODO: once the controller can assign
-// a unique IMEX channel per ComputeDomain, request that channel here instead.
+// When ComputeDomains share an IMEX domain (host-managed or static
+// driver-managed IMEX) this always forces AllocationMode Single, regardless
+// of what the ComputeDomain requested: the shared IMEX domain holds other
+// ComputeDomains' channels.
 //
-// Otherwise (driver-managed), the ComputeDomain's own AllocationMode is used
-// as-is.
-func channelAllocationModeFor(cd *nvapi.ComputeDomain, hostManaged bool) string {
-	if hostManaged {
+// Otherwise (per-ComputeDomain IMEX daemons), the channel's own AllocationMode
+// is used as-is.
+func channelAllocationModeFor(channel nvapi.ComputeDomainChannelSpec, sharedDomain bool) string {
+	if sharedDomain {
 		return nvapi.ComputeDomainChannelAllocationModeSingle
 	}
-	return cd.Spec.Channel.AllocationMode
+	return channel.AllocationMode
 }
 
-func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, namespace, name string, cd *nvapi.ComputeDomain) (*resourceapi.ResourceClaimTemplate, error) {
+// Create ensures the workload ResourceClaimTemplates of a ComputeDomain exist.
+// With channel reservations, each requests the shared channel device and
+// names itself in its config, so that the controller assigns its claims one
+// channel per NVLink clique at admission. Templates created before are kept
+// as they are, so that existing ComputeDomains keep working as without
+// channel reservations, on channel 0.
+func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, cd *nvapi.ComputeDomain) error {
+	channels := cd.Spec.GetChannels()
+	reservations := channelReservationsEnabled()
+	if !reservations && cd.Spec.Channel == nil {
+		return fmt.Errorf("channels requires the %s feature gate", featuregates.ComputeDomainChannelReservations)
+	}
+
 	rcts, err := getByComputeDomainUID[*resourceapi.ResourceClaimTemplate](ctx, m.mutationCache, string(cd.UID))
 	if err != nil {
-		return nil, fmt.Errorf("error retrieving ResourceClaimTemplate: %w", err)
+		return fmt.Errorf("error retrieving ResourceClaimTemplate: %w", err)
 	}
-	if len(rcts) > 1 {
-		return nil, fmt.Errorf("more than one ResourceClaimTemplate found with same ComputeDomain UID")
-	}
-	if len(rcts) == 1 {
-		return rcts[0], nil
+	existing := make(map[string]*resourceapi.ResourceClaimTemplate, len(rcts))
+	for _, rct := range rcts {
+		existing[rct.Name] = rct
 	}
 
+	for _, channel := range channels {
+		name := channel.ResourceClaimTemplate.Name
+		rct, exists := existing[name]
+		if exists && (!reservations || !namesWorkloadTemplate(rct)) {
+			continue
+		}
+		data := m.templateData(cd, channel, reservations)
+		if exists {
+			upToDate, err := m.upToDate(rct, data)
+			if err != nil {
+				return err
+			}
+			if upToDate {
+				continue
+			}
+			gone, err := m.replace(ctx, rct)
+			if err != nil {
+				return err
+			}
+			if !gone {
+				return fmt.Errorf("waiting for outdated ResourceClaimTemplate %s/%s to be deleted", rct.Namespace, rct.Name)
+			}
+		}
+		if _, err := m.BaseResourceClaimTemplateManager.Create(ctx, m.templatePath, data); err != nil {
+			return fmt.Errorf("error creating ResourceClaimTemplate '%s/%s': %w", cd.Namespace, name, err)
+		}
+	}
+	return nil
+}
+
+// templateData renders a workload template. Without reservations it requests
+// the default channel.
+func (m *WorkloadResourceClaimTemplateManager) templateData(cd *nvapi.ComputeDomain, channel nvapi.ComputeDomainChannelSpec, reservations bool) *ResourceClaimTemplateTemplateData {
 	channelConfig := nvapi.DefaultComputeDomainChannelConfig()
 	channelConfig.DomainID = string(cd.UID)
-	channelConfig.AllocationMode = channelAllocationModeFor(cd, m.config.imexConfig.EffectiveHostManaged())
+	channelConfig.AllocationMode = channelAllocationModeFor(channel, m.config.imexConfig.SharedIMEXDomain())
 
 	templateData := ResourceClaimTemplateTemplateData{
-		Namespace:               namespace,
-		Name:                    name,
+		Namespace:               cd.Namespace,
+		Name:                    channel.ResourceClaimTemplate.Name,
 		Finalizer:               computeDomainFinalizer,
 		ComputeDomainLabelKey:   computeDomainLabelKey,
 		ComputeDomainLabelValue: cd.UID,
@@ -406,11 +494,82 @@ func (m *WorkloadResourceClaimTemplateManager) Create(ctx context.Context, names
 		DriverName:              DriverName,
 		ChannelConfig:           channelConfig,
 	}
-
-	rct, err := m.BaseResourceClaimTemplateManager.Create(ctx, WorkloadResourceClaimTemplateTemplatePath, &templateData)
-	if err != nil {
-		return nil, fmt.Errorf("error creating ResourceClaimTemplate from base: %w", err)
+	if reservations {
+		templateData.DeviceClassName = computeDomainChannelDeviceClass
+		channelConfig.ResourceClaimTemplateName = channel.ResourceClaimTemplate.Name
+		if !m.config.imexConfig.SharedIMEXDomain() {
+			templateData.Owner = string(cd.UID)
+			templateData.OwnerTaintKey = imex.ChannelOwnerTaintKey
+		}
 	}
+	return &templateData
+}
 
-	return rct, nil
+// upToDate reports whether an existing template requests what the current
+// one would.
+func (m *WorkloadResourceClaimTemplateManager) upToDate(rct *resourceapi.ResourceClaimTemplate, data *ResourceClaimTemplateTemplateData) (bool, error) {
+	expected, err := renderResourceClaimTemplate(m.templatePath, data)
+	if err != nil {
+		return false, err
+	}
+	return deviceRequestsMatch(rct, expected) && channelConfigsMatch(rct, expected), nil
+}
+
+// namesWorkloadTemplate reports whether a workload template names itself in
+// its channel config, as templates created with channel reservations do.
+func namesWorkloadTemplate(rct *resourceapi.ResourceClaimTemplate) bool {
+	for _, c := range rct.Spec.Spec.Devices.Config {
+		if config := decodeChannelConfig(c.Opaque); config != nil && config.ResourceClaimTemplateName != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// channelConfigsMatch compares the channel configs of two templates, decoded
+// as the API server may serialize them differently.
+func channelConfigsMatch(actual, expected *resourceapi.ResourceClaimTemplate) bool {
+	decode := func(rct *resourceapi.ResourceClaimTemplate) []nvapi.ComputeDomainChannelConfig {
+		var configs []nvapi.ComputeDomainChannelConfig
+		for _, c := range rct.Spec.Spec.Devices.Config {
+			if c.Opaque == nil || c.Opaque.Driver != DriverName {
+				continue
+			}
+			var config nvapi.ComputeDomainChannelConfig
+			if err := json.Unmarshal(c.Opaque.Parameters.Raw, &config); err != nil {
+				return nil
+			}
+			configs = append(configs, config)
+		}
+		return configs
+	}
+	actualConfigs := decode(actual)
+	return actualConfigs != nil && equality.Semantic.DeepEqual(actualConfigs, decode(expected))
+}
+
+// deviceRequestsMatch compares the device requests of two templates after
+// the defaults the API server applies.
+func deviceRequestsMatch(actual, expected *resourceapi.ResourceClaimTemplate) bool {
+	normalize := func(rct *resourceapi.ResourceClaimTemplate) []resourceapi.DeviceRequest {
+		requests := make([]resourceapi.DeviceRequest, 0, len(rct.Spec.Spec.Devices.Requests))
+		for _, r := range rct.Spec.Spec.Devices.Requests {
+			r = *r.DeepCopy()
+			if e := r.Exactly; e != nil {
+				if e.AllocationMode == "" {
+					e.AllocationMode = resourceapi.DeviceAllocationModeExactCount
+				}
+				if e.AllocationMode == resourceapi.DeviceAllocationModeExactCount && e.Count == 0 {
+					e.Count = 1
+				}
+				for i := range e.Tolerations {
+					if e.Tolerations[i].Operator == "" {
+						e.Tolerations[i].Operator = resourceapi.DeviceTolerationOpEqual
+					}
+				}
+			}
+			requests = append(requests, r)
+		}
+		return requests
+	}
+	return equality.Semantic.DeepEqual(normalize(actual), normalize(expected))
 }
