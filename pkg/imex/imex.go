@@ -34,6 +34,13 @@ const (
 	// A node runs the workloads of one ComputeDomain at a time.
 	DaemonLifecyclePerComputeDomain DaemonLifecycle = "perComputeDomain"
 
+	// DaemonLifecycleStatic runs one long-lived IMEX daemon per node, shared
+	// by all ComputeDomains, from the ComputeDomainDaemonSet. Requires the
+	// ComputeDomainDaemonSet and ComputeDomainChannelReservations feature
+	// gates, as ComputeDomains sharing IMEX daemons are isolated by their
+	// channels.
+	DaemonLifecycleStatic DaemonLifecycle = "static"
+
 	// DaemonLifecycleHostManaged assumes the cluster admin runs nvidia-imex
 	// as a host service, shared by all ComputeDomains. The driver only
 	// injects IMEX channels. Requires the HostManagedIMEXDaemon feature gate.
@@ -92,7 +99,14 @@ func (c Config) EffectiveHostManaged() bool {
 // of a node, with no per-ComputeDomain IMEX daemon. Workloads are then isolated
 // by IMEX channels within the IMEX domain, not by IMEX domains.
 func (c Config) SharedIMEXDaemons() bool {
-	return c.DaemonLifecycle == DaemonLifecycleHostManaged
+	return c.DaemonLifecycle == DaemonLifecycleHostManaged || c.DaemonLifecycle == DaemonLifecycleStatic
+}
+
+// StaticDaemon reports whether the driver runs one static IMEX daemon per
+// node, managed through the ComputeDomainDaemonSet, instead of one per
+// ComputeDomain.
+func (c Config) StaticDaemon() bool {
+	return c.DaemonLifecycle == DaemonLifecycleStatic
 }
 
 // String names the configuration for logs and errors.
@@ -105,12 +119,19 @@ func (c Config) String() string {
 func (c Config) Validate() error {
 	switch c.DaemonLifecycle {
 	case DaemonLifecyclePerComputeDomain:
+	case DaemonLifecycleStatic:
+		if !featuregates.Enabled(featuregates.ComputeDomainDaemonSet) {
+			return fmt.Errorf("imex.daemonLifecycle=%q requires the ComputeDomainDaemonSet feature gate to be enabled", DaemonLifecycleStatic)
+		}
+		if !featuregates.Enabled(featuregates.ComputeDomainChannelReservations) {
+			return fmt.Errorf("imex.daemonLifecycle=%q requires the ComputeDomainChannelReservations feature gate to be enabled, as ComputeDomains sharing IMEX daemons are isolated by their channels", DaemonLifecycleStatic)
+		}
 	case DaemonLifecycleHostManaged:
 		if !featuregates.Enabled(featuregates.HostManagedIMEXDaemon) {
 			return fmt.Errorf("imex.daemonLifecycle=%q requires the HostManagedIMEXDaemon feature gate to be enabled", DaemonLifecycleHostManaged)
 		}
 	default:
-		return fmt.Errorf("unknown imex.daemonLifecycle %q: must be %q or %q", c.DaemonLifecycle, DaemonLifecyclePerComputeDomain, DaemonLifecycleHostManaged)
+		return fmt.Errorf("unknown imex.daemonLifecycle %q: must be %q, %q or %q", c.DaemonLifecycle, DaemonLifecyclePerComputeDomain, DaemonLifecycleStatic, DaemonLifecycleHostManaged)
 	}
 	return nil
 }
