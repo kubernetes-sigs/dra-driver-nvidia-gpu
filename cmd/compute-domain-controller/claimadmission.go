@@ -78,11 +78,12 @@ const (
 // ComputeDomains never both get a free node. After a restart the cache holds
 // every admission, as each was written before the pod could bind.
 //
-// A host-managed IMEX domain publishes no binding conditions, as
-// ComputeDomains share nodes there. Its pods bind at once, while the
-// controller assigns their channels, and the kubelet plugin waits for the
-// channel before it prepares a claim. A channel is only used once assigned,
-// so that the cache still holds every channel in use after a restart.
+// A shared IMEX domain, host-managed or static driver-managed, publishes no
+// binding conditions, as ComputeDomains share nodes there. Its pods bind at
+// once, while the controller assigns their channels, and the kubelet plugin
+// waits for the channel before it prepares a claim. A channel is only used
+// once assigned, so that the cache still holds every channel in use after a
+// restart.
 //
 // It runs regardless of the ComputeDomainChannelReservations gate: with the
 // gate off it admits all channels, so that kubelet plugins enabling the gate

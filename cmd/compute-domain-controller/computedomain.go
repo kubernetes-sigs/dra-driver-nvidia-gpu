@@ -437,9 +437,10 @@ func (m *ComputeDomainManager) onAddOrUpdateDriverManaged(ctx context.Context, c
 }
 
 // onAddOrUpdateSharedDomain reconciles a ComputeDomain in a shared IMEX
-// domain: the IMEX daemons run as a host service, so the controller only
-// manages the workload ResourceClaimTemplates and the ComputeDomain
-// finalizer. Channels are assigned to claims at admission.
+// domain: the IMEX daemons run as a host service or in the static
+// ComputeDomainDaemonSet, so the controller only manages the workload
+// ResourceClaimTemplates and the ComputeDomain finalizer. Channels are
+// assigned to claims at admission.
 func (m *ComputeDomainManager) onAddOrUpdateSharedDomain(ctx context.Context, cd *nvapi.ComputeDomain) error {
 	if cd.GetDeletionTimestamp() != nil {
 		if err := m.resourceClaimTemplateManager.Delete(ctx, string(cd.UID)); err != nil {

@@ -32,6 +32,7 @@ func setGates(t *testing.T, enabled ...featuregate.Feature) {
 	gates := map[string]bool{
 		string(featuregates.HostManagedIMEXDaemon):            false,
 		string(featuregates.ComputeDomainChannelReservations): false,
+		string(featuregates.ComputeDomainDaemonSet):           false,
 	}
 	restore := make(map[string]bool, len(gates))
 	for name := range gates {
@@ -62,6 +63,20 @@ func TestConfigValidate(t *testing.T) {
 		"hostManaged": {
 			config: Config{DaemonLifecycle: DaemonLifecycleHostManaged},
 			gates:  []featuregate.Feature{featuregates.HostManagedIMEXDaemon},
+		},
+		"static": {
+			config: Config{DaemonLifecycle: DaemonLifecycleStatic},
+			gates:  []featuregate.Feature{featuregates.ComputeDomainDaemonSet, featuregates.ComputeDomainChannelReservations},
+		},
+		"static requires the ComputeDomainDaemonSet gate": {
+			config:  Config{DaemonLifecycle: DaemonLifecycleStatic},
+			gates:   []featuregate.Feature{featuregates.ComputeDomainChannelReservations},
+			wantErr: "ComputeDomainDaemonSet",
+		},
+		"static requires channel reservations": {
+			config:  Config{DaemonLifecycle: DaemonLifecycleStatic},
+			gates:   []featuregate.Feature{featuregates.ComputeDomainDaemonSet},
+			wantErr: "ComputeDomainChannelReservations",
 		},
 		"unknown lifecycle": {
 			config:  Config{DaemonLifecycle: "bogus"},
@@ -149,4 +164,10 @@ func TestConfigSharedIMEXDaemons(t *testing.T) {
 	require.False(t, perComputeDomain.EffectiveHostManaged())
 	require.False(t, perComputeDomain.SharedIMEXDaemons())
 	require.False(t, Config{}.EffectiveHostManaged())
+
+	static := Config{DaemonLifecycle: DaemonLifecycleStatic}
+	require.True(t, static.StaticDaemon())
+	require.True(t, static.SharedIMEXDaemons())
+	require.False(t, static.EffectiveHostManaged())
+	require.False(t, host.StaticDaemon())
 }

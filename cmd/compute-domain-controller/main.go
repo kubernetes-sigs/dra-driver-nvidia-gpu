@@ -158,7 +158,7 @@ func newApp() *cli.App {
 		},
 		&cli.StringFlag{
 			Name:        "imex-daemon-lifecycle",
-			Usage:       "Who runs the nvidia-imex daemons: perComputeDomain (default; the driver runs them for each ComputeDomain) or hostManaged (the admin runs them as a host service).",
+			Usage:       "Who runs the nvidia-imex daemons: perComputeDomain (default; the driver runs them for each ComputeDomain), static (one per node from the ComputeDomainDaemonSet) or hostManaged (the admin runs them as a host service).",
 			Destination: &flags.imexDaemonLifecycle,
 			EnvVars:     []string{"IMEX_DAEMON_LIFECYCLE"},
 		},
