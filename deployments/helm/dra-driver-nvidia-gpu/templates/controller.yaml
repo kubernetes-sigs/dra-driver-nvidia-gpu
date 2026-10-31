@@ -116,18 +116,14 @@ spec:
         - name: FEATURE_GATES
           value: "{{ range $key, $value := .Values.featureGates }}{{ $key }}={{ $value }},{{ end }}"
         {{- end }}
-        - name: IMEX_MODE
-          value: "{{ .Values.resources.computeDomains.imex.mode }}"
+        - name: IMEX_DAEMON_LIFECYCLE
+          value: "{{ include "dra-driver-nvidia-gpu.imexDaemonLifecycle" . }}"
         - name: IMEX_MAX_CHANNELS
           value: "{{ .Values.resources.computeDomains.imex.maxChannels }}"
         - name: KUBE_API_QPS
           value: "{{ .Values.controller.kubeAPI.qps }}"
         - name: KUBE_API_BURST
           value: "{{ .Values.controller.kubeAPI.burst }}"
-        - name: IMEX_ISOLATION
-          value: "{{ .Values.resources.computeDomains.imex.isolation }}"
-        - name: IMEX_SCOPE
-          value: "{{ include "dra-driver-nvidia-gpu.imexScope" . }}"
         {{- if .Values.resources.computeDomains.imex.config }}
         - name: IMEX_CONFIG_OVERRIDES
           value: "{{ range $key, $value := .Values.resources.computeDomains.imex.config }}{{ $key }}={{ $value }},{{ end }}"

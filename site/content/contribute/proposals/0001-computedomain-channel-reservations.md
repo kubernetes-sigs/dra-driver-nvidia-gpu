@@ -25,9 +25,9 @@ The kubelet plugin injects the channel of the claim's status. So:
 - Every pod of a template gets the template's channel on every node of a
   clique, and pods of a template can share a node.
 - Templates of a ComputeDomain are isolated from each other.
-- ComputeDomains sharing an IMEX domain (cluster scope) get distinct channels
+- ComputeDomains sharing IMEX daemons get distinct channels
   and share nodes freely.
-- With per-ComputeDomain IMEX daemons (compute-domain scope), a node runs one
+- With per-ComputeDomain IMEX daemons, a node runs one
   ComputeDomain at a time, which the scheduler sees through an owner
   attribute and the controller enforces at admission.
 - The number of concurrent workloads is bounded per clique, not per cluster,
@@ -48,8 +48,10 @@ NVLink partition are not isolated from each other and cannot share a node.
 - Multiple workload ResourceClaimTemplates per ComputeDomain, each backed by a
   distinct channel that is the same on every node of a clique.
 - Multiple pods of a template on a node, sharing its channel.
-- Multiple ComputeDomains per node with distinct channels (cluster scope).
-- Never two ComputeDomains' workloads on one node (compute-domain scope),
+- Multiple ComputeDomains per node with distinct channels (shared IMEX
+  daemons).
+- Never two ComputeDomains' workloads on one node (per-ComputeDomain IMEX
+  daemons),
   steered by the scheduler and enforced before pods are bound.
 - More than 2048 concurrent templates in a cluster.
 - No channel writes to ComputeDomain status.
@@ -135,7 +137,7 @@ from the claim they prepare.
 
 ### Smallest valuable slice
 
-`spec.channels` under compute-domain scope.
+`spec.channels` with per-ComputeDomain IMEX daemons.
 
 ## Design
 
@@ -170,7 +172,7 @@ binding failure condition, and:
 - `cliqueID`: the NVLink clique of the node, republished when the periodic
   clique refresh finds a new partition.
 - A `compute-domain.nvidia.com/computeDomain=<uid>:NoSchedule` taint
-  (compute-domain scope): the owner of the node, from the
+  (per-ComputeDomain IMEX daemons): the owner of the node, from the
   `resource.nvidia.com/computeDomain` node label, which the plugin watches.
   Workload templates tolerate only their own ComputeDomain, so the scheduler
   places them on free nodes or nodes of their ComputeDomain. `NoSchedule`
@@ -210,13 +212,13 @@ its templates, only get their channel injected. The checkpoint records each
 claim's channel in the existing channel info, so its schema is unchanged.
 
 **Admission.** The scheduler holds each pod until the controller decides on
-its allocated channel, and retries elsewhere on rejection. In every scope,
-the controller rejects claims that cannot be attributed to an existing
+its allocated channel, and retries elsewhere on rejection. In every IMEX
+daemon lifecycle, the controller rejects claims that cannot be attributed to an existing
 ComputeDomain in their namespace, or whose ComputeDomain is being deleted,
 and assigns the channel of admitted ones. Configs are decoded strictly like
 in the kubelet plugin.
 
-Under compute-domain scope it also admits a claim only if no other
+With per-ComputeDomain IMEX daemons it also admits a claim only if no other
 ComputeDomain uses the node, where a ComputeDomain uses a node while:
 
 - it has admitted channels there (or channels allocated without a binding
@@ -238,7 +240,8 @@ hold up pods.
 
 **Scale.** Every channel pod waits for one admission before it is bound,
 costing one ResourceClaim status update, plus a node read and update for the
-first claim of a ComputeDomain on a node under compute-domain scope.
+first claim of a ComputeDomain on a node with per-ComputeDomain IMEX
+daemons.
 Admissions use a dedicated queue, deduplicated by claim, with 16 workers and
 no overall rate limit. Claims are indexed by node and by ComputeDomain, and
 ResourceSlices by node, so a decision only looks at its node. The
@@ -247,7 +250,8 @@ controller's API client defaults to 100 QPS (burst 200), which admits roughly
 is updated without a surge pod (maxSurge 0, maxUnavailable 1) so that a
 single controller is active at a time.
 
-**Release.** Channels are freed with their last claim. Compute-domain scope:
+**Release.** Channels are freed with their last claim. Per-ComputeDomain IMEX
+daemons:
 a node is free once its owner has no admitted claim left on it and the node
 label is gone. The kubelet plugin removes the label after the last claim is
 unprepared. The controller removes it, after a short delay, once no claim of
@@ -288,7 +292,7 @@ node, and the claim status the controller writes anyway carries the channel.
 Alpha gate `ComputeDomainChannelReservations` (default off) on the controller
 and kubelet plugin. With the gate off, behavior is unchanged and
 `spec.channels` is rejected by the controller. Beta requires real multi-node
-validation in both scopes and an upgrade test.
+validation in both IMEX daemon lifecycles and an upgrade test.
 
 ### Upgrade & downgrade
 
@@ -320,7 +324,7 @@ unschedulable, so drain and recreate the ComputeDomains created with it.
 Kubernetes 1.34 or later with `DRAConsumableCapacity` (default from 1.36) on
 the API server, controller manager, scheduler and kubelet, and DRA binding
 conditions (`DRADeviceBindingConditions`, `DRAResourceClaimDeviceStatus`) on
-the API server and scheduler. With `imex.scope=computeDomain`, also
+the API server and scheduler. With `imex.daemonLifecycle=perComputeDomain`, also
 `DRADeviceTaints` (default from 1.36) on the API server and scheduler. Nodes
 must have at least as many IMEX channels
 as `imex.maxChannels`.
@@ -347,8 +351,8 @@ test runs 200 ComputeDomains contending for 500 nodes through the admission
 workers and pins the API calls per claim. Hardware validation: two templates
 of one ComputeDomain on one node with distinct channels and memory exchange
 across nodes per template, pods of one template sharing a node,
-ComputeDomains sharing nodes in cluster scope, ComputeDomains never sharing a
-node under contention in compute-domain scope, deletion and reuse, controller
+ComputeDomains sharing nodes with shared IMEX daemons, ComputeDomains never
+sharing a node under contention with per-ComputeDomain IMEX daemons, deletion and reuse, controller
 and plugin restarts, and an upgrade with the gate off.
 
 ## Risks
@@ -383,16 +387,16 @@ and plugin restarts, and an upgrade with the gate off.
 
 ## Drawbacks
 
-Pods of other ComputeDomains may be tried on a node under compute-domain
-scope while its new owner propagates to the ResourceSlice, about a second
-after the first admission. Under cluster scope, pod binding now waits for the
+Pods of other ComputeDomains may be tried on a node with per-ComputeDomain
+IMEX daemons while its new owner propagates to the ResourceSlice, about a second
+after the first admission. With shared IMEX daemons, pod binding now waits for the
 controller as well.
 
 ## Future work
 
-`imex.mode=driverManaged` with `imex.scope=cluster`: a static IMEX DaemonSet
+`imex.daemonLifecycle=static`: a static IMEX DaemonSet
 shared by all ComputeDomains, like the host service in host-managed mode,
-instead of one DaemonSet per ComputeDomain. It reuses the cluster-scope rules
+instead of one DaemonSet per ComputeDomain. It reuses the shared IMEX daemon rules
 (per-clique assignments, no node ownership).
 
 ## Open questions

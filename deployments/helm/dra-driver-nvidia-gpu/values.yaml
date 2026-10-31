@@ -81,34 +81,30 @@ resources:
     enabled: true
   computeDomains:
     enabled: true
-    # Changing `imex.mode`, `imex.scope` or `imex.isolation` on a cluster with active ComputeDomain workloads
+    # Changing `imex.daemonLifecycle` on a cluster with active ComputeDomain workloads
     # is not supported and is not enforced by the driver, drain and remove existing ComputeDomains first.
     imex:
-      # mode selects the deployment mode of the IMEX daemon in the cluster. It tells
-      #   who owns the nvidia-imex daemon lifecycle:
-      #   driverManaged (default): the driver creates and manages a
-      #     per-ComputeDomain nvidia-imex DaemonSet.
-      #   hostManaged: the cluster administrator runs nvidia-imex as a host service
-      #     and the driver only advertises/injects an IMEX channel device
-      #     Requires featureGates.HostManagedIMEXDaemon=true
-      mode: driverManaged
-      # scope selects whose IMEX daemons run on a node:
-      #   computeDomain (default): each ComputeDomain gets its own nvidia-imex
-      #     DaemonSet, so a node runs the workloads of one ComputeDomain at a
-      #     time.
-      #   cluster: the IMEX daemon of a node is shared by all ComputeDomains,
-      #     isolated by their channels. Always used with mode=hostManaged.
-      scope: computeDomain
-      # isolation selects the IMEX isolation strategy. The value can be one of:
-      #   domain (default): In this mode, all workloads running in the
-      #     same IMEX domain will share the same channel (0).
-      #   channel: each workload ResourceClaimTemplate gets its own channel
-      #     within an IMEX domain, shared by the pods using it.
-      #     Requires featureGates.ComputeDomainChannelReservations=true.
-      isolation: "domain"
+      # daemonLifecycle selects who runs the nvidia-imex daemons, and for how long:
+      #   perComputeDomain (default): the driver starts IMEX daemons for each
+      #     ComputeDomain on its nodes and removes them with it. A node runs the
+      #     workloads of one ComputeDomain at a time.
+      #   hostManaged: the cluster administrator runs nvidia-imex as a host
+      #     service, shared by all ComputeDomains, and the driver only injects
+      #     IMEX channels. Requires featureGates.HostManagedIMEXDaemon=true.
+      # With featureGates.ComputeDomainChannelReservations=true, each workload
+      # ResourceClaimTemplate gets its own IMEX channel, so that ComputeDomains
+      # sharing IMEX daemons cannot reach each other's memory.
+      # When empty, the deprecated mode decides, and else perComputeDomain.
+      daemonLifecycle: ""
+      # Deprecated: use daemonLifecycle. mode=hostManaged maps to
+      # daemonLifecycle=hostManaged, and mode=driverManaged to perComputeDomain.
+      mode: ""
+      # Deprecated and ignored: IMEX channels follow
+      # featureGates.ComputeDomainChannelReservations and the ComputeDomain spec.
+      isolation: ""
       # hostSocketPath is the path (under the driver root) to the Unix domain
       # socket the host nvidia-imex daemon's command/control service listens
-      # on. Only used when mode=hostManaged: the kubelet plugin uses it to
+      # on. Only used when daemonLifecycle=hostManaged: the kubelet plugin uses it to
       # validate host IMEX readiness (via `nvidia-imex-ctl -q --u=<path>`) during channel claim prepare.
       # Requires the host's /etc/nvidia-imex/config.cfg to set IMEX_CMD_ENABLED to 1 and
       # IMEX_CMD_UNIX_DOMAIN_PATH to this same path.
@@ -121,9 +117,9 @@ resources:
       # config file settings as a map of setting name to value (see NVIDIA's
       # IMEX documentation for available settings). Applied on top of the
       # defaults rendered by dynamically launched compute-domain-daemon
-      # pods. Only applies when mode=driverManaged, since that's when the
-      # driver renders and owns the IMEX daemon's config. Ignored under
-      # mode=hostManaged.
+      # pods. Only applies when daemonLifecycle=perComputeDomain, since that's
+      # when the driver renders and owns the IMEX daemon's config. Ignored
+      # under daemonLifecycle=hostManaged.
       #   config:
       #     IMEX_NODE_DISCONNECTED_GRACE_TIME: "60"
       config: {}
@@ -137,7 +133,7 @@ resources:
 #   LoggingAlphaOptions: false         # Kubernetes logging alpha features
 #   LoggingBetaOptions: true           # Kubernetes logging beta features
 #   NVMLDeviceHealthCheck: false       # GPU Health Checking using NVML
-#   HostManagedIMEXDaemon: false       # Gate allowing resources.computeDomains.imex.mode=hostManaged
+#   HostManagedIMEXDaemon: false       # Gate allowing resources.computeDomains.imex.daemonLifecycle=hostManaged
 #   DRAListTypeAttributes: false       # Publish list-valued DRA device attributes
 #   ConsumableShares: false            # Publish consumable capacity and multi-allocation support for devices
 #   ComputeDomainChannelReservations: false # Assign IMEX channels per ComputeDomain ResourceClaimTemplate

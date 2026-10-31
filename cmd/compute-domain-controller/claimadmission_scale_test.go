@@ -118,7 +118,7 @@ func TestClaimAdmissionAtScale(t *testing.T) {
 	for i := range computeDomains {
 		cds = append(cds, cdInNamespace(fmt.Sprintf("cd-%d", i), fmt.Sprintf("ns-%d", i)))
 	}
-	f := newAdmissionFixture(t, imex.ModeDriverManaged, cds...)
+	f := newAdmissionFixture(t, imex.DaemonLifecyclePerComputeDomain, cds...)
 	for n := range nodes {
 		f.node(t, fmt.Sprintf("node-%d", n))
 	}
@@ -170,18 +170,18 @@ func TestClaimAdmissionAPIWrites(t *testing.T) {
 	setChannelReservationsGate(t, true)
 
 	tests := map[string]struct {
-		mode       imex.Mode
+		lifecycle  imex.DaemonLifecycle
 		usedNode   bool
 		wantWrites int
 		wantReads  int
 	}{
-		"driver-managed, first claim on a node": {mode: imex.ModeDriverManaged, wantWrites: 2, wantReads: 1},
-		"driver-managed, node in use":           {mode: imex.ModeDriverManaged, usedNode: true, wantWrites: 1},
-		"host-managed":                          {mode: imex.ModeHostManaged, wantWrites: 1},
+		"per-ComputeDomain, first claim on a node": {lifecycle: imex.DaemonLifecyclePerComputeDomain, wantWrites: 2, wantReads: 1},
+		"per-ComputeDomain, node in use":           {lifecycle: imex.DaemonLifecyclePerComputeDomain, usedNode: true, wantWrites: 1},
+		"host-managed":                             {lifecycle: imex.DaemonLifecycleHostManaged, wantWrites: 1},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			f := newAdmissionFixture(t, tc.mode, cdInNamespace("cd-a", "team-a"))
+			f := newAdmissionFixture(t, tc.lifecycle, cdInNamespace("cd-a", "team-a"))
 			if tc.usedNode {
 				first := allocatedChannelClaim(t, "first", "team-a", "cd-a", "node-1", "job")
 				f.add(t, first)
@@ -218,7 +218,7 @@ func BenchmarkAdmissionOnBusyNode(b *testing.B) {
 	setChannelReservationsGate(b, true)
 	const claimsOnNode = 1000
 	cd := cdInNamespace("cd-a", "team-a")
-	f := newAdmissionFixture(b, imex.ModeDriverManaged, cd)
+	f := newAdmissionFixture(b, imex.DaemonLifecyclePerComputeDomain, cd)
 	for i := range claimsOnNode {
 		claim := allocatedChannelClaim(b, fmt.Sprintf("c%d", i), "team-a", "cd-a", "node-1", "job")
 		result := claim.Status.Allocation.Devices.Results[0]
