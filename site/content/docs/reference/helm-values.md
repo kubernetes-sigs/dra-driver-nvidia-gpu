@@ -48,14 +48,14 @@ When GPU allocation is enabled, the chart also creates DeviceClass resources for
 
 | Value | Default | Description |
 |---|---|---|
-| `resources.computeDomains.imex.mode` | `driverManaged` | Selects who manages the `nvidia-imex` daemon lifecycle: `driverManaged` creates a per-ComputeDomain daemon DaemonSet, while `hostManaged` uses a host service that you manage and requires the [`HostManagedIMEXDaemon`](feature-gates.md) feature gate. |
-| `resources.computeDomains.imex.scope` | `computeDomain` | Selects whose IMEX daemons run on a node, where `computeDomain` runs one set per ComputeDomain and `cluster` shares them among all ComputeDomains. `hostManaged` always uses `cluster`. |
-| `resources.computeDomains.imex.isolation` | `domain` | Selects IMEX isolation, where `domain` shares channel 0 among workloads in the same IMEX domain and `channel` gives each workload `ResourceClaimTemplate` its own channel, shared by the pods using it, which requires the `ComputeDomainChannelReservations` feature gate. |
+| `resources.computeDomains.imex.daemonLifecycle` | `""` (`perComputeDomain`) | Selects who runs the `nvidia-imex` daemons: `perComputeDomain` creates a daemon DaemonSet for each ComputeDomain, while `hostManaged` uses a host service that you manage, shared by all ComputeDomains, and requires the [`HostManagedIMEXDaemon`](feature-gates.md) feature gate. When empty, the deprecated `imex.mode` decides. |
+| `resources.computeDomains.imex.mode` | `""` | Deprecated, use `daemonLifecycle`. `hostManaged` selects `daemonLifecycle=hostManaged`, and `driverManaged` selects `perComputeDomain`. Setting it to `hostManaged` with a different `daemonLifecycle` fails. |
+| `resources.computeDomains.imex.isolation` | `""` | Deprecated and ignored. IMEX channels follow the [`ComputeDomainChannelReservations`](feature-gates.md) feature gate and the ComputeDomain spec. |
 | `resources.computeDomains.imex.hostSocketPath` | `/etc/nvidia-imex/imex_ctrl.sock` | Sets the path under `nvidiaDriverRoot` to the host IMEX command socket that the ComputeDomain kubelet plugin queries for a `READY` response during claim preparation in `hostManaged` mode. |
-| `resources.computeDomains.imex.config` | `{}` | A map of arbitrary `nvidia-imex` daemon config file setting names to values, overriding or adding to the defaults rendered by dynamically launched compute-domain-daemon pods. Only applies in `driverManaged` mode; ignored in `hostManaged` mode. See [NVIDIA's IMEX documentation](https://docs.nvidia.com/multi-node-nvlink-systems/imex-guide/) for the full list of settings. |
+| `resources.computeDomains.imex.config` | `{}` | A map of arbitrary `nvidia-imex` daemon config file setting names to values, overriding or adding to the defaults rendered by dynamically launched compute-domain-daemon pods. Only applies with `perComputeDomain`; ignored with `hostManaged`. See [NVIDIA's IMEX documentation](https://docs.nvidia.com/multi-node-nvlink-systems/imex-guide/) for the full list of settings. |
 | `resources.computeDomains.imex.maxChannels` | `2048` | The number of IMEX channels of each NVLink clique, starting at channel 0, at most 2048, that the controller assigns to workload templates. Only used with the [`ComputeDomainChannelReservations`](feature-gates.md) feature gate. |
 
-Drain ComputeDomain workload pods and delete existing `ComputeDomain` resources before you change `resources.computeDomains.imex.mode`, `resources.computeDomains.imex.scope` or `resources.computeDomains.imex.isolation`.
+Drain ComputeDomain workload pods and delete existing `ComputeDomain` resources before you change `resources.computeDomains.imex.daemonLifecycle`.
 
 ## Kubernetes API version
 

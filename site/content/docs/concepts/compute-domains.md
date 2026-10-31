@@ -11,24 +11,20 @@ A `ComputeDomain` is a custom resource that sets up a group of nodes to run a mu
 
 ## IMEX lifecycle modes
 
-The `resources.computeDomains.imex.mode` Helm value determines who manages the `nvidia-imex` daemon lifecycle.
+The `resources.computeDomains.imex.daemonLifecycle` Helm value determines who runs the `nvidia-imex` daemons, and for how long.
 
-| Mode | Lifecycle |
+| Lifecycle | Behavior |
 |---|---|
-| `driverManaged` | By default, the DRA Driver creates one `nvidia-imex` DaemonSet for each `ComputeDomain` and tracks daemon readiness through `ComputeDomainClique` resources. |
+| `perComputeDomain` | By default, the DRA Driver creates one `nvidia-imex` DaemonSet for each `ComputeDomain` and tracks daemon readiness through `ComputeDomainClique` resources. |
 | `hostManaged` | You run `nvidia-imex` as a host service with a ready command socket, and the DRA Driver does not create daemon DaemonSets or daemon claims; this mode requires the `HostManagedIMEXDaemon` feature gate. |
 
-The `resources.computeDomains.imex` Helm values select the IMEX daemons along three independent axes:
+With `hostManaged`, all ComputeDomains share the IMEX daemon of a node. The [`ComputeDomainChannelReservations`](../reference/feature-gates.md) feature gate gives each workload `ResourceClaimTemplate` its own channel, so that they cannot reach each other's memory.
 
-| Value | Choices |
-|---|---|
-| `mode` | Who runs the daemons: `driverManaged` (default) or `hostManaged`. |
-| `scope` | Whose daemons run on a node: `computeDomain` (default), one set per ComputeDomain, or `cluster`, one set shared by all ComputeDomains. `hostManaged` always uses `cluster`. |
-| `isolation` | How workloads in an IMEX domain are isolated: `domain` (default), all share channel 0, or `channel`, each workload `ResourceClaimTemplate` gets its own channel. |
+The `imex.mode` and `imex.isolation` values of earlier releases are deprecated. `imex.mode=hostManaged` still selects `daemonLifecycle=hostManaged`, and `imex.isolation` is ignored.
 
 ## How driver-managed mode works
 
-Creating a `ComputeDomain` in the default `driverManaged` mode triggers the following sequence:
+Creating a `ComputeDomain` with the default `perComputeDomain` lifecycle triggers the following sequence:
 
 1. The `compute-domain-controller` watches for new `ComputeDomain` resources and creates a per-domain DaemonSet.
 2. Each daemon pod in that DaemonSet runs `nvidia-imex`, which manages the NVLink fabric connection on its node.
@@ -73,7 +69,7 @@ With the Alpha `ComputeDomainChannelReservations` feature gate, each workload `R
   A channel only needs to be unique in an IMEX domain, so each NVLink clique has its own channels, 1 to `imex.maxChannels - 1`.
   Claims of one template share its channel in a clique, and a channel is freed with its last claim.
   The kubelet plugin injects the channel of the claim's status.
-- With `imex.scope=computeDomain`, each node runs the IMEX daemon of one ComputeDomain.
+- With `daemonLifecycle=perComputeDomain`, each node runs the IMEX daemon of one ComputeDomain.
   The channel device of a node carries a `compute-domain.nvidia.com/computeDomain` taint with that ComputeDomain, and each workload template tolerates only its own ComputeDomain, so the scheduler skips nodes of other ComputeDomains.
   The controller sets the owner, through the `resource.nvidia.com/computeDomain` node label, when it admits the first claim of a ComputeDomain on a node.
   The kubelet plugin removes it after the last claim is unprepared, and the controller removes it once no claim of the ComputeDomain is left on the node, for example after a pod was deleted before it started.
@@ -81,12 +77,12 @@ With the Alpha `ComputeDomainChannelReservations` feature gate, each workload `R
   This covers claims allocated before the scheduler sees a new owner.
   Decisions are serialized per node, so the first claims of two ComputeDomains never both get a free node.
   Workloads of one ComputeDomain, from any of its templates, share a node.
-- With `imex.scope=cluster`, as with `hostManaged`, several ComputeDomains can share a node, isolated by their channels.
+- With `daemonLifecycle=hostManaged`, several ComputeDomains can share a node, isolated by their channels.
 - ComputeDomains created before the gate was enabled keep working as without it: the kubelet plugin still publishes the `channel-0` device their claim templates request, one claim per node, and channel 0 is never assigned to others.
 - The first claim of a ComputeDomain on a node starts or checks the IMEX daemon, and later claims from any of its templates only get their channel injected.
 
 This requires Kubernetes 1.34 or later with `DRAConsumableCapacity`, and DRA binding conditions (`DRADeviceBindingConditions`, `DRAResourceClaimDeviceStatus`) on the kube-apiserver and kube-scheduler.
-With `imex.scope=computeDomain`, also enable [`DRADeviceTaints`](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#device-taints-and-tolerations) on the kube-apiserver and kube-scheduler (default on v1.36 and later). Without it, the API server drops the owner taint, and the controller keeps ComputeDomains apart only by rejecting their claims.
+With `daemonLifecycle=perComputeDomain`, also enable [`DRADeviceTaints`](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#device-taints-and-tolerations) on the kube-apiserver and kube-scheduler (default on v1.36 and later). Without it, the API server drops the owner taint, and the controller keeps ComputeDomains apart only by rejecting their claims.
 With the feature gate off, ComputeDomains keep working on every Kubernetes version the chart supports, and `spec.channels` is rejected by the controller.
 Apply the ComputeDomain CRD of the release before upgrading, as Helm does not upgrade CRDs.
 Older controllers and kubelet plugins do not understand `spec.channels`, so only use it once all components run this release.
@@ -100,7 +96,7 @@ Before disabling the gate, drain and recreate the ComputeDomains created with it
 
 Every pod with a channel claim waits for the controller's admission before it is bound, at the cost of one ResourceClaim status update.
 The controller admits roughly 50 to 100 pods per second with its default API client limits (`controller.kubeAPI`).
-With `imex.scope=computeDomain`, pods of other ComputeDomains may be tried on a node for about a second after a ComputeDomain takes it, and are then placed elsewhere.
+With `daemonLifecycle=perComputeDomain`, pods of other ComputeDomains may be tried on a node for about a second after a ComputeDomain takes it, and are then placed elsewhere.
 Run a single active controller, either with leader election or with the default update strategy, which replaces the controller pod without a surge pod.
 
 ---

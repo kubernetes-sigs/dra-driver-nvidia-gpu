@@ -14,9 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package imex resolves and validates the imex.mode / imex.scope /
-// imex.isolation Helm values shared by the compute-domain-controller and
-// compute-domain-kubelet-plugin binaries.
+// Package imex resolves and validates the imex.daemonLifecycle Helm value
+// shared by the compute-domain-controller and compute-domain-kubelet-plugin
+// binaries.
 package imex
 
 import (
@@ -25,133 +25,92 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
-// Mode selects who owns the host nvidia-imex daemon lifecycle.
-type Mode string
+// DaemonLifecycle selects who runs the nvidia-imex daemons, and for how long.
+type DaemonLifecycle string
 
 const (
-	// ModeDriverManaged is the default: the driver creates and manages the
-	// nvidia-imex daemons.
-	ModeDriverManaged Mode = "driverManaged"
+	// DaemonLifecyclePerComputeDomain is the default: the driver starts IMEX
+	// daemons for each ComputeDomain on its nodes, and removes them with it.
+	// A node runs the workloads of one ComputeDomain at a time.
+	DaemonLifecyclePerComputeDomain DaemonLifecycle = "perComputeDomain"
 
-	// ModeHostManaged assumes the cluster admin owns the host
-	// nvidia-imex daemon lifecycle. The driver stops creating per-ComputeDomain
-	// IMEX DaemonSets and only advertises/injects an IMEX channel device.
-	// Requires the HostManagedIMEXDaemon feature gate.
-	ModeHostManaged Mode = "hostManaged"
+	// DaemonLifecycleHostManaged assumes the cluster admin runs nvidia-imex
+	// as a host service, shared by all ComputeDomains. The driver only
+	// injects IMEX channels. Requires the HostManagedIMEXDaemon feature gate.
+	DaemonLifecycleHostManaged DaemonLifecycle = "hostManaged"
 )
 
-// Scope selects whose IMEX daemons run on a node.
-type Scope string
-
+// Deprecated imex.mode values, which v0.5 releases accept.
 const (
-	// ScopeComputeDomain is the default under ModeDriverManaged: each
-	// ComputeDomain gets its own IMEX daemons, so a node runs the workloads of
-	// one ComputeDomain at a time.
-	ScopeComputeDomain Scope = "computeDomain"
-
-	// ScopeCluster shares the IMEX daemons of a node among all
-	// ComputeDomains, isolated by their channels. ModeHostManaged implies it.
-	ScopeCluster Scope = "cluster"
+	deprecatedModeDriverManaged = "driverManaged"
+	deprecatedModeHostManaged   = "hostManaged"
 )
 
-// Isolation selects the IMEX isolation strategy. Meaningful under both
-// ModeDriverManaged and ModeHostManaged.
-type Isolation string
-
-const (
-	// IsolationIMEXDomain is the default isolation strategy, under both
-	// ModeDriverManaged and ModeHostManaged: all workloads running in the
-	// same IMEX domain share the same channel (0).
-	IsolationIMEXDomain Isolation = "domain"
-
-	// IsolationIMEXChannel gives each workload ResourceClaimTemplate its own
-	// reserved channel within an IMEX domain.
-	IsolationIMEXChannel Isolation = "channel"
-)
-
-// Config is the resolved imex.mode / imex.scope / imex.isolation
-// configuration.
+// Config is the resolved imex.daemonLifecycle configuration.
 type Config struct {
-	Mode      Mode
-	Scope     Scope
-	Isolation Isolation
+	DaemonLifecycle DaemonLifecycle
 }
 
-// EffectiveHostManaged reports whether the resolved configuration puts the
-// driver into host-managed IMEX mode.
-func (c Config) EffectiveHostManaged() bool {
-	return c.Mode == ModeHostManaged
-}
-
-// EffectiveScope resolves an unset scope: host-managed daemons are shared by
-// all ComputeDomains, driver-managed ones are per ComputeDomain.
-func (c Config) EffectiveScope() Scope {
-	switch {
-	case c.Scope != "":
-		return c.Scope
-	case c.EffectiveHostManaged():
-		return ScopeCluster
-	default:
-		return ScopeComputeDomain
+// ResolveConfig resolves imex.daemonLifecycle, falling back to the deprecated
+// imex.mode so that values of earlier releases keep working. The deprecated
+// imex.isolation is ignored, as the ComputeDomainChannelReservations feature
+// gate and the ComputeDomain spec decide the channels of workloads. It returns
+// a warning for each deprecated value that is set.
+func ResolveConfig(lifecycle, mode, isolation string) (Config, []string, error) {
+	var warnings []string
+	if mode != "" {
+		warnings = append(warnings, fmt.Sprintf("imex.mode is deprecated, use imex.daemonLifecycle instead (imex.mode=%q)", mode))
 	}
+	if isolation != "" {
+		warnings = append(warnings, fmt.Sprintf("imex.isolation is deprecated and ignored, IMEX channels follow the ComputeDomainChannelReservations feature gate (imex.isolation=%q)", isolation))
+	}
+	switch mode {
+	case "", deprecatedModeDriverManaged, deprecatedModeHostManaged:
+	default:
+		return Config{}, warnings, fmt.Errorf("unknown imex.mode %q: must be %q or %q", mode, deprecatedModeDriverManaged, deprecatedModeHostManaged)
+	}
+
+	config := Config{DaemonLifecycle: DaemonLifecycle(lifecycle)}
+	switch {
+	case lifecycle == "" && mode == deprecatedModeHostManaged:
+		config.DaemonLifecycle = DaemonLifecycleHostManaged
+	case lifecycle == "":
+		config.DaemonLifecycle = DaemonLifecyclePerComputeDomain
+	case mode == deprecatedModeHostManaged && config.DaemonLifecycle != DaemonLifecycleHostManaged:
+		return Config{}, warnings, fmt.Errorf("imex.mode=%q contradicts imex.daemonLifecycle=%q, unset imex.mode", mode, lifecycle)
+	}
+	return config, warnings, nil
+}
+
+// EffectiveHostManaged reports whether the admin runs the IMEX daemons as a
+// host service.
+func (c Config) EffectiveHostManaged() bool {
+	return c.DaemonLifecycle == DaemonLifecycleHostManaged
 }
 
 // SharedIMEXDaemons reports whether all ComputeDomains share the IMEX daemons
 // of a node, with no per-ComputeDomain IMEX daemon. Workloads are then isolated
 // by IMEX channels within the IMEX domain, not by IMEX domains.
 func (c Config) SharedIMEXDaemons() bool {
-	return c.EffectiveScope() == ScopeCluster
+	return c.DaemonLifecycle == DaemonLifecycleHostManaged
 }
 
 // String names the configuration for logs and errors.
 func (c Config) String() string {
-	return fmt.Sprintf("mode=%s scope=%s isolation=%s", c.Mode, c.EffectiveScope(), c.Isolation)
+	return fmt.Sprintf("daemonLifecycle=%s", c.DaemonLifecycle)
 }
 
-// Validate checks the Mode/Scope/Isolation combination against the feature
-// gates that unlock it.
-//
-// The supported combinations are:
-//
-//	driverManaged, computeDomain (default), domain (default)  -> OK
-//	driverManaged, computeDomain, channel                     -> ComputeDomainChannelReservations
-//	driverManaged, cluster                                    -> error (not implemented yet)
-//	hostManaged, cluster (implied), domain                    -> HostManagedIMEXDaemon
-//	hostManaged, cluster (implied), channel                   -> HostManagedIMEXDaemon, ComputeDomainChannelReservations
-//	hostManaged, computeDomain                                -> error (the host daemon is shared)
+// Validate checks the daemon lifecycle against the feature gates that unlock
+// it.
 func (c Config) Validate() error {
-	switch c.Mode {
-	case ModeDriverManaged:
-		// No feature gate requirement.
-	case ModeHostManaged:
+	switch c.DaemonLifecycle {
+	case DaemonLifecyclePerComputeDomain:
+	case DaemonLifecycleHostManaged:
 		if !featuregates.Enabled(featuregates.HostManagedIMEXDaemon) {
-			return fmt.Errorf("imex.mode=%q requires the HostManagedIMEXDaemon feature gate to be enabled", ModeHostManaged)
+			return fmt.Errorf("imex.daemonLifecycle=%q requires the HostManagedIMEXDaemon feature gate to be enabled", DaemonLifecycleHostManaged)
 		}
 	default:
-		return fmt.Errorf("unknown imex.mode %q", c.Mode)
-	}
-
-	switch c.Isolation {
-	case "", IsolationIMEXDomain, IsolationIMEXChannel:
-	default:
-		return fmt.Errorf("unknown imex.isolation %q: must be %q or %q", c.Isolation, IsolationIMEXDomain, IsolationIMEXChannel)
-	}
-	channel := c.Isolation == IsolationIMEXChannel
-	if channel && !featuregates.Enabled(featuregates.ComputeDomainChannelReservations) {
-		return fmt.Errorf("imex.isolation=%q requires the ComputeDomainChannelReservations feature gate to be enabled", IsolationIMEXChannel)
-	}
-
-	switch c.EffectiveScope() {
-	case ScopeComputeDomain:
-		if c.EffectiveHostManaged() {
-			return fmt.Errorf("imex.scope=%q is not supported with imex.mode=%q: the host IMEX daemon is shared by all ComputeDomains", ScopeComputeDomain, ModeHostManaged)
-		}
-	case ScopeCluster:
-		if !c.EffectiveHostManaged() {
-			return fmt.Errorf("imex.scope=%q is not supported yet with imex.mode=%q: driver-managed IMEX daemons shared by all ComputeDomains are not implemented", ScopeCluster, ModeDriverManaged)
-		}
-	default:
-		return fmt.Errorf("unknown imex.scope %q: must be %q or %q", c.Scope, ScopeComputeDomain, ScopeCluster)
+		return fmt.Errorf("unknown imex.daemonLifecycle %q: must be %q or %q", c.DaemonLifecycle, DaemonLifecyclePerComputeDomain, DaemonLifecycleHostManaged)
 	}
 	return nil
 }

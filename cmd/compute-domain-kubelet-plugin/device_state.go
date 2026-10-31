@@ -807,7 +807,7 @@ func (s *DeviceState) applyComputeDomainDaemonConfig(ctx context.Context, config
 	// reaching Prepare means a stale or hand-crafted object; reject it
 	// permanently.
 	if s.config.imexConfig.EffectiveHostManaged() {
-		return nil, permanentError{fmt.Errorf("ComputeDomain daemon claims are not supported when imex.mode=hostManaged")}
+		return nil, permanentError{fmt.Errorf("ComputeDomain daemon claims are not supported when imex.daemonLifecycle=hostManaged")}
 	}
 
 	// Get the list of claim requests this config is being applied over.

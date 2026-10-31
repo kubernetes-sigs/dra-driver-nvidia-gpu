@@ -170,12 +170,8 @@ spec:
         - name: FEATURE_GATES
           value: "{{ range $key, $value := .Values.featureGates }}{{ $key }}={{ $value }},{{ end }}"
         {{- end }}
-        - name: IMEX_MODE
-          value: "{{ .Values.resources.computeDomains.imex.mode }}"
-        - name: IMEX_ISOLATION
-          value: "{{ .Values.resources.computeDomains.imex.isolation }}"
-        - name: IMEX_SCOPE
-          value: "{{ include "dra-driver-nvidia-gpu.imexScope" . }}"
+        - name: IMEX_DAEMON_LIFECYCLE
+          value: "{{ include "dra-driver-nvidia-gpu.imexDaemonLifecycle" . }}"
         - name: IMEX_HOST_SOCKET_PATH
           value: "{{ .Values.resources.computeDomains.imex.hostSocketPath }}"
         - name: KUBELET_REGISTRAR_DIRECTORY_PATH

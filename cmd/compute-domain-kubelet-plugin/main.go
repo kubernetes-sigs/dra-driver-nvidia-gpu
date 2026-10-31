@@ -68,8 +68,8 @@ type Flags struct {
 	healthcheckPort               int
 	klogVerbosity                 int
 	gpuCliqueLabelEnabled         bool
+	imexDaemonLifecycle           string
 	imexMode                      string
-	imexScope                     string
 	imexIsolation                 string
 	imexHostSocketPath            string
 }
@@ -181,28 +181,26 @@ func newApp() *cli.App {
 			EnvVars:     []string{"GPU_CLIQUE_LABEL_ENABLED"},
 		},
 		&cli.StringFlag{
+			Name:        "imex-daemon-lifecycle",
+			Usage:       "Who runs the nvidia-imex daemons: perComputeDomain (default; the driver runs them for each ComputeDomain) or hostManaged (the admin runs them as a host service).",
+			Destination: &flags.imexDaemonLifecycle,
+			EnvVars:     []string{"IMEX_DAEMON_LIFECYCLE"},
+		},
+		&cli.StringFlag{
 			Name:        "imex-mode",
-			Usage:       "IMEX deployment mode: driverManaged or hostManaged.",
-			Value:       string(imex.ModeDriverManaged),
+			Usage:       "Deprecated: use --imex-daemon-lifecycle. hostManaged maps to --imex-daemon-lifecycle=hostManaged.",
 			Destination: &flags.imexMode,
 			EnvVars:     []string{"IMEX_MODE"},
 		},
 		&cli.StringFlag{
 			Name:        "imex-isolation",
-			Usage:       "IMEX isolation strategy: domain (default; all workloads in the same IMEX domain share channel 0) or channel (each workload ResourceClaimTemplate gets its own channel).",
-			Value:       string(imex.IsolationIMEXDomain),
+			Usage:       "Deprecated and ignored: IMEX channels follow the ComputeDomainChannelReservations feature gate.",
 			Destination: &flags.imexIsolation,
 			EnvVars:     []string{"IMEX_ISOLATION"},
 		},
 		&cli.StringFlag{
-			Name:        "imex-scope",
-			Usage:       "Whose IMEX daemons run on a node: computeDomain (default for driverManaged; one set per ComputeDomain) or cluster (shared by all ComputeDomains, implied by hostManaged).",
-			Destination: &flags.imexScope,
-			EnvVars:     []string{"IMEX_SCOPE"},
-		},
-		&cli.StringFlag{
 			Name:        "imex-host-socket-path",
-			Usage:       "Path (under the nvidia-driver-root) to the Unix domain socket the host nvidia-imex daemon's command/control service listens on. Only used when imex-mode=hostManaged, to validate host IMEX readiness during channel allocation.",
+			Usage:       "Path (under the nvidia-driver-root) to the Unix domain socket the host nvidia-imex daemon's command/control service listens on. Only used when imex-daemon-lifecycle=hostManaged, to validate host IMEX readiness during channel allocation.",
 			Value:       defaultIMEXHostSocketPath,
 			Destination: &flags.imexHostSocketPath,
 			EnvVars:     []string{"IMEX_HOST_SOCKET_PATH"},
@@ -238,10 +236,12 @@ func newApp() *cli.App {
 				return fmt.Errorf("feature gate validation failed: %w", err)
 			}
 
-			imexConfig := imex.Config{
-				Mode:      imex.Mode(flags.imexMode),
-				Scope:     imex.Scope(flags.imexScope),
-				Isolation: imex.Isolation(flags.imexIsolation),
+			imexConfig, warnings, err := imex.ResolveConfig(flags.imexDaemonLifecycle, flags.imexMode, flags.imexIsolation)
+			for _, warning := range warnings {
+				klog.Warning(warning)
+			}
+			if err != nil {
+				return fmt.Errorf("imex configuration validation failed: %w", err)
 			}
 			if err := imexConfig.Validate(); err != nil {
 				return fmt.Errorf("imex configuration validation failed: %w", err)

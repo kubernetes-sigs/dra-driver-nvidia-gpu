@@ -136,7 +136,7 @@ func TestWorkloadTemplateCreateKeepsTemplatesFromBeforeTheGate(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()
 	m := NewWorkloadResourceClaimTemplateManager(&ManagerConfig{
-		imexConfig: imex.Config{Mode: imex.ModeDriverManaged, Isolation: imex.IsolationIMEXDomain},
+		imexConfig: imex.Config{DaemonLifecycle: imex.DaemonLifecyclePerComputeDomain},
 		clientsets: flags.ClientSets{Resource: draclient.New(client)},
 	}, nil)
 	m.templatePath = workloadTemplatePath
@@ -168,9 +168,9 @@ func TestWorkloadTemplateCreateKeepsTemplatesFromBeforeTheGate(t *testing.T) {
 func TestWorkloadTemplateUpToDate(t *testing.T) {
 	cd := testComputeDomain("a", 1)
 	channel := cd.Spec.GetChannels()[0]
-	newManager := func(mode imex.Mode) *WorkloadResourceClaimTemplateManager {
+	newManager := func(lifecycle imex.DaemonLifecycle) *WorkloadResourceClaimTemplateManager {
 		return &WorkloadResourceClaimTemplateManager{BaseResourceClaimTemplateManager: &BaseResourceClaimTemplateManager{
-			config:       &ManagerConfig{imexConfig: imex.Config{Mode: mode, Isolation: imex.IsolationIMEXDomain}},
+			config:       &ManagerConfig{imexConfig: imex.Config{DaemonLifecycle: lifecycle}},
 			templatePath: workloadTemplatePath,
 		}}
 	}
@@ -185,7 +185,7 @@ func TestWorkloadTemplateUpToDate(t *testing.T) {
 		return ok
 	}
 
-	driver := newManager(imex.ModeDriverManaged)
+	driver := newManager(imex.DaemonLifecyclePerComputeDomain)
 	beforeGate := render(driver, false)
 	named := render(driver, true)
 
@@ -223,7 +223,7 @@ func TestWorkloadTemplateUpToDate(t *testing.T) {
 	reordered.Spec.Spec.Devices.Config[0].Opaque.Parameters.Raw = []byte(`{"channelRef":"job","domainID":"a","kind":"ComputeDomainChannelConfig","apiVersion":"resource.nvidia.com/v1beta1"}`)
 	assert.True(t, upToDate(driver, reordered), "configs are compared decoded")
 
-	host := newManager(imex.ModeHostManaged)
+	host := newManager(imex.DaemonLifecycleHostManaged)
 	hostRequest := render(host, true).Spec.Spec.Devices.Requests[0].Exactly
 	assert.Empty(t, hostRequest.Selectors)
 	assert.Empty(t, hostRequest.Tolerations, "ComputeDomains share nodes in a shared IMEX domain")
