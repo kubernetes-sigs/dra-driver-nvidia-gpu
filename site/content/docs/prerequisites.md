@@ -63,7 +63,7 @@ If you plan to use ComputeDomains, you also need:
 
 ### Driver-managed IMEX
 
-The default `resources.computeDomains.imex.mode=driverManaged` setting makes the DRA Driver create one `nvidia-imex` DaemonSet for each `ComputeDomain`.
+The default `resources.computeDomains.imex.daemonLifecycle=perComputeDomain` setting makes the DRA Driver create one `nvidia-imex` DaemonSet for each `ComputeDomain`.
 On all GPU nodes where the `nvidia-imex-*` packages are installed, disable the host `nvidia-imex.service` systemd unit:
 
 ```bash
@@ -72,7 +72,7 @@ systemctl disable --now nvidia-imex.service && systemctl mask nvidia-imex.servic
 
 ### Host-managed IMEX
 
-By default the driver owns the `nvidia-imex` daemon lifecycle, per the requirement above. For clusters where the operator already runs `nvidia-imex` as a host service (for example through systemd), set `resources.computeDomains.imex.mode=hostManaged` to stop the driver from creating per-ComputeDomain `nvidia-imex` DaemonSets. This **inverts** the requirement above: `nvidia-imex.service` must be installed, configured, and left **running** on every participating GPU node. Also, the `nvidia-imex` service should be configured with
+By default the driver owns the `nvidia-imex` daemon lifecycle, per the requirement above. For clusters where the operator already runs `nvidia-imex` as a host service (for example through systemd), set `resources.computeDomains.imex.daemonLifecycle=hostManaged` to stop the driver from creating per-ComputeDomain `nvidia-imex` DaemonSets. This **inverts** the requirement above: `nvidia-imex.service` must be installed, configured, and left **running** on every participating GPU node. Also, the `nvidia-imex` service should be configured with
 `IMEX_CMD_ENABLED=1` and `IMEX_CMD_UNIX_DOMAIN_PATH=/etc/nvidia-imex/imex_ctrl.sock` (configurable via Helm).
 
 {{% alert color="warning" title="Warning" %}}
@@ -84,15 +84,13 @@ Host-managed mode requires two Helm values together:
 
 ```bash
 --set featureGates.HostManagedIMEXDaemon=true \
---set resources.computeDomains.imex.mode=hostManaged
+--set resources.computeDomains.imex.daemonLifecycle=hostManaged
 ```
 
-- `featureGates.HostManagedIMEXDaemon` is an alpha gate that only unlocks setting `imex.mode=hostManaged`. It does not by itself change any behavior. Setting `imex.mode=hostManaged` without this gate enabled is a startup validation error (`helm install`/`helm template` fails immediately, and if bypassed, the controller and kubelet plugin pods will fail to start).
-- `imex.isolation` selects the IMEX isolation strategy, and applies under both `driverManaged` and `hostManaged` mode. It must be set to one of:
-  - `domain` (default) — all workloads running in the same IMEX domain share the same channel (0). Under `driverManaged` mode this is inherent to the model (the driver creates one `nvidia-imex` daemon per ComputeDomain); under `hostManaged` mode, multiple ComputeDomains can still run against the same host IMEX domain, all receiving channel 0, with no isolation between them.
-  - `channel` — intended to eventually give each workload a unique channel within an IMEX domain. Not implemented yet: setting it is a startup validation error regardless of `imex.mode`.
-  - Any other value is a startup validation error.
-- Changing `imex.mode` or `imex.isolation` on a cluster with active ComputeDomain workloads is not supported and is not enforced by the driver, drain and remove existing ComputeDomains first.
+- `featureGates.HostManagedIMEXDaemon` is an alpha gate that only unlocks setting `imex.daemonLifecycle=hostManaged`. It does not by itself change any behavior. Setting `imex.daemonLifecycle=hostManaged` without this gate enabled is a startup validation error (`helm install`/`helm template` fails immediately, and if bypassed, the controller and kubelet plugin pods will fail to start).
+- All ComputeDomains share the host IMEX domain. Without the `ComputeDomainChannelReservations` feature gate they all receive channel 0, so their workloads are not isolated from each other. Enable the gate to give each workload `ResourceClaimTemplate` its own channel.
+- The `imex.mode` and `imex.isolation` values of earlier releases are deprecated. `imex.mode=hostManaged` still selects `imex.daemonLifecycle=hostManaged`, and `imex.isolation` is ignored.
+- Changing `imex.daemonLifecycle` on a cluster with active ComputeDomain workloads is not supported and is not enforced by the driver, drain and remove existing ComputeDomains first.
 
 #### Host IMEX readiness check (Unix domain socket required)
 

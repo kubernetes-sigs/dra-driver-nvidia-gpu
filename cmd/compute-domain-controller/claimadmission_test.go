@@ -102,11 +102,11 @@ type admissionFixture struct {
 	client *fake.Clientset
 }
 
-func newAdmissionFixture(t testing.TB, mode imex.Mode, cds ...*nvapi.ComputeDomain) *admissionFixture {
+func newAdmissionFixture(t testing.TB, lifecycle imex.DaemonLifecycle, cds ...*nvapi.ComputeDomain) *admissionFixture {
 	t.Helper()
 	client := fake.NewSimpleClientset()
 	config := &ManagerConfig{
-		imexConfig:      imex.Config{Mode: mode, Isolation: imex.IsolationIMEXDomain},
+		imexConfig:      imex.Config{DaemonLifecycle: lifecycle},
 		imexMaxChannels: imex.DefaultMaxChannels,
 		clientsets:      flags.ClientSets{Resource: draclient.New(client), Core: client},
 	}
@@ -266,7 +266,7 @@ func TestClaimAdmissionDriverManaged(t *testing.T) {
 	setChannelReservationsGate(t, true)
 	cdA := cdInNamespace("cd-a", "team-a")
 	cdB := cdInNamespace("cd-b", "team-b")
-	f := newAdmissionFixture(t, imex.ModeDriverManaged, cdA, cdB)
+	f := newAdmissionFixture(t, imex.DaemonLifecyclePerComputeDomain, cdA, cdB)
 
 	// The first claim on a free node is admitted, and the node is labeled
 	// for cd-a, so the scheduler skips it for other ComputeDomains.
@@ -327,7 +327,7 @@ func TestClaimAdmissionDriverManaged(t *testing.T) {
 
 func TestClaimAdmissionWaitsForIMEXDaemonTeardown(t *testing.T) {
 	setChannelReservationsGate(t, true)
-	f := newAdmissionFixture(t, imex.ModeDriverManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
+	f := newAdmissionFixture(t, imex.DaemonLifecyclePerComputeDomain, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
 
 	// A force-deleted pod's claim is gone, but its IMEX daemon still runs
 	// until the kubelet plugin unprepares it and removes the node label.
@@ -352,7 +352,7 @@ func TestClaimAdmissionWaitsForIMEXDaemonTeardown(t *testing.T) {
 
 func TestClaimAdmissionCountsChannelsInUse(t *testing.T) {
 	setChannelReservationsGate(t, true)
-	f := newAdmissionFixture(t, imex.ModeDriverManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
+	f := newAdmissionFixture(t, imex.DaemonLifecyclePerComputeDomain, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
 
 	// Undecided claims of another ComputeDomain do not hold a node.
 	pending := allocatedChannelClaim(t, "a-pending", "team-a", "cd-a", "node-1", "job")
@@ -380,7 +380,7 @@ func TestClaimAdmissionRace(t *testing.T) {
 	for i := range computeDomains {
 		cds = append(cds, cdInNamespace(fmt.Sprintf("cd-%d", i), fmt.Sprintf("ns-%d", i)))
 	}
-	f := newAdmissionFixture(t, imex.ModeDriverManaged, cds...)
+	f := newAdmissionFixture(t, imex.DaemonLifecyclePerComputeDomain, cds...)
 	var claims []*resourceapi.ResourceClaim
 	for _, cd := range cds {
 		claim := allocatedChannelClaim(t, "claim-"+string(cd.UID), cd.Namespace, string(cd.UID), "node-1", "job")
@@ -407,7 +407,7 @@ func TestClaimAdmissionRace(t *testing.T) {
 
 func TestClaimAdmissionClusterScope(t *testing.T) {
 	setChannelReservationsGate(t, true)
-	f := newAdmissionFixture(t, imex.ModeHostManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
+	f := newAdmissionFixture(t, imex.DaemonLifecycleHostManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
 	f.clique(t, "node-1", "clique-1")
 
 	tests := map[string]struct {
@@ -452,7 +452,7 @@ func TestClaimAdmissionClusterScope(t *testing.T) {
 
 func TestClaimAdmissionAssignsChannels(t *testing.T) {
 	setChannelReservationsGate(t, true)
-	f := newAdmissionFixture(t, imex.ModeHostManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
+	f := newAdmissionFixture(t, imex.DaemonLifecycleHostManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
 	f.clique(t, "node-1", "clique-1")
 	f.clique(t, "node-2", "clique-1")
 	f.clique(t, "node-3", "clique-2")
@@ -483,7 +483,7 @@ func TestClaimAdmissionAssignsChannels(t *testing.T) {
 
 func TestClaimAdmissionRunsOutOfChannels(t *testing.T) {
 	setChannelReservationsGate(t, true)
-	f := newAdmissionFixture(t, imex.ModeHostManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
+	f := newAdmissionFixture(t, imex.DaemonLifecycleHostManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
 	f.m.assigner = newChannelAssigner(2)
 	f.clique(t, "node-1", "clique-1")
 
@@ -505,7 +505,7 @@ func TestClaimAdmissionRunsOutOfChannels(t *testing.T) {
 
 func TestClaimAdmissionRestoresChannels(t *testing.T) {
 	setChannelReservationsGate(t, true)
-	f := newAdmissionFixture(t, imex.ModeHostManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
+	f := newAdmissionFixture(t, imex.DaemonLifecycleHostManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
 	f.clique(t, "node-1", "clique-1")
 	a := allocatedChannelClaim(t, "a", "team-a", "cd-a", "node-1", "job")
 	f.add(t, a)
@@ -514,7 +514,7 @@ func TestClaimAdmissionRestoresChannels(t *testing.T) {
 	require.NoError(t, err)
 
 	// A new controller learns the channel from the admitted claim.
-	restarted := newAdmissionFixture(t, imex.ModeHostManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
+	restarted := newAdmissionFixture(t, imex.DaemonLifecycleHostManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
 	restarted.clique(t, "node-1", "clique-1")
 	restarted.m.restoreChannels(admitted)
 	b := allocatedChannelClaim(t, "b", "team-b", "cd-b", "node-1", "job")
@@ -569,7 +569,7 @@ func TestChannelDomainIDPrecedence(t *testing.T) {
 func TestClaimAdmissionGateDisabled(t *testing.T) {
 	// Kubelet plugins may enable the gate before the controller: their
 	// channels are admitted rather than left to time out.
-	f := newAdmissionFixture(t, imex.ModeDriverManaged)
+	f := newAdmissionFixture(t, imex.DaemonLifecyclePerComputeDomain)
 	claim := allocatedChannelClaim(t, "a", "team-a", "cd-unknown", "node-1", "job")
 	f.add(t, claim)
 
@@ -582,7 +582,7 @@ func TestClaimAdmissionGateDisabled(t *testing.T) {
 func TestClaimAdmissionRejectsUnattributableClaims(t *testing.T) {
 	setChannelReservationsGate(t, true)
 	cd := cdInNamespace("cd-a", "team-a")
-	f := newAdmissionFixture(t, imex.ModeDriverManaged, cd)
+	f := newAdmissionFixture(t, imex.DaemonLifecyclePerComputeDomain, cd)
 
 	invalid := allocatedChannelClaim(t, "bad-cfg", "team-a", "not-needed-for-test", "node-1", "job")
 	invalid.Status.Allocation.Devices.Config[0].Opaque.Parameters.Raw = []byte(`{"apiVersion":"resource.nvidia.com/v1beta1","kind":"ComputeDomainChannelConfig","domainID":"not-needed-for-test","unexpectedField":true}`)
@@ -616,7 +616,7 @@ func TestClaimAdmissionRejectsUnattributableClaims(t *testing.T) {
 
 func TestClaimAdmissionStatusUpdateFailure(t *testing.T) {
 	setChannelReservationsGate(t, true)
-	f := newAdmissionFixture(t, imex.ModeDriverManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
+	f := newAdmissionFixture(t, imex.DaemonLifecyclePerComputeDomain, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
 	a := allocatedChannelClaim(t, "a", "team-a", "cd-a", "node-1", "job")
 	f.add(t, a)
 	failed := false
@@ -640,7 +640,7 @@ func TestClaimAdmissionStatusUpdateFailure(t *testing.T) {
 
 func TestReleaseNode(t *testing.T) {
 	setChannelReservationsGate(t, true)
-	f := newAdmissionFixture(t, imex.ModeDriverManaged, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
+	f := newAdmissionFixture(t, imex.DaemonLifecyclePerComputeDomain, cdInNamespace("cd-a", "team-a"), cdInNamespace("cd-b", "team-b"))
 	ctx := context.Background()
 	a := allocatedChannelClaim(t, "a", "team-a", "cd-a", "node-1", "job")
 	f.add(t, a)
@@ -676,7 +676,7 @@ func TestReleaseNode(t *testing.T) {
 
 func TestEnqueueReleases(t *testing.T) {
 	setChannelReservationsGate(t, true)
-	f := newAdmissionFixture(t, imex.ModeDriverManaged)
+	f := newAdmissionFixture(t, imex.DaemonLifecyclePerComputeDomain)
 	f.m.releaseDelay = 0
 	a := allocatedChannelClaim(t, "a", "team-a", "cd-a", "node-1", "job")
 	deallocated := a.DeepCopy()
@@ -690,7 +690,7 @@ func TestEnqueueReleases(t *testing.T) {
 }
 
 func TestClaimsForComputeDomain(t *testing.T) {
-	f := newAdmissionFixture(t, imex.ModeDriverManaged)
+	f := newAdmissionFixture(t, imex.DaemonLifecyclePerComputeDomain)
 	a := allocatedChannelClaim(t, "a", "team-a", "cd-a", "node-1", "job")
 	b := allocatedChannelClaim(t, "b", "team-b", "cd-b", "node-1", "job")
 	f.add(t, a)
@@ -761,7 +761,7 @@ func TestClaimAdmissionSupportedDiscoveryError(t *testing.T) {
 
 func TestComputeDomainManagerWithoutClaimAdmission(t *testing.T) {
 	m := NewComputeDomainManager(&ManagerConfig{
-		imexConfig: imex.Config{Mode: imex.ModeHostManaged},
+		imexConfig: imex.Config{DaemonLifecycle: imex.DaemonLifecycleHostManaged},
 		clientsets: flags.ClientSets{Nvidia: nvfake.NewSimpleClientset(), Core: fake.NewSimpleClientset()},
 	})
 

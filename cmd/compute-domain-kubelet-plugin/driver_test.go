@@ -39,7 +39,7 @@ func deviceNames(devices []resourceapi.Device) []string {
 func driverManagedConfig() *Config {
 	return &Config{
 		flags:      &Flags{},
-		imexConfig: imex.Config{Mode: imex.ModeDriverManaged, Isolation: imex.IsolationIMEXDomain},
+		imexConfig: imex.Config{DaemonLifecycle: imex.DaemonLifecyclePerComputeDomain},
 	}
 }
 

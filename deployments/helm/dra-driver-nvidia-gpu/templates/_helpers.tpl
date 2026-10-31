@@ -198,59 +198,56 @@ resource.k8s.io/v1beta1
 {{- end -}}
 
 {{/*
-Returns "true" when resources.computeDomains.imex.mode is exactly
-"hostManaged", empty string otherwise. Used only to control structural
-rendering (omitting the compute-domain-daemon DeviceClass/RBAC).
+Resolves resources.computeDomains.imex.daemonLifecycle. When it is unset, the
+deprecated imex.mode of earlier releases decides, so that their values keep
+working.
+*/}}
+{{- define "dra-driver-nvidia-gpu.imexDaemonLifecycle" -}}
+{{- $imex := .Values.resources.computeDomains.imex | default dict -}}
+{{- $lifecycle := dig "daemonLifecycle" "" $imex | default "" | toString -}}
+{{- if $lifecycle -}}
+{{- $lifecycle -}}
+{{- else if eq (dig "mode" "" $imex | default "" | toString) "hostManaged" -}}
+hostManaged
+{{- else -}}
+perComputeDomain
+{{- end -}}
+{{- end -}}
+
+{{/*
+Returns "true" when the cluster admin runs the IMEX daemons as a host
+service, empty string otherwise. Used only to control structural rendering
+(omitting the compute-domain-daemon DeviceClass/RBAC).
 */}}
 {{- define "dra-driver-nvidia-gpu.hostManagedIMEX" -}}
-{{- if eq (toString (dig "mode" "" (.Values.resources.computeDomains.imex | default dict))) "hostManaged" -}}
+{{- if eq (include "dra-driver-nvidia-gpu.imexDaemonLifecycle" .) "hostManaged" -}}
 true
 {{- end -}}
 {{- end -}}
 
 {{/*
-Resolves resources.computeDomains.imex.scope. Host-managed IMEX daemons are
-always shared by all ComputeDomains.
-*/}}
-{{- define "dra-driver-nvidia-gpu.imexScope" -}}
-{{- $imex := .Values.resources.computeDomains.imex | default dict -}}
-{{- if eq (toString (dig "mode" "driverManaged" $imex)) "hostManaged" -}}
-cluster
-{{- else -}}
-{{- toString (dig "scope" "" $imex) | default "computeDomain" -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
-Validates resources.computeDomains.imex.mode / .scope / .isolation against
-the feature gates that unlock them, so `helm install`/`helm template` fails fast
-with a clear message instead of the controller/kubelet-plugin pods crash-looping
-on an invalid combination. Produces no output on success.
+Validates resources.computeDomains.imex.daemonLifecycle, and the deprecated
+imex.mode, against the feature gates that unlock them, so `helm install`/`helm
+template` fails fast with a clear message instead of the controller/kubelet-plugin
+pods crash-looping on an invalid value. The deprecated imex.isolation is
+ignored. Produces no output on success.
 */}}
 {{- define "dra-driver-nvidia-gpu.validateIMEXConfig" -}}
 {{- $imex := .Values.resources.computeDomains.imex | default dict -}}
-{{- $mode := toString (dig "mode" "driverManaged" $imex) -}}
-{{- $isolation := toString (dig "isolation" "domain" $imex) -}}
-{{- $gateEnabled := and .Values.featureGates (and (hasKey .Values.featureGates "HostManagedIMEXDaemon") .Values.featureGates.HostManagedIMEXDaemon) -}}
-{{- if eq $mode "hostManaged" -}}
-  {{- if not $gateEnabled -}}
-    {{- fail "resources.computeDomains.imex.mode=hostManaged requires featureGates.HostManagedIMEXDaemon=true" -}}
-  {{- end -}}
-{{- else if ne $mode "driverManaged" -}}
-  {{- fail (printf "unknown resources.computeDomains.imex.mode %q: must be \"driverManaged\" or \"hostManaged\"" $mode) -}}
-{{- end -}}
+{{- $mode := dig "mode" "" $imex | default "" | toString -}}
+{{- $lifecycle := include "dra-driver-nvidia-gpu.imexDaemonLifecycle" . -}}
 {{- $gates := .Values.featureGates | default dict -}}
-{{- if not (has $isolation (list "" "domain" "channel")) -}}
-  {{- fail (printf "unknown resources.computeDomains.imex.isolation %q: must be \"domain\" or \"channel\"" $isolation) -}}
+{{- if not (has $mode (list "" "driverManaged" "hostManaged")) -}}
+  {{- fail (printf "unknown resources.computeDomains.imex.mode %q: must be \"driverManaged\" or \"hostManaged\", or use imex.daemonLifecycle instead" $mode) -}}
 {{- end -}}
-{{- if and (eq $isolation "channel") (not (dig "ComputeDomainChannelReservations" false $gates)) -}}
-  {{- fail "resources.computeDomains.imex.isolation=channel requires featureGates.ComputeDomainChannelReservations=true" -}}
+{{- if and (eq $mode "hostManaged") (ne $lifecycle "hostManaged") -}}
+  {{- fail (printf "resources.computeDomains.imex.mode=hostManaged contradicts imex.daemonLifecycle=%s, unset the deprecated imex.mode" $lifecycle) -}}
 {{- end -}}
-{{- $scope := include "dra-driver-nvidia-gpu.imexScope" . -}}
-{{- if not (has $scope (list "computeDomain" "cluster")) -}}
-  {{- fail (printf "unknown resources.computeDomains.imex.scope %q: must be \"computeDomain\" or \"cluster\"" $scope) -}}
-{{- end -}}
-{{- if and (eq $scope "cluster") (eq $mode "driverManaged") -}}
-  {{- fail "resources.computeDomains.imex.scope=cluster is not supported yet with mode=driverManaged" -}}
+{{- if eq $lifecycle "hostManaged" -}}
+  {{- if not (dig "HostManagedIMEXDaemon" false $gates) -}}
+    {{- fail "resources.computeDomains.imex.daemonLifecycle=hostManaged requires featureGates.HostManagedIMEXDaemon=true" -}}
+  {{- end -}}
+{{- else if ne $lifecycle "perComputeDomain" -}}
+  {{- fail (printf "unknown resources.computeDomains.imex.daemonLifecycle %q: must be \"perComputeDomain\" or \"hostManaged\"" $lifecycle) -}}
 {{- end -}}
 {{- end -}}

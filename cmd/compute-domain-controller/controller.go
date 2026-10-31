@@ -45,8 +45,7 @@ type ManagerConfig struct {
 	// maxNodesPerIMEXDomain is the maximum number of nodes per IMEX domain to allocate
 	maxNodesPerIMEXDomain int
 
-	// imexConfig holds the resolved imex.mode / imex.scope / imex.isolation
-	// configuration.
+	// imexConfig holds the resolved imex.daemonLifecycle configuration.
 	imexConfig imex.Config
 
 	// imexConfigOverrides holds arbitrary nvidia-imex daemon config file

@@ -35,7 +35,7 @@ After applying this resource, the controller creates:
 - A per-domain `DaemonSet` of `compute-domain-daemon` pods, one per GPU node.
 - A `ResourceClaimTemplate` named `imex-channel-0`, which workload pods use to request a channel.
 
-These objects describe the default `driverManaged` mode.
+These objects describe the default `perComputeDomain` IMEX daemon lifecycle.
 In `hostManaged` mode, the controller creates the workload `ResourceClaimTemplate` but does not create the per-domain daemon DaemonSet.
 The host service must be ready through its configured command socket before a workload claim can prepare.
 Host-managed mode currently provides domain isolation and channel 0 only, even if the `ComputeDomain` requests `allocationMode: All`.
@@ -94,7 +94,7 @@ The first command must exit successfully, and the logs must include
 
 ### Channel allocation modes
 
-In `driverManaged` mode, the `spec.channel.allocationMode` field controls how many
+With the `perComputeDomain` IMEX daemon lifecycle, the `spec.channel.allocationMode` field controls how many
 IMEX channels are injected:
 
 | Mode | Value | Description |
@@ -102,7 +102,7 @@ IMEX channels are injected:
 | Single | `Single` (default) | Injects a single IMEX channel into the workload container |
 | All | `All` | Injects all available IMEX channels (up to the hardware maximum) |
 
-Use `All` only in `driverManaged` mode for workloads that need access to every
+Use `All` only with the `perComputeDomain` IMEX daemon lifecycle for workloads that need access to every
 channel in the IMEX domain.
 In `hostManaged` mode, domain isolation shares channel 0 among workloads.
 The controller forces the generated workload claim to `Single`, so a requested
@@ -121,7 +121,7 @@ featureGates:
   ComputeDomainChannelReservations: true
 ```
 
-On Kubernetes v1.34 and v1.35, also enable the upstream `DRAConsumableCapacity` feature gate on the kube-apiserver, kube-controller-manager, kube-scheduler, and kubelet, and with `imex.scope=computeDomain`, `DRADeviceTaints` on the kube-apiserver and kube-scheduler.
+On Kubernetes v1.34 and v1.35, also enable the upstream `DRAConsumableCapacity` feature gate on the kube-apiserver, kube-controller-manager, kube-scheduler, and kubelet, and with `imex.daemonLifecycle=perComputeDomain`, `DRADeviceTaints` on the kube-apiserver and kube-scheduler.
 
 A channel is only shared within one template of a ComputeDomain.
 The controller assigns it when it admits the claim, and the kubelet plugin rejects a claim with a permanent error if its channel is in use on the node by another ComputeDomain.
@@ -168,7 +168,7 @@ kubectl get computedomain my-compute-domain -o yaml
 
 Interpret `status.status` according to the configured lifecycle mode:
 
-- In `driverManaged` mode, `Ready` reflects the readiness of the per-ComputeDomain
+- With the `perComputeDomain` IMEX daemon lifecycle, `Ready` reflects the readiness of the per-ComputeDomain
   daemons managed by the driver. When `ComputeDomainCliques` is enabled, inspect
   the `ComputeDomainClique` objects for daemon membership:
 
@@ -187,7 +187,7 @@ Interpret `status.status` according to the configured lifecycle mode:
 
 Use this validation after installing the driver with both
 `featureGates.HostManagedIMEXDaemon=true` and
-`resources.computeDomains.imex.mode=hostManaged`.
+`resources.computeDomains.imex.daemonLifecycle=hostManaged`.
 Complete the [host-managed prerequisites](../prerequisites.md#host-managed-imex)
 first, including configuring the same command socket path in the host service and
 the Helm value.
@@ -297,7 +297,7 @@ The default driver-managed mode uses two Beta feature gates that are enabled by 
 |---|---|---|---|
 | `IMEXDaemonsWithDNSNames` | Beta | `true` | Makes daemons communicate using DNS names instead of raw IP addresses and is required by `ComputeDomainCliques`. |
 | `ComputeDomainCliques` | Beta | `true` | Uses `ComputeDomainClique` CRD objects to track daemon membership per clique instead of storing that information in `ComputeDomain.status.nodes` and requires `IMEXDaemonsWithDNSNames`. |
-| `HostManagedIMEXDaemon` | Alpha | `false` | Allows you to select `resources.computeDomains.imex.mode=hostManaged` without changing the lifecycle mode by itself. |
+| `HostManagedIMEXDaemon` | Alpha | `false` | Allows you to select `resources.computeDomains.imex.daemonLifecycle=hostManaged` without changing the lifecycle mode by itself. |
 
 To disable a Beta gate (for example, to test a downgrade path):
 
