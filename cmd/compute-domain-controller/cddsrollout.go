@@ -89,19 +89,23 @@ type rolloutPlan struct {
 	pods    []*corev1.Pod
 	// requeueAfter is set while a clique waits for minReadySeconds.
 	requeueAfter time.Duration
+	// topology is the value of rollingUpdate.topologyKey being updated.
+	topology string
 }
 
 // planCliqueRollout restarts whole cliques together, at most
 // maxUnavailableCliques at a time. Cliques that are updated but not yet
 // available, or that were restarted recently, use up the batch. Unavailable
-// outdated cliques go first, as their workloads are disrupted already.
-func planCliqueRollout(cliques []*staticClique, unclustered []*corev1.Pod, hash string, ru *nvapi.ComputeDomainDaemonSetRollingUpdate, nodeReady map[string]bool, restarting map[string]bool, now time.Time) rolloutPlan {
+// outdated cliques go first, as their workloads are disrupted already. With a
+// topology key, only the cliques of the first topology that is not yet updated
+// and available are restarted. topologyOf maps nodes to their topology, and is
+// nil without a topology key.
+func planCliqueRollout(cliques []*staticClique, unclustered []*corev1.Pod, hash string, ru *nvapi.ComputeDomainDaemonSetRollingUpdate, nodeReady map[string]bool, topologyOf map[string]string, restarting map[string]bool, now time.Time) rolloutPlan {
 	var plan rolloutPlan
-	// Pods without a clique run no IMEX daemon, so restarting them disrupts
-	// nothing.
+	var outdatedUnclustered []*corev1.Pod
 	for _, pod := range unclustered {
 		if !podUpdated(pod, hash) && pod.DeletionTimestamp == nil {
-			plan.pods = append(plan.pods, pod)
+			outdatedUnclustered = append(outdatedUnclustered, pod)
 		}
 	}
 
@@ -115,6 +119,12 @@ func planCliqueRollout(cliques []*staticClique, unclustered []*corev1.Pod, hash 
 	inProgress := 0
 	requeueAfter := time.Duration(math.MaxInt64)
 	var unavailableCandidates, candidates []*staticClique
+	// pending holds the topologies with cliques that are not yet updated and
+	// available.
+	var pending []string
+	for _, pod := range outdatedUnclustered {
+		pending = append(pending, topologyOf[pod.Spec.NodeName])
+	}
 	for _, c := range cliques {
 		available, wait := c.availability(nodeReady, minReady, now)
 		if wait > 0 {
@@ -129,11 +139,27 @@ func planCliqueRollout(cliques []*staticClique, unclustered []*corev1.Pod, hash 
 			unavailableCandidates = append(unavailableCandidates, c)
 		case !available || restarting[c.id]:
 			inProgress++
+		default:
+			continue
 		}
+		pending = append(pending, c.topology)
 	}
 	if requeueAfter != math.MaxInt64 {
 		plan.requeueAfter = requeueAfter
 	}
+
+	if topologyOf != nil && len(pending) > 0 {
+		plan.topology = slices.MinFunc(pending, compareTopology)
+		inTopology := func(c *staticClique) bool { return c.topology == plan.topology }
+		unavailableCandidates = slices.DeleteFunc(unavailableCandidates, func(c *staticClique) bool { return !inTopology(c) })
+		candidates = slices.DeleteFunc(candidates, func(c *staticClique) bool { return !inTopology(c) })
+		outdatedUnclustered = slices.DeleteFunc(outdatedUnclustered, func(pod *corev1.Pod) bool {
+			return topologyOf[pod.Spec.NodeName] != plan.topology
+		})
+	}
+	// Pods without a clique run no IMEX daemon, so restarting them disrupts
+	// nothing.
+	plan.pods = outdatedUnclustered
 
 	if ru != nil && ru.Paused {
 		return plan

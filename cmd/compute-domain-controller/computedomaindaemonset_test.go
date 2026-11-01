@@ -323,6 +323,41 @@ func TestComputeDomainDaemonSetRollingUpdate(t *testing.T) {
 	}
 }
 
+func TestComputeDomainDaemonSetRollingUpdateByTopology(t *testing.T) {
+	nodes, _ := testCliques(2, 2, "")
+	nodes[0].Labels["example.com/block"] = "b"
+	nodes[1].Labels["example.com/block"] = "b"
+	nodes[2].Labels["example.com/block"] = "a"
+	nodes[3].Labels["example.com/block"] = "a"
+	cdds := testComputeDomainDaemonSet()
+	cdds.Spec.UpdateStrategy = nvapi.ComputeDomainDaemonSetUpdateStrategy{
+		Type:          nvapi.ComputeDomainDaemonSetUpdateStrategyRollingUpdate,
+		RollingUpdate: &nvapi.ComputeDomainDaemonSetRollingUpdate{TopologyKey: "example.com/block"},
+	}
+	objects := []runtime.Object{cdds}
+	for _, node := range nodes {
+		objects = append(objects, node, daemonPod(node.Name, "previous", time.Hour))
+	}
+	f := newCDDSFixture(t, objects...)
+
+	f.sync(t)
+
+	assert.ElementsMatch(t, []string{"imex-c1-n0", "imex-c1-n1"}, f.deletedPods(), "the clique of the first topology restarts")
+	status := f.cdds(t).Status
+	assert.Equal(t, "a", status.UpdatingTopology)
+	assert.Equal(t, []string{"b", "a"}, []string{status.Cliques[0].Topology, status.Cliques[1].Topology})
+
+	ds := f.daemonSet(t)
+	ds.Status.DesiredNumberScheduled = 4
+	_, err := f.core.AppsV1().DaemonSets("driver").UpdateStatus(context.Background(), ds, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	f.refresh(t)
+	f.sync(t)
+	rollout := meta.FindStatusCondition(f.cdds(t).Status.Conditions, nvapi.ComputeDomainDaemonSetConditionRolloutInProgress)
+	require.NotNil(t, rollout)
+	assert.Contains(t, rollout.Message, "updating cliques with example.com/block=a")
+}
+
 func TestComputeDomainDaemonSetDeletion(t *testing.T) {
 	cdds := testComputeDomainDaemonSet()
 	clique := &nvapi.ComputeDomainClique{ObjectMeta: metav1.ObjectMeta{
@@ -606,7 +641,7 @@ func TestPlanCliqueRolloutDefaultsMinReadySeconds(t *testing.T) {
 	pods[0].Status.Conditions[0].LastTransitionTime = metav1.NewTime(rolloutNow.Add(-10 * time.Second))
 	cliques, unclustered := groupByClique(nodes, pods, nil)
 
-	plan := planCliqueRollout(cliques, unclustered, "new", nil, nodeReadiness(nodes), nil, rolloutNow)
+	plan := planCliqueRollout(cliques, unclustered, "new", nil, nodeReadiness(nodes), nil, nil, rolloutNow)
 
 	assert.Empty(t, plan.cliques, "an omitted rollingUpdate still waits 30s")
 	assert.Equal(t, 20*time.Second, plan.requeueAfter)

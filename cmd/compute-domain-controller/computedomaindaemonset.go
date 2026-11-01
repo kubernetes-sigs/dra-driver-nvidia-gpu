@@ -326,16 +326,16 @@ func (m *ComputeDomainDaemonSetManager) sync(ctx context.Context) (time.Duration
 
 	hash := ds.Spec.Template.Annotations[staticDaemonTemplateHashKey]
 	cliques, unclustered := groupByClique(m.nodes(), pods, cdds.Spec.NodeSelector)
-	var requeueAfter time.Duration
+	var plan rolloutPlan
 	if cdds.Spec.UpdateStrategy.Type == nvapi.ComputeDomainDaemonSetUpdateStrategyRollingUpdate {
-		if requeueAfter, err = m.rollout(ctx, cdds, cliques, unclustered, hash); err != nil {
+		if plan, err = m.rollout(ctx, cdds, cliques, unclustered, hash); err != nil {
 			return 0, err
 		}
 	}
-	if err := m.updateStatus(ctx, cdds, state, cliques, pods, hash); err != nil {
+	if err := m.updateStatus(ctx, cdds, state, cliques, pods, hash, plan.topology); err != nil {
 		return 0, err
 	}
-	return requeueAfter, nil
+	return plan.requeueAfter, nil
 }
 
 func (m *ComputeDomainDaemonSetManager) addFinalizer(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet) (*nvapi.ComputeDomainDaemonSet, error) {
@@ -561,6 +561,11 @@ func (m *ComputeDomainDaemonSetManager) validateSpec(cdds *nvapi.ComputeDomainDa
 			errs = append(errs, fmt.Errorf("spec.nodeSelector value %q: %s", value, msg))
 		}
 	}
+	if ru := cdds.Spec.UpdateStrategy.RollingUpdate; ru != nil && ru.TopologyKey != "" {
+		for _, msg := range validation.IsQualifiedName(ru.TopologyKey) {
+			errs = append(errs, fmt.Errorf("spec.updateStrategy.rollingUpdate.topologyKey %q: %s", ru.TopologyKey, msg))
+		}
+	}
 	if name := cdds.Spec.PriorityClassName; name != "" {
 		for _, msg := range validation.IsDNS1123Subdomain(name) {
 			errs = append(errs, fmt.Errorf("spec.priorityClassName %q: %s", name, msg))
@@ -761,9 +766,19 @@ func nodeReadiness(nodes []*corev1.Node) map[string]bool {
 }
 
 // rollout restarts the next batch of outdated cliques.
-func (m *ComputeDomainDaemonSetManager) rollout(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, cliques []*staticClique, unclustered []*corev1.Pod, hash string) (time.Duration, error) {
+func (m *ComputeDomainDaemonSetManager) rollout(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, cliques []*staticClique, unclustered []*corev1.Pod, hash string) (rolloutPlan, error) {
 	now := m.now()
-	plan := planCliqueRollout(cliques, unclustered, hash, cdds.Spec.UpdateStrategy.RollingUpdate, nodeReadiness(m.nodes()), m.restartingCliques(cliques, hash, now), now)
+	nodes := m.nodes()
+	ru := cdds.Spec.UpdateStrategy.RollingUpdate
+	var topologyOf map[string]string
+	if ru != nil && ru.TopologyKey != "" {
+		topologyOf = make(map[string]string, len(nodes))
+		for _, node := range nodes {
+			topologyOf[node.Name] = node.Labels[ru.TopologyKey]
+		}
+		assignTopology(cliques, topologyOf)
+	}
+	plan := planCliqueRollout(cliques, unclustered, hash, ru, nodeReadiness(nodes), topologyOf, m.restartingCliques(cliques, hash, now), now)
 	if len(plan.cliques) > 0 {
 		klog.Infof("Restarting the static IMEX daemons of cliques %v", plan.cliques)
 	}
@@ -772,7 +787,7 @@ func (m *ComputeDomainDaemonSetManager) rollout(ctx context.Context, cdds *nvapi
 			Preconditions: &metav1.Preconditions{UID: &pod.UID},
 		})
 		if err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
-			return 0, fmt.Errorf("error deleting outdated IMEX daemon pod %s: %w", pod.Name, err)
+			return rolloutPlan{}, fmt.Errorf("error deleting outdated IMEX daemon pod %s: %w", pod.Name, err)
 		}
 	}
 	m.restartingMu.Lock()
@@ -780,7 +795,7 @@ func (m *ComputeDomainDaemonSetManager) rollout(ctx context.Context, cdds *nvapi
 		m.restarting[id] = now
 	}
 	m.restartingMu.Unlock()
-	return plan.requeueAfter, nil
+	return plan, nil
 }
 
 // restartingCliques returns the cliques restarted recently whose new daemons
@@ -886,7 +901,7 @@ func (m *ComputeDomainDaemonSetManager) removeStaleDaemons(ctx context.Context, 
 	return nil
 }
 
-func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, state *staticDaemonSetState, cliques []*staticClique, pods []*corev1.Pod, hash string) error {
+func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, state *staticDaemonSetState, cliques []*staticClique, pods []*corev1.Pod, hash, updatingTopology string) error {
 	ds := state.ds
 	newCDDS := cdds.DeepCopy()
 	status := &newCDDS.Status
@@ -902,6 +917,7 @@ func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *
 	}
 	status.Cliques = cliqueStatuses(cliques, hash)
 	status.NumberCliques = int32(len(status.Cliques))
+	status.UpdatingTopology = updatingTopology
 
 	ready := metav1.Condition{Type: nvapi.ComputeDomainDaemonSetConditionReady, Status: metav1.ConditionFalse, Reason: "DaemonsNotReady",
 		Message: fmt.Sprintf("%d of %d IMEX daemons are ready", status.NumberReady, status.DesiredNumberScheduled)}
@@ -917,6 +933,13 @@ func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *
 			rollout.Reason, rollout.Message = "WaitingForPodDeletion", fmt.Sprintf("%d IMEX daemons run an outdated revision, delete their pods to update them", outdated)
 		case cdds.Spec.UpdateStrategy.RollingUpdate != nil && cdds.Spec.UpdateStrategy.RollingUpdate.Paused:
 			rollout.Reason, rollout.Message = "Paused", fmt.Sprintf("%d IMEX daemons run an outdated revision", outdated)
+		case cdds.Spec.UpdateStrategy.RollingUpdate != nil && cdds.Spec.UpdateStrategy.RollingUpdate.TopologyKey != "":
+			key := cdds.Spec.UpdateStrategy.RollingUpdate.TopologyKey
+			where := fmt.Sprintf("updating cliques with %s=%s", key, updatingTopology)
+			if updatingTopology == "" {
+				where = fmt.Sprintf("updating cliques without label %s", key)
+			}
+			rollout.Reason, rollout.Message = "RollingUpdate", fmt.Sprintf("%d IMEX daemons run an outdated revision, %s", outdated, where)
 		default:
 			rollout.Reason, rollout.Message = "RollingUpdate", fmt.Sprintf("%d IMEX daemons run an outdated revision", outdated)
 		}

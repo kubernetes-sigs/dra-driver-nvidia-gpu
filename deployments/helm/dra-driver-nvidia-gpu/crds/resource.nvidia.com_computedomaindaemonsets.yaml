@@ -226,6 +226,16 @@ spec:
                         description: Paused stops starting new batches. A batch in
                           progress completes.
                         type: boolean
+                      topologyKey:
+                        description: |-
+                          TopologyKey is a node label key that groups cliques, for example by
+                          block or Scalable Unit of racks. When set, the update restarts the
+                          cliques of one value of the label at a time, in sorted order, and moves
+                          to the next value once they all run the new revision and are available.
+                          Cliques on nodes without the label go last. A clique whose nodes carry
+                          several values goes with the first of them.
+                        maxLength: 317
+                        type: string
                     type: object
                   type:
                     default: OnDelete
@@ -261,6 +271,11 @@ spec:
                     readyNodes:
                       format: int32
                       type: integer
+                    topology:
+                      description: |-
+                        Topology is the value of rollingUpdate.topologyKey that the clique is
+                        updated with.
+                      type: string
                     updatedNodes:
                       description: UpdatedNodes is the number of daemons on the current
                         revision.
@@ -354,6 +369,12 @@ spec:
                   revision.
                 format: int32
                 type: integer
+              updatingTopology:
+                description: |-
+                  UpdatingTopology is the value of rollingUpdate.topologyKey whose
+                  cliques a rolling update is restarting. It is empty when no update is
+                  in progress, or when the cliques left have no such label.
+                type: string
             type: object
         type: object
         x-kubernetes-validations:

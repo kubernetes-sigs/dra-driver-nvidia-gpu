@@ -140,7 +140,7 @@ func TestPlanCliqueRollout(t *testing.T) {
 			}
 			cliques, unclustered := groupByClique(nodes, pods, nil)
 
-			plan := planCliqueRollout(cliques, unclustered, "new", tc.ru, nodeReadiness(nodes), tc.restarting, rolloutNow)
+			plan := planCliqueRollout(cliques, unclustered, "new", tc.ru, nodeReadiness(nodes), nil, tc.restarting, rolloutNow)
 
 			assert.Equal(t, tc.wantCliques, plan.cliques)
 			assert.Len(t, plan.pods, tc.wantDeletion, podNames(plan.pods))
@@ -153,7 +153,7 @@ func TestPlanCliqueRolloutRestartsWholeCliques(t *testing.T) {
 	nodes, pods := testCliques(2, 18, "old")
 	cliques, unclustered := groupByClique(nodes, pods, nil)
 
-	plan := planCliqueRollout(cliques, unclustered, "new", nil, nodeReadiness(nodes), nil, rolloutNow)
+	plan := planCliqueRollout(cliques, unclustered, "new", nil, nodeReadiness(nodes), nil, nil, rolloutNow)
 
 	assert.Equal(t, []string{"c0"}, plan.cliques)
 	assert.Len(t, plan.pods, 18, "all daemons of the clique restart together, so its IMEX domain is disrupted once")
@@ -167,4 +167,117 @@ func TestMaxUnavailableCliques(t *testing.T) {
 	assert.Equal(t, 3, maxUnavailableCliques(&nvapi.ComputeDomainDaemonSetRollingUpdate{MaxUnavailableCliques: ptr.To(intstr.FromInt32(3))}, 10))
 	assert.Equal(t, 2, maxUnavailableCliques(&nvapi.ComputeDomainDaemonSetRollingUpdate{MaxUnavailableCliques: ptr.To(intstr.FromString("25%"))}, 10))
 	assert.Equal(t, 1, maxUnavailableCliques(&nvapi.ComputeDomainDaemonSetRollingUpdate{MaxUnavailableCliques: ptr.To(intstr.FromInt32(0))}, 10))
+}
+
+func TestPlanCliqueRolloutByTopology(t *testing.T) {
+	const key = "example.com/block"
+	updated := func(pods []*corev1.Pod, readyFor time.Duration, indexes ...int) {
+		for _, i := range indexes {
+			pods[i] = daemonPod(pods[i].Spec.NodeName, "new", readyFor)
+		}
+	}
+	tests := map[string]struct {
+		mutate       func(nodes []*corev1.Node, pods []*corev1.Pod)
+		wantTopology string
+		wantCliques  []string
+		wantDeletion int
+	}{
+		"updates the first topology in sorted order": {
+			wantTopology: "a",
+			wantCliques:  []string{"c2", "c3"},
+			wantDeletion: 4,
+		},
+		"moves on once a topology is updated and available": {
+			mutate: func(_ []*corev1.Node, pods []*corev1.Pod) {
+				updated(pods, time.Hour, 4, 5, 6, 7)
+			},
+			wantTopology: "b",
+			wantCliques:  []string{"c0", "c1"},
+			wantDeletion: 4,
+		},
+		"waits for the updated cliques of a topology to be available": {
+			mutate: func(_ []*corev1.Node, pods []*corev1.Pod) {
+				updated(pods, time.Hour, 4, 5)
+				updated(pods, time.Second, 6, 7)
+			},
+			wantTopology: "a",
+		},
+		"updates cliques without the label last": {
+			mutate: func(nodes []*corev1.Node, _ []*corev1.Pod) {
+				delete(nodes[4].Labels, key)
+				delete(nodes[5].Labels, key)
+			},
+			wantTopology: "a",
+			wantCliques:  []string{"c3"},
+			wantDeletion: 2,
+		},
+		"a clique spanning topologies goes with the first": {
+			mutate: func(nodes []*corev1.Node, _ []*corev1.Pod) {
+				nodes[1].Labels[key] = "a"
+			},
+			wantTopology: "a",
+			wantCliques:  []string{"c0", "c2", "c3"},
+			wantDeletion: 6,
+		},
+		"restarts daemons without a clique only in the topology": {
+			mutate: func(nodes []*corev1.Node, _ []*corev1.Pod) {
+				for _, i := range []int{0, 1, 2, 3, 4, 5, 6, 7} {
+					delete(nodes[i].Labels, gpuCliqueNodeLabelKey)
+				}
+			},
+			wantTopology: "a",
+			wantDeletion: 4,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			// c0 and c1 are in topology b, c2 and c3 in topology a.
+			nodes, pods := testCliques(4, 2, "old")
+			for i, node := range nodes {
+				node.Labels[key] = map[bool]string{true: "b", false: "a"}[i < 4]
+			}
+			if tc.mutate != nil {
+				tc.mutate(nodes, pods)
+			}
+			topologyOf := make(map[string]string, len(nodes))
+			for _, node := range nodes {
+				topologyOf[node.Name] = node.Labels[key]
+			}
+			cliques, unclustered := groupByClique(nodes, pods, nil)
+			assignTopology(cliques, topologyOf)
+			ru := &nvapi.ComputeDomainDaemonSetRollingUpdate{MaxUnavailableCliques: ptr.To(intstr.FromInt32(4)), MinReadySeconds: 30, TopologyKey: key}
+
+			plan := planCliqueRollout(cliques, unclustered, "new", ru, nodeReadiness(nodes), topologyOf, nil, rolloutNow)
+
+			assert.Equal(t, tc.wantTopology, plan.topology)
+			assert.Equal(t, tc.wantCliques, plan.cliques)
+			assert.Len(t, plan.pods, tc.wantDeletion, podNames(plan.pods))
+		})
+	}
+}
+
+func TestCliqueStatusesReportTopology(t *testing.T) {
+	nodes, pods := testCliques(2, 2, "h")
+	topologyOf := map[string]string{"c0-n0": "b", "c0-n1": "a", "c1-n0": "", "c1-n1": ""}
+	cliques, _ := groupByClique(nodes, pods, nil)
+	assignTopology(cliques, topologyOf)
+
+	statuses := cliqueStatuses(cliques, "h")
+
+	assert.Equal(t, "a", statuses[0].Topology, "a clique spanning topologies goes with the first")
+	assert.Empty(t, statuses[1].Topology)
+}
+
+func TestValidateSpecTopologyKey(t *testing.T) {
+	cdds := func(key string) *nvapi.ComputeDomainDaemonSet {
+		return &nvapi.ComputeDomainDaemonSet{Spec: nvapi.ComputeDomainDaemonSetSpec{UpdateStrategy: nvapi.ComputeDomainDaemonSetUpdateStrategy{
+			Type:          nvapi.ComputeDomainDaemonSetUpdateStrategyRollingUpdate,
+			RollingUpdate: &nvapi.ComputeDomainDaemonSetRollingUpdate{TopologyKey: key},
+		}}}
+	}
+	m := &ComputeDomainDaemonSetManager{}
+
+	assert.NoError(t, m.validateSpec(cdds("")))
+	assert.NoError(t, m.validateSpec(cdds("cloud.google.com/gce-topology-block")))
+	assert.ErrorContains(t, m.validateSpec(cdds("not a key")), "topologyKey")
 }

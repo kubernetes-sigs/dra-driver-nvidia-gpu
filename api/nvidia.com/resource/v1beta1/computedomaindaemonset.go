@@ -185,6 +185,16 @@ type ComputeDomainDaemonSetRollingUpdate struct {
 	// Paused stops starting new batches. A batch in progress completes.
 	// +kubebuilder:validation:Optional
 	Paused bool `json:"paused,omitempty"`
+
+	// TopologyKey is a node label key that groups cliques, for example by
+	// block or Scalable Unit of racks. When set, the update restarts the
+	// cliques of one value of the label at a time, in sorted order, and moves
+	// to the next value once they all run the new revision and are available.
+	// Cliques on nodes without the label go last. A clique whose nodes carry
+	// several values goes with the first of them.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxLength=317
+	TopologyKey string `json:"topologyKey,omitempty"`
 }
 
 // ComputeDomainDaemonSetStatus reports the IMEX daemons.
@@ -207,6 +217,11 @@ type ComputeDomainDaemonSetStatus struct {
 	UpdatedNumberScheduled int32 `json:"updatedNumberScheduled"`
 	// +kubebuilder:validation:Optional
 	NumberCliques int32 `json:"numberCliques"`
+	// UpdatingTopology is the value of rollingUpdate.topologyKey whose
+	// cliques a rolling update is restarting. It is empty when no update is
+	// in progress, or when the cliques left have no such label.
+	// +kubebuilder:validation:Optional
+	UpdatingTopology string `json:"updatingTopology,omitempty"`
 
 	// Cliques reports the daemons of each NVLink clique, sorted by ID.
 	// +kubebuilder:validation:Optional
@@ -230,4 +245,8 @@ type ComputeDomainDaemonSetCliqueStatus struct {
 	// UpdatedNodes is the number of daemons on the current revision.
 	// +kubebuilder:validation:Optional
 	UpdatedNodes int32 `json:"updatedNodes"`
+	// Topology is the value of rollingUpdate.topologyKey that the clique is
+	// updated with.
+	// +kubebuilder:validation:Optional
+	Topology string `json:"topology,omitempty"`
 }

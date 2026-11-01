@@ -46,6 +46,9 @@ type staticClique struct {
 	// nodes should run a daemon.
 	nodes []string
 	pods  []*corev1.Pod
+	// topology is the value of rollingUpdate.topologyKey that the clique is
+	// updated with.
+	topology string
 }
 
 // groupByClique groups daemon pods by the clique of their node. Nodes are
@@ -89,6 +92,40 @@ func groupByClique(nodes []*corev1.Node, pods []*corev1.Pod, nodeSelector map[st
 	return cliques, unclustered
 }
 
+// assignTopology sets the topology of each clique from the topology of its
+// nodes. A clique whose nodes carry several values goes with the first in
+// rollout order, as its daemons restart together.
+func assignTopology(cliques []*staticClique, topologyOf map[string]string) {
+	for _, c := range cliques {
+		names := slices.Clone(c.nodes)
+		for _, pod := range c.pods {
+			names = append(names, pod.Spec.NodeName)
+		}
+		values := make([]string, 0, len(names))
+		for _, name := range names {
+			values = append(values, topologyOf[name])
+		}
+		c.topology = ""
+		if len(values) > 0 {
+			c.topology = slices.MinFunc(values, compareTopology)
+		}
+	}
+}
+
+// compareTopology orders topology values for a rolling update, with the empty
+// value of unlabeled nodes last.
+func compareTopology(a, b string) int {
+	switch {
+	case a == b:
+		return 0
+	case a == "":
+		return 1
+	case b == "":
+		return -1
+	}
+	return strings.Compare(a, b)
+}
+
 func podUpdated(pod *corev1.Pod, hash string) bool {
 	return pod.Annotations[staticDaemonTemplateHashKey] == hash
 }
@@ -110,7 +147,7 @@ func podReadySince(pod *corev1.Pod) (time.Time, bool) {
 func cliqueStatuses(cliques []*staticClique, hash string) []nvapi.ComputeDomainDaemonSetCliqueStatus {
 	statuses := make([]nvapi.ComputeDomainDaemonSetCliqueStatus, 0, len(cliques))
 	for _, c := range cliques {
-		status := nvapi.ComputeDomainDaemonSetCliqueStatus{ID: c.id, Nodes: int32(len(c.nodes))}
+		status := nvapi.ComputeDomainDaemonSetCliqueStatus{ID: c.id, Nodes: int32(len(c.nodes)), Topology: c.topology}
 		for _, pod := range c.pods {
 			if _, ready := podReadySince(pod); ready {
 				status.ReadyNodes++
