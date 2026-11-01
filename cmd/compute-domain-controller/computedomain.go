@@ -19,9 +19,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
@@ -455,6 +457,12 @@ func (m *ComputeDomainManager) onAddOrUpdateSharedDomain(ctx context.Context, cd
 			return fmt.Errorf("error asserting removal of ResourceClaimTemplate: %w", err)
 		}
 
+		if m.config.imexConfig.StaticDaemon() {
+			if err := m.deleteLegacyDaemons(ctx, string(cd.UID)); err != nil {
+				return err
+			}
+		}
+
 		if err := m.RemoveFinalizer(ctx, string(cd.UID)); err != nil {
 			return fmt.Errorf("error removing finalizer: %w", err)
 		}
@@ -481,5 +489,53 @@ func (m *ComputeDomainManager) onAddOrUpdateSharedDomain(ctx context.Context, cd
 		return fmt.Errorf("error updating global status on ComputeDomain '%s/%s': %w", cd.Namespace, cd.Name, err)
 	}
 
+	return nil
+}
+
+// deleteLegacyDaemons deletes the per-ComputeDomain IMEX DaemonSet and daemon
+// ResourceClaimTemplate left by a switch to static IMEX daemons.
+func (m *ComputeDomainManager) deleteLegacyDaemons(ctx context.Context, uid string) error {
+	selector := metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", computeDomainLabelKey, uid)}
+	without := func(finalizers []string) []string {
+		return slices.DeleteFunc(slices.Clone(finalizers), func(f string) bool { return f == computeDomainFinalizer })
+	}
+	for _, namespace := range slices.Compact(slices.Sorted(slices.Values(append([]string{m.config.driverNamespace}, m.config.additionalNamespaces...)))) {
+		daemonSets := m.config.clientsets.Core.AppsV1().DaemonSets(namespace)
+		list, err := daemonSets.List(ctx, selector)
+		if err != nil {
+			return fmt.Errorf("error listing per-ComputeDomain DaemonSets: %w", err)
+		}
+		for i := range list.Items {
+			ds := &list.Items[i]
+			if finalizers := without(ds.Finalizers); len(finalizers) != len(ds.Finalizers) {
+				ds.Finalizers = finalizers
+				if _, err := daemonSets.Update(ctx, ds, metav1.UpdateOptions{}); err != nil && !errors.IsNotFound(err) {
+					return fmt.Errorf("error removing finalizer from DaemonSet %s/%s: %w", ds.Namespace, ds.Name, err)
+				}
+			}
+			if err := daemonSets.Delete(ctx, ds.Name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+				return fmt.Errorf("error deleting DaemonSet %s/%s: %w", ds.Namespace, ds.Name, err)
+			}
+			klog.Infof("Deleted per-ComputeDomain IMEX DaemonSet %s/%s", ds.Namespace, ds.Name)
+		}
+
+		templates := m.config.clientsets.Core.ResourceV1().ResourceClaimTemplates(namespace)
+		rcts, err := templates.List(ctx, metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s,%s=%s", computeDomainLabelKey, uid, computeDomainResourceClaimTemplateTargetLabelKey, computeDomainResourceClaimTemplateTargetDaemon)})
+		if err != nil {
+			return fmt.Errorf("error listing per-ComputeDomain daemon ResourceClaimTemplates: %w", err)
+		}
+		for i := range rcts.Items {
+			rct := &rcts.Items[i]
+			if finalizers := without(rct.Finalizers); len(finalizers) != len(rct.Finalizers) {
+				rct.Finalizers = finalizers
+				if _, err := templates.Update(ctx, rct, metav1.UpdateOptions{}); err != nil && !errors.IsNotFound(err) {
+					return fmt.Errorf("error removing finalizer from ResourceClaimTemplate %s/%s: %w", rct.Namespace, rct.Name, err)
+				}
+			}
+			if err := templates.Delete(ctx, rct.Name, metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+				return fmt.Errorf("error deleting ResourceClaimTemplate %s/%s: %w", rct.Namespace, rct.Name, err)
+			}
+		}
+	}
 	return nil
 }

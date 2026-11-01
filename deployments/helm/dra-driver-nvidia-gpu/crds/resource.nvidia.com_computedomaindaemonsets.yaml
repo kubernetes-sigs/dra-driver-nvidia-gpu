@@ -74,7 +74,11 @@ spec:
                   Image of the IMEX daemon pods. When empty, the driver image at creation
                   is kept, so that driver upgrades do not change the daemons. Set it to
                   upgrade them.
+                maxLength: 1024
                 type: string
+                x-kubernetes-validations:
+                - message: image must not contain spaces
+                  rule: '!self.contains('' '')'
               imagePullSecrets:
                 description: ImagePullSecrets in the driver namespace for the IMEX
                   daemon pods.
@@ -101,7 +105,11 @@ spec:
                   type: string
                 description: IMEXConfig overrides, or adds, nvidia-imex config file
                   settings.
+                maxProperties: 64
                 type: object
+                x-kubernetes-validations:
+                - message: imexConfig keys must be nvidia-imex setting names
+                  rule: self.all(k, k.matches('^[A-Za-z_][A-Za-z0-9_]*$'))
               logVerbosity:
                 default: 1
                 description: LogVerbosity of the IMEX daemon pods.
