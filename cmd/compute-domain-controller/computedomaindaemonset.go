@@ -293,6 +293,9 @@ func (m *ComputeDomainDaemonSetManager) sync(ctx context.Context) (time.Duration
 	}
 
 	pods := m.pods(cdds.UID)
+	if err := m.realignDaemons(ctx, pods); err != nil {
+		return 0, err
+	}
 	if err := m.removeStaleDaemons(ctx, cdds, pods); err != nil {
 		return 0, err
 	}
@@ -619,23 +622,57 @@ func (m *ComputeDomainDaemonSetManager) restartingCliques(cliques []*staticCliqu
 	return restarting
 }
 
-// removeStaleDaemons removes clique entries of daemons whose pod is gone
-// without unregistering, for example with its node. A miss in the informer
-// is confirmed against the API server first.
-func (m *ComputeDomainDaemonSetManager) removeStaleDaemons(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, pods []*corev1.Pod) error {
-	running := make(map[string]bool, len(pods))
-	for _, pod := range pods {
-		running[pod.Spec.NodeName] = true
+// realignDaemons restarts the daemons whose node moved to another NVLink
+// partition, so that their new pod joins the IMEX domain of the new one. The
+// partition change disrupted both IMEX domains already, so this does not wait
+// for the update strategy.
+func (m *ComputeDomainDaemonSetManager) realignDaemons(ctx context.Context, pods []*corev1.Pod) error {
+	partitionOf := make(map[string]string)
+	for _, node := range m.nodes() {
+		partitionOf[node.Name] = nodePartition(node)
 	}
-	var live map[string]bool
+	for _, pod := range pods {
+		joined, ok := daemonPartition(pod)
+		current := partitionOf[pod.Spec.NodeName]
+		if !ok || current == "" || joined == current || pod.DeletionTimestamp != nil {
+			continue
+		}
+		klog.Infof("Node %s moved from NVLink partition %q to %q, restarting its static IMEX daemon %s", pod.Spec.NodeName, joined, current, pod.Name)
+		err := m.config.clientsets.Core.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &pod.UID},
+		})
+		if err != nil && !errors.IsNotFound(err) && !errors.IsConflict(err) {
+			return fmt.Errorf("error restarting IMEX daemon pod %s: %w", pod.Name, err)
+		}
+	}
+	return nil
+}
+
+// daemonInPartition reports whether a pod still serves the daemon of a node in
+// a partition. A daemon that has not joined a partition yet counts, as it
+// may still join that one.
+func daemonInPartition(pods []*corev1.Pod, node, partition string) bool {
+	return slices.ContainsFunc(pods, func(pod *corev1.Pod) bool {
+		joined, ok := daemonPartition(pod)
+		return pod.Spec.NodeName == node && (!ok || joined == partition)
+	})
+}
+
+// removeStaleDaemons removes clique entries of daemons whose pod is gone
+// without unregistering, for example with its node, or that moved to another
+// partition. A miss in the informer is confirmed against the API server
+// first.
+func (m *ComputeDomainDaemonSetManager) removeStaleDaemons(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, pods []*corev1.Pod) error {
+	var live []*corev1.Pod
 	for _, obj := range m.cliqueInf.GetStore().List() {
 		clique, ok := obj.(*nvapi.ComputeDomainClique)
 		if !ok || clique.Labels[computeDomainDaemonSetLabelKey] != string(cdds.UID) {
 			continue
 		}
+		partition := clique.Labels[computeDomainCliqueLabelKey]
 		var keep []*nvapi.ComputeDomainDaemonInfo
 		for _, daemon := range clique.Daemons {
-			if running[daemon.NodeName] {
+			if daemonInPartition(pods, daemon.NodeName, partition) {
 				keep = append(keep, daemon)
 				continue
 			}
@@ -646,12 +683,12 @@ func (m *ComputeDomainDaemonSetManager) removeStaleDaemons(ctx context.Context, 
 				if err != nil {
 					return fmt.Errorf("error listing static IMEX daemon pods: %w", err)
 				}
-				live = make(map[string]bool, len(list.Items))
+				live = make([]*corev1.Pod, 0, len(list.Items))
 				for i := range list.Items {
-					live[list.Items[i].Spec.NodeName] = true
+					live = append(live, &list.Items[i])
 				}
 			}
-			if live[daemon.NodeName] {
+			if daemonInPartition(live, daemon.NodeName, partition) {
 				keep = append(keep, daemon)
 			}
 		}
