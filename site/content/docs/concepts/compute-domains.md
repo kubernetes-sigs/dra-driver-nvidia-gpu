@@ -17,8 +17,11 @@ The `resources.computeDomains.imex.daemonLifecycle` Helm value determines who ru
 |---|---|
 | `perComputeDomain` | By default, the DRA Driver creates one `nvidia-imex` DaemonSet for each `ComputeDomain` and tracks daemon readiness through `ComputeDomainClique` resources. |
 | `hostManaged` | You run `nvidia-imex` as a host service with a ready command socket, and the DRA Driver does not create daemon DaemonSets or daemon claims; this mode requires the `HostManagedIMEXDaemon` feature gate. |
+| `static` | The DRA Driver runs one static `nvidia-imex` daemon per node, described by the `ComputeDomainDaemonSet` you create, shared by all ComputeDomains with their own channels. It requires the `ComputeDomainDaemonSet` and `ComputeDomainChannelReservations` feature gates. See [Static IMEX daemons](#static-imex-daemons). |
 
 With `hostManaged`, all ComputeDomains share the IMEX daemon of a node. The [`ComputeDomainChannelReservations`](../reference/feature-gates.md) feature gate gives each workload `ResourceClaimTemplate` its own channel, so that they cannot reach each other's memory.
+
+With `static`, one long-lived IMEX daemon per node, from the [`ComputeDomainDaemonSet`](#static-imex-daemons), is shared by all ComputeDomains, as with `hostManaged`.
 
 The `imex.mode` and `imex.isolation` values of earlier releases are deprecated. `imex.mode=hostManaged` still selects `daemonLifecycle=hostManaged`, and `imex.isolation` is ignored.
 
@@ -55,6 +58,18 @@ per-ComputeDomain daemon pods, the controller disables its
 the health of the host service.
 
 For service and socket configuration, see [Host-managed IMEX](../prerequisites.md#host-managed-imex).
+
+## Static IMEX daemons
+
+With `daemonLifecycle: static`, the IMEX daemons are static and shared by all ComputeDomains:
+
+1. You create the cluster-scoped `ComputeDomainDaemonSet` named `default`. Helm does not manage it, so driver upgrades do not restart the daemons.
+2. The `compute-domain-controller` runs one daemon on every node with the `nvidia.com/gpu.clique` label, from one DaemonSet in the driver namespace.
+3. Each daemon joins the IMEX domain of its NVLink clique through a `ComputeDomainClique` labeled with the `ComputeDomainDaemonSet` UID. Clique membership, DNS names and IP changes work as with per-ComputeDomain daemons.
+4. ComputeDomains work as in host-managed mode with channel reservations. Their claims get channels that are unique in the NVLink clique, and several ComputeDomains can share a node.
+5. When a workload pod claims a channel, the `compute-domain-kubelet-plugin` waits for the static daemon of its node to be ready, then injects the channel of its claim.
+
+Updates of the daemons restart whole cliques, either when you delete their pods or in batches of cliques. See [Static IMEX daemons](../guides/static-imex-daemons.md).
 
 ## Channel reservations
 
