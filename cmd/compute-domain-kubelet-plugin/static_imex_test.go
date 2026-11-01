@@ -21,10 +21,12 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 
 	"github.com/stretchr/testify/assert"
@@ -177,4 +179,24 @@ func TestCliqueIDRefreshInterval(t *testing.T) {
 
 	perComputeDomain := &ComputeDomainManager{config: driverManagedConfig()}
 	assert.Equal(t, gpuCliqueLabelRefreshInterval, perComputeDomain.cliqueIDRefreshInterval())
+}
+
+func TestUnprepareStaticDaemonRemovesLegacyNodeLabel(t *testing.T) {
+	// The node ran the per-ComputeDomain IMEX daemon of cd-a before the
+	// switch to static daemons, whose daemon waits for the label to go.
+	core := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name: "node-1", Labels: map[string]string{computeDomainLabelKey: "cd-a"},
+	}})
+	state := staticTestState(t, testCDDS())
+	state.config.clientsets.Core = core
+	status := claimStatus(
+		[]resourceapi.DeviceRequestAllocationResult{allocationResult("channel", DriverName, "channel-0", nil)},
+		opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"channel"}, channelConfig("cd-a")),
+	)
+
+	require.NoError(t, state.unprepareDevices(context.Background(), "claim-uid", &status, checkpointWithClaims(nil)))
+
+	node, err := core.CoreV1().Nodes().Get(context.Background(), "node-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.NotContains(t, node.Labels, computeDomainLabelKey)
 }
