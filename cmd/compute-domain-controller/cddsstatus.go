@@ -49,6 +49,9 @@ type staticClique struct {
 	// topology is the value of rollingUpdate.topologyKey that the clique is
 	// updated with.
 	topology string
+	// stalled tells why the clique is unavailable past the progress deadline
+	// of a rolling update, or is empty.
+	stalled string
 }
 
 // groupByClique groups daemon pods by the clique of their node. Nodes are
@@ -147,7 +150,7 @@ func podReadySince(pod *corev1.Pod) (time.Time, bool) {
 func cliqueStatuses(cliques []*staticClique, hash string) []nvapi.ComputeDomainDaemonSetCliqueStatus {
 	statuses := make([]nvapi.ComputeDomainDaemonSetCliqueStatus, 0, len(cliques))
 	for _, c := range cliques {
-		status := nvapi.ComputeDomainDaemonSetCliqueStatus{ID: c.id, Nodes: int32(len(c.nodes)), Topology: c.topology}
+		status := nvapi.ComputeDomainDaemonSetCliqueStatus{ID: c.id, Nodes: int32(len(c.nodes)), Topology: c.topology, StalledReason: c.stalled}
 		for _, pod := range c.pods {
 			if _, ready := podReadySince(pod); ready {
 				status.ReadyNodes++
