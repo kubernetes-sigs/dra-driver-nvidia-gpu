@@ -33,7 +33,8 @@ const (
 	// daemon is ready.
 	ComputeDomainDaemonSetConditionReady = "Ready"
 	// ComputeDomainDaemonSetConditionRolloutInProgress is true while daemons
-	// run an outdated revision.
+	// run an outdated revision. Its reason is ProgressDeadlineExceeded while
+	// cliques of a rolling update are stalled.
 	ComputeDomainDaemonSetConditionRolloutInProgress = "RolloutInProgress"
 	// ComputeDomainDaemonSetConditionDeletionBlocked is true while deletion
 	// waits for workloads that use IMEX channels.
@@ -186,6 +187,17 @@ type ComputeDomainDaemonSetRollingUpdate struct {
 	// +kubebuilder:validation:Optional
 	Paused bool `json:"paused,omitempty"`
 
+	// ProgressDeadlineSeconds is how long the daemons of a clique may take to
+	// become available after their last change, before the rollout reports
+	// the clique as stalled. A stalled clique keeps its place in the batch,
+	// so that a broken revision does not spread. It must be greater than
+	// minReadySeconds. The default matches the 20 minutes the startup probe
+	// gives a daemon to become ready.
+	// +kubebuilder:default:=1200
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Optional
+	ProgressDeadlineSeconds int32 `json:"progressDeadlineSeconds,omitempty"`
+
 	// TopologyKey is a node label key that groups cliques, for example by
 	// block or Scalable Unit of racks. When set, the update restarts the
 	// cliques of one value of the label at a time, in sorted order, and moves
@@ -249,4 +261,8 @@ type ComputeDomainDaemonSetCliqueStatus struct {
 	// updated with.
 	// +kubebuilder:validation:Optional
 	Topology string `json:"topology,omitempty"`
+	// StalledReason tells which nodes keep the clique unavailable past
+	// rollingUpdate.progressDeadlineSeconds, and why.
+	// +kubebuilder:validation:Optional
+	StalledReason string `json:"stalledReason,omitempty"`
 }

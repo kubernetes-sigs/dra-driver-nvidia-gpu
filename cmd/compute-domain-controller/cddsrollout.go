@@ -17,8 +17,10 @@ limitations under the License.
 package main
 
 import (
+	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -35,17 +37,24 @@ func (c *staticClique) hasOutdatedPods(hash string) bool {
 	})
 }
 
-// availability reports whether every ready node of a clique runs a daemon
-// that has been ready for minReady, or else how long until they will have
-// been. Unready nodes are left out, so that a failed node does not hold up a
-// rollout.
-func (c *staticClique) availability(nodeReady map[string]bool, minReady time.Duration, now time.Time) (bool, time.Duration) {
+// podsByNode returns the daemon pod of each node of a clique, preferring a
+// pod that is not being deleted.
+func (c *staticClique) podsByNode() map[string]*corev1.Pod {
 	podOn := make(map[string]*corev1.Pod, len(c.pods))
 	for _, pod := range c.pods {
 		if existing, ok := podOn[pod.Spec.NodeName]; !ok || existing.DeletionTimestamp != nil {
 			podOn[pod.Spec.NodeName] = pod
 		}
 	}
+	return podOn
+}
+
+// availability reports whether every node of a clique that holds up a rollout
+// runs a daemon that has been ready for minReady, or else how long until they
+// will have been. Unready and cordoned nodes are left out, so that a failed
+// node does not hold up a rollout.
+func (c *staticClique) availability(nodeReady map[string]bool, minReady time.Duration, now time.Time) (bool, time.Duration) {
+	podOn := c.podsByNode()
 	var wait time.Duration
 	for _, node := range c.nodes {
 		if !nodeReady[node] {
@@ -80,7 +89,94 @@ func maxUnavailableCliques(ru *nvapi.ComputeDomainDaemonSetRollingUpdate, clique
 	return max(n, 1)
 }
 
-const defaultMinReadySeconds = 30
+// lastChange returns when the daemons of a clique last changed, as their pods
+// were created or deleted. It is derived from the pods, so that it survives a
+// restart of the controller.
+func (c *staticClique) lastChange() time.Time {
+	var last time.Time
+	for _, pod := range c.pods {
+		if t := pod.CreationTimestamp.Time; t.After(last) {
+			last = t
+		}
+		if pod.DeletionTimestamp != nil && pod.DeletionTimestamp.After(last) {
+			last = pod.DeletionTimestamp.Time
+		}
+	}
+	return last
+}
+
+// maxStalledNodes bounds the nodes a stalled reason lists, as a broken
+// revision usually fails all nodes alike.
+const maxStalledNodes = 3
+
+// unavailableReason tells which nodes keep a clique unavailable, and why, so
+// that admins can act on them. It is empty when the daemons are ready.
+func (c *staticClique) unavailableReason(nodeReady map[string]bool) string {
+	podOn := c.podsByNode()
+	var reasons []string
+	blocked := 0
+	for _, node := range c.nodes {
+		if !nodeReady[node] {
+			continue
+		}
+		reason := "no IMEX daemon pod"
+		if pod, ok := podOn[node]; ok {
+			reason = podUnavailableReason(pod)
+		}
+		if reason == "" {
+			continue
+		}
+		blocked++
+		if len(reasons) < maxStalledNodes {
+			reasons = append(reasons, fmt.Sprintf("node %s: %s", node, reason))
+		}
+	}
+	if blocked > len(reasons) {
+		reasons = append(reasons, fmt.Sprintf("%d more nodes", blocked-len(reasons)))
+	}
+	return strings.Join(reasons, ", ")
+}
+
+// podUnavailableReason tells why a daemon pod is not ready, from the most
+// specific state the kubelet reports, or is empty when it is ready. It leaves
+// out counters such as restarts, so that the status does not change on every
+// sync of a large cluster.
+func podUnavailableReason(pod *corev1.Pod) string {
+	if pod.DeletionTimestamp != nil {
+		return fmt.Sprintf("pod %s terminating since %s", pod.Name, pod.DeletionTimestamp.UTC().Format(time.RFC3339))
+	}
+	if _, ready := podReadySince(pod); ready {
+		return ""
+	}
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse {
+			return fmt.Sprintf("pod %s not scheduled: %s", pod.Name, cond.Message)
+		}
+	}
+	for _, status := range slices.Concat(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses) {
+		if waiting := status.State.Waiting; waiting != nil && waiting.Reason != "" {
+			return fmt.Sprintf("pod %s container %s %s", pod.Name, status.Name, waiting.Reason)
+		}
+		if terminated := status.State.Terminated; terminated != nil && terminated.ExitCode != 0 {
+			return fmt.Sprintf("pod %s container %s exited with code %d", pod.Name, status.Name, terminated.ExitCode)
+		}
+	}
+	return fmt.Sprintf("pod %s not ready in phase %s", pod.Name, pod.Status.Phase)
+}
+
+const (
+	defaultMinReadySeconds         = 30
+	defaultProgressDeadlineSeconds = 1200
+)
+
+// progressDeadline resolves the progress deadline of a rolling update. The API
+// defaults it within rollingUpdate, which may be omitted.
+func progressDeadline(ru *nvapi.ComputeDomainDaemonSetRollingUpdate) time.Duration {
+	if ru == nil || ru.ProgressDeadlineSeconds <= 0 {
+		return defaultProgressDeadlineSeconds * time.Second
+	}
+	return time.Duration(ru.ProgressDeadlineSeconds) * time.Second
+}
 
 // rolloutPlan is the next step of a rolling update.
 type rolloutPlan struct {
@@ -91,6 +187,8 @@ type rolloutPlan struct {
 	requeueAfter time.Duration
 	// topology is the value of rollingUpdate.topologyKey being updated.
 	topology string
+	// stalled holds the cliques unavailable past the progress deadline.
+	stalled []*staticClique
 }
 
 // planCliqueRollout restarts whole cliques together, at most
@@ -139,6 +237,13 @@ func planCliqueRollout(cliques []*staticClique, unclustered []*corev1.Pod, hash 
 			unavailableCandidates = append(unavailableCandidates, c)
 		case !available || restarting[c.id]:
 			inProgress++
+			// A stalled clique keeps its place in the batch, so that a broken
+			// revision stops the rollout instead of spreading.
+			if !restarting[c.id] && wait == 0 && !c.lastChange().IsZero() && now.Sub(c.lastChange()) > progressDeadline(ru) {
+				if c.stalled = c.unavailableReason(nodeReady); c.stalled != "" {
+					plan.stalled = append(plan.stalled, c)
+				}
+			}
 		default:
 			continue
 		}

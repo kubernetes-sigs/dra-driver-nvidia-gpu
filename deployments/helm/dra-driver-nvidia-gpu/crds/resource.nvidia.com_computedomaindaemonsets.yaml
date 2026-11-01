@@ -226,6 +226,18 @@ spec:
                         description: Paused stops starting new batches. A batch in
                           progress completes.
                         type: boolean
+                      progressDeadlineSeconds:
+                        default: 1200
+                        description: |-
+                          ProgressDeadlineSeconds is how long the daemons of a clique may take to
+                          become available after their last change, before the rollout reports
+                          the clique as stalled. A stalled clique keeps its place in the batch,
+                          so that a broken revision does not spread. It must be greater than
+                          minReadySeconds. The default matches the 20 minutes the startup probe
+                          gives a daemon to become ready.
+                        format: int32
+                        minimum: 1
+                        type: integer
                       topologyKey:
                         description: |-
                           TopologyKey is a node label key that groups cliques, for example by
@@ -271,6 +283,11 @@ spec:
                     readyNodes:
                       format: int32
                       type: integer
+                    stalledReason:
+                      description: |-
+                        StalledReason tells which nodes keep the clique unavailable past
+                        rollingUpdate.progressDeadlineSeconds, and why.
+                      type: string
                     topology:
                       description: |-
                         Topology is the value of rollingUpdate.topologyKey that the clique is

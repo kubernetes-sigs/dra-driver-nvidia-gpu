@@ -281,3 +281,125 @@ func TestValidateSpecTopologyKey(t *testing.T) {
 	assert.NoError(t, m.validateSpec(cdds("cloud.google.com/gce-topology-block")))
 	assert.ErrorContains(t, m.validateSpec(cdds("not a key")), "topologyKey")
 }
+
+func TestPlanCliqueRolloutReportsStalledCliques(t *testing.T) {
+	// broken returns an updated, unready pod created age ago.
+	broken := func(pod *corev1.Pod, age time.Duration) *corev1.Pod {
+		pod = daemonPod(pod.Spec.NodeName, "new", -1)
+		pod.CreationTimestamp = metav1.NewTime(rolloutNow.Add(-age))
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name: "compute-domain-daemon", RestartCount: 7,
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+		}}
+		return pod
+	}
+	tests := map[string]struct {
+		mutate      func(nodes []*corev1.Node, pods []*corev1.Pod) []*corev1.Pod
+		restarting  map[string]bool
+		wantStalled string
+		wantCliques []string
+	}{
+		"a clique unavailable past the deadline stalls the rollout": {
+			mutate: func(_ []*corev1.Node, pods []*corev1.Pod) []*corev1.Pod {
+				pods[0], pods[1] = broken(pods[0], 21*time.Minute), broken(pods[1], 21*time.Minute)
+				return pods
+			},
+			wantStalled: "node c0-n0: pod imex-c0-n0 container compute-domain-daemon CrashLoopBackOff, node c0-n1: pod imex-c0-n1 container compute-domain-daemon CrashLoopBackOff",
+		},
+		"a clique within the deadline is in progress": {
+			mutate: func(_ []*corev1.Node, pods []*corev1.Pod) []*corev1.Pod {
+				pods[0], pods[1] = broken(pods[0], 15*time.Minute), broken(pods[1], 15*time.Minute)
+				return pods
+			},
+		},
+		"a clique being restarted is in progress": {
+			mutate: func(_ []*corev1.Node, pods []*corev1.Pod) []*corev1.Pod {
+				pods[0] = broken(pods[0], 21*time.Minute)
+				return pods
+			},
+			restarting: map[string]bool{"c0": true},
+		},
+		"a cordoned node does not hold up the rollout": {
+			mutate: func(nodes []*corev1.Node, pods []*corev1.Pod) []*corev1.Pod {
+				pods[0] = broken(pods[0], 21*time.Minute)
+				pods[1] = daemonPod(pods[1].Spec.NodeName, "new", time.Hour)
+				nodes[0].Spec.Unschedulable = true
+				return pods
+			},
+			wantCliques: []string{"c1"},
+		},
+		"a missing daemon pod": {
+			mutate: func(_ []*corev1.Node, pods []*corev1.Pod) []*corev1.Pod {
+				pods[1] = broken(pods[1], 21*time.Minute)
+				return pods[1:]
+			},
+			wantStalled: "node c0-n0: no IMEX daemon pod, node c0-n1: pod imex-c0-n1 container compute-domain-daemon CrashLoopBackOff",
+		},
+		"a pod stuck terminating": {
+			mutate: func(_ []*corev1.Node, pods []*corev1.Pod) []*corev1.Pod {
+				pods[0] = broken(pods[0], time.Hour)
+				pods[0].DeletionTimestamp = ptr.To(metav1.NewTime(rolloutNow.Add(-30 * time.Minute)))
+				pods[1] = daemonPod(pods[1].Spec.NodeName, "new", time.Hour)
+				return pods
+			},
+			wantStalled: "node c0-n0: pod imex-c0-n0 terminating since 2026-10-25T11:30:00Z",
+		},
+		"an unschedulable pod": {
+			mutate: func(_ []*corev1.Node, pods []*corev1.Pod) []*corev1.Pod {
+				pods[0] = broken(pods[0], 21*time.Minute)
+				pods[0].Status.Phase = corev1.PodPending
+				pods[0].Status.Conditions = []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Message: "0/1 nodes are available"}}
+				pods[1] = daemonPod(pods[1].Spec.NodeName, "new", time.Hour)
+				return pods
+			},
+			wantStalled: "node c0-n0: pod imex-c0-n0 not scheduled: 0/1 nodes are available",
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			nodes, pods := testCliques(2, 2, "old")
+			pods = tc.mutate(nodes, pods)
+			cliques, unclustered := groupByClique(nodes, pods, nil)
+
+			plan := planCliqueRollout(cliques, unclustered, "new", nil, nodeReadiness(nodes), nil, tc.restarting, rolloutNow)
+
+			var stalled []string
+			for _, c := range plan.stalled {
+				stalled = append(stalled, c.stalled)
+			}
+			if tc.wantStalled == "" {
+				assert.Empty(t, stalled)
+			} else {
+				assert.Equal(t, []string{tc.wantStalled}, stalled)
+			}
+			assert.Equal(t, tc.wantCliques, plan.cliques, "a clique in progress or stalled uses up the batch")
+		})
+	}
+}
+
+func TestUnavailableReasonListsFewNodes(t *testing.T) {
+	nodes, pods := testCliques(1, 5, "h")
+	for i := range pods {
+		pods[i] = daemonPod(pods[i].Spec.NodeName, "h", -1)
+	}
+	cliques, _ := groupByClique(nodes, pods, nil)
+
+	reason := cliques[0].unavailableReason(nodeReadiness(nodes))
+
+	assert.Equal(t, "node c0-n0: pod imex-c0-n0 not ready in phase Running, "+
+		"node c0-n1: pod imex-c0-n1 not ready in phase Running, "+
+		"node c0-n2: pod imex-c0-n2 not ready in phase Running, 2 more nodes", reason)
+}
+
+func TestValidateSpecProgressDeadline(t *testing.T) {
+	cdds := func(ru *nvapi.ComputeDomainDaemonSetRollingUpdate) *nvapi.ComputeDomainDaemonSet {
+		return &nvapi.ComputeDomainDaemonSet{Spec: nvapi.ComputeDomainDaemonSetSpec{UpdateStrategy: nvapi.ComputeDomainDaemonSetUpdateStrategy{
+			Type: nvapi.ComputeDomainDaemonSetUpdateStrategyRollingUpdate, RollingUpdate: ru,
+		}}}
+	}
+	m := &ComputeDomainDaemonSetManager{}
+
+	assert.NoError(t, m.validateSpec(cdds(&nvapi.ComputeDomainDaemonSetRollingUpdate{MinReadySeconds: 30})))
+	assert.ErrorContains(t, m.validateSpec(cdds(&nvapi.ComputeDomainDaemonSetRollingUpdate{MinReadySeconds: 30, ProgressDeadlineSeconds: 30})), "progressDeadlineSeconds")
+	assert.ErrorContains(t, m.validateSpec(cdds(&nvapi.ComputeDomainDaemonSetRollingUpdate{MinReadySeconds: 1200})), "progressDeadlineSeconds", "the default deadline applies")
+}

@@ -358,6 +358,63 @@ func TestComputeDomainDaemonSetRollingUpdateByTopology(t *testing.T) {
 	assert.Contains(t, rollout.Message, "updating cliques with example.com/block=a")
 }
 
+func TestComputeDomainDaemonSetReportsStalledRollout(t *testing.T) {
+	nodes, _ := testCliques(2, 1, "")
+	cdds := testComputeDomainDaemonSet()
+	cdds.Spec.UpdateStrategy = nvapi.ComputeDomainDaemonSetUpdateStrategy{
+		Type:          nvapi.ComputeDomainDaemonSetUpdateStrategyRollingUpdate,
+		RollingUpdate: &nvapi.ComputeDomainDaemonSetRollingUpdate{},
+	}
+	objects := []runtime.Object{cdds}
+	for _, node := range nodes {
+		objects = append(objects, node)
+	}
+	f := newCDDSFixture(t, objects...)
+	f.sync(t)
+	hash := f.daemonSet(t).Spec.Template.Annotations[staticDaemonTemplateHashKey]
+
+	// c0 runs the new revision but its daemon crashes, c1 waits for it.
+	crashing := daemonPod("c0-n0", hash, -1)
+	crashing.CreationTimestamp = metav1.NewTime(rolloutNow.Add(-time.Hour))
+	crashing.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "compute-domain-daemon", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+	}}
+	for _, pod := range []*corev1.Pod{crashing, daemonPod("c1-n0", "previous", time.Hour)} {
+		_, err := f.core.CoreV1().Pods("driver").Create(context.Background(), pod, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+	ds := f.daemonSet(t)
+	ds.Status.DesiredNumberScheduled = 2
+	_, err := f.core.AppsV1().DaemonSets("driver").UpdateStatus(context.Background(), ds, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	f.refresh(t)
+	f.core.ClearActions()
+	f.sync(t)
+
+	assert.Empty(t, f.deletedPods(), "a stalled clique stops the rollout")
+	status := f.cdds(t).Status
+	assert.Equal(t, "node c0-n0: pod imex-c0-n0 container compute-domain-daemon ImagePullBackOff", status.Cliques[0].StalledReason)
+	assert.Empty(t, status.Cliques[1].StalledReason)
+	rollout := meta.FindStatusCondition(status.Conditions, nvapi.ComputeDomainDaemonSetConditionRolloutInProgress)
+	require.NotNil(t, rollout)
+	assert.Equal(t, "ProgressDeadlineExceeded", rollout.Reason)
+	assert.Contains(t, rollout.Message, "c0 (node c0-n0: pod imex-c0-n0 container compute-domain-daemon ImagePullBackOff)")
+
+	// Cordoning the broken node lets the rollout continue.
+	node, err := f.core.CoreV1().Nodes().Get(context.Background(), "c0-n0", metav1.GetOptions{})
+	require.NoError(t, err)
+	node.Spec.Unschedulable = true
+	_, err = f.core.CoreV1().Nodes().Update(context.Background(), node, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	f.refresh(t)
+	f.core.ClearActions()
+	f.sync(t)
+
+	assert.Equal(t, []string{"imex-c1-n0"}, f.deletedPods())
+	rollout = meta.FindStatusCondition(f.cdds(t).Status.Conditions, nvapi.ComputeDomainDaemonSetConditionRolloutInProgress)
+	assert.Equal(t, "RollingUpdate", rollout.Reason)
+}
+
 func TestComputeDomainDaemonSetDeletion(t *testing.T) {
 	cdds := testComputeDomainDaemonSet()
 	clique := &nvapi.ComputeDomainClique{ObjectMeta: metav1.ObjectMeta{

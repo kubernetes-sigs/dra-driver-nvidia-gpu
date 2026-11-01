@@ -332,7 +332,7 @@ func (m *ComputeDomainDaemonSetManager) sync(ctx context.Context) (time.Duration
 			return 0, err
 		}
 	}
-	if err := m.updateStatus(ctx, cdds, state, cliques, pods, hash, plan.topology); err != nil {
+	if err := m.updateStatus(ctx, cdds, state, cliques, pods, hash, plan); err != nil {
 		return 0, err
 	}
 	return plan.requeueAfter, nil
@@ -561,9 +561,16 @@ func (m *ComputeDomainDaemonSetManager) validateSpec(cdds *nvapi.ComputeDomainDa
 			errs = append(errs, fmt.Errorf("spec.nodeSelector value %q: %s", value, msg))
 		}
 	}
-	if ru := cdds.Spec.UpdateStrategy.RollingUpdate; ru != nil && ru.TopologyKey != "" {
-		for _, msg := range validation.IsQualifiedName(ru.TopologyKey) {
-			errs = append(errs, fmt.Errorf("spec.updateStrategy.rollingUpdate.topologyKey %q: %s", ru.TopologyKey, msg))
+	if ru := cdds.Spec.UpdateStrategy.RollingUpdate; ru != nil {
+		if ru.TopologyKey != "" {
+			for _, msg := range validation.IsQualifiedName(ru.TopologyKey) {
+				errs = append(errs, fmt.Errorf("spec.updateStrategy.rollingUpdate.topologyKey %q: %s", ru.TopologyKey, msg))
+			}
+		}
+		// As for Deployments, the deadline must leave the daemons time to
+		// become available.
+		if deadline := progressDeadline(ru); deadline <= time.Duration(ru.MinReadySeconds)*time.Second {
+			errs = append(errs, fmt.Errorf("spec.updateStrategy.rollingUpdate.progressDeadlineSeconds (%s) must be greater than minReadySeconds (%ds)", deadline, ru.MinReadySeconds))
 		}
 	}
 	if name := cdds.Spec.PriorityClassName; name != "" {
@@ -756,6 +763,11 @@ func (m *ComputeDomainDaemonSetManager) nodes() []*corev1.Node {
 func nodeReadiness(nodes []*corev1.Node) map[string]bool {
 	ready := make(map[string]bool, len(nodes))
 	for _, node := range nodes {
+		// Admins cordon nodes they take out of service, which lets a rollout
+		// move past a node that cannot run a daemon.
+		if node.Spec.Unschedulable {
+			continue
+		}
 		for _, c := range node.Status.Conditions {
 			if c.Type == corev1.NodeReady {
 				ready[node.Name] = c.Status == corev1.ConditionTrue
@@ -781,6 +793,9 @@ func (m *ComputeDomainDaemonSetManager) rollout(ctx context.Context, cdds *nvapi
 	plan := planCliqueRollout(cliques, unclustered, hash, ru, nodeReadiness(nodes), topologyOf, m.restartingCliques(cliques, hash, now), now)
 	if len(plan.cliques) > 0 {
 		klog.Infof("Restarting the static IMEX daemons of cliques %v", plan.cliques)
+	}
+	for _, c := range plan.stalled {
+		klog.Warningf("Rolling update of static IMEX daemons stalled on clique %s: %s", c.id, c.stalled)
 	}
 	for _, pod := range plan.pods {
 		err := m.config.clientsets.Core.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
@@ -901,7 +916,7 @@ func (m *ComputeDomainDaemonSetManager) removeStaleDaemons(ctx context.Context, 
 	return nil
 }
 
-func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, state *staticDaemonSetState, cliques []*staticClique, pods []*corev1.Pod, hash, updatingTopology string) error {
+func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, state *staticDaemonSetState, cliques []*staticClique, pods []*corev1.Pod, hash string, plan rolloutPlan) error {
 	ds := state.ds
 	newCDDS := cdds.DeepCopy()
 	status := &newCDDS.Status
@@ -917,7 +932,7 @@ func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *
 	}
 	status.Cliques = cliqueStatuses(cliques, hash)
 	status.NumberCliques = int32(len(status.Cliques))
-	status.UpdatingTopology = updatingTopology
+	status.UpdatingTopology = plan.topology
 
 	ready := metav1.Condition{Type: nvapi.ComputeDomainDaemonSetConditionReady, Status: metav1.ConditionFalse, Reason: "DaemonsNotReady",
 		Message: fmt.Sprintf("%d of %d IMEX daemons are ready", status.NumberReady, status.DesiredNumberScheduled)}
@@ -931,12 +946,14 @@ func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *
 		switch {
 		case cdds.Spec.UpdateStrategy.Type != nvapi.ComputeDomainDaemonSetUpdateStrategyRollingUpdate:
 			rollout.Reason, rollout.Message = "WaitingForPodDeletion", fmt.Sprintf("%d IMEX daemons run an outdated revision, delete their pods to update them", outdated)
+		case len(plan.stalled) > 0:
+			rollout.Reason, rollout.Message = "ProgressDeadlineExceeded", stalledMessage(plan.stalled, progressDeadline(cdds.Spec.UpdateStrategy.RollingUpdate))
 		case cdds.Spec.UpdateStrategy.RollingUpdate != nil && cdds.Spec.UpdateStrategy.RollingUpdate.Paused:
 			rollout.Reason, rollout.Message = "Paused", fmt.Sprintf("%d IMEX daemons run an outdated revision", outdated)
 		case cdds.Spec.UpdateStrategy.RollingUpdate != nil && cdds.Spec.UpdateStrategy.RollingUpdate.TopologyKey != "":
 			key := cdds.Spec.UpdateStrategy.RollingUpdate.TopologyKey
-			where := fmt.Sprintf("updating cliques with %s=%s", key, updatingTopology)
-			if updatingTopology == "" {
+			where := fmt.Sprintf("updating cliques with %s=%s", key, plan.topology)
+			if plan.topology == "" {
 				where = fmt.Sprintf("updating cliques without label %s", key)
 			}
 			rollout.Reason, rollout.Message = "RollingUpdate", fmt.Sprintf("%d IMEX daemons run an outdated revision, %s", outdated, where)
@@ -964,6 +981,18 @@ func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *
 	}
 	meta.RemoveStatusCondition(&status.Conditions, nvapi.ComputeDomainDaemonSetConditionDeletionBlocked)
 	return m.writeStatus(ctx, cdds, newCDDS)
+}
+
+// stalledMessage tells admins which cliques stall a rolling update, and how to
+// let it continue.
+func stalledMessage(stalled []*staticClique, deadline time.Duration) string {
+	cliques := make([]string, 0, len(stalled))
+	for _, c := range stalled {
+		cliques = append(cliques, fmt.Sprintf("%s (%s)", c.id, c.stalled))
+	}
+	return truncate(fmt.Sprintf("%d cliques are not available %s after their last change, and the rollout waits for them. "+
+		"Fix or roll back spec.image, cordon nodes that cannot run a daemon, or delete stuck pods: %s",
+		len(stalled), deadline, strings.Join(cliques, ", ")))
 }
 
 // reportDegraded records why the daemons cannot be reconciled. It is best
