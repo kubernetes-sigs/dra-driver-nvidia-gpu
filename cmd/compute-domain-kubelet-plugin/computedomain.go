@@ -51,6 +51,10 @@ const (
 	gpuCliqueLabelKey = "nvidia.com/gpu.clique"
 
 	gpuCliqueLabelRefreshInterval = 10 * time.Minute
+	// staticDaemonCliqueRefreshInterval detects NVLink partition changes
+	// sooner, as static IMEX daemons are only restarted into their new
+	// partition once the node label changes.
+	staticDaemonCliqueRefreshInterval = time.Minute
 
 	informerResyncPeriod = 10 * time.Minute
 	cleanupInterval      = 10 * time.Minute
@@ -583,8 +587,15 @@ func (m *ComputeDomainManager) RemoveGPUCliqueLabel(ctx context.Context) error {
 
 // periodicGPUCliqueIDRefresh periodically re-reads the GPU clique ID from
 // NVML and updates the nvidia.com/gpu.clique node label if it changed.
+func (m *ComputeDomainManager) cliqueIDRefreshInterval() time.Duration {
+	if m.config.imexConfig.StaticDaemon() {
+		return staticDaemonCliqueRefreshInterval
+	}
+	return gpuCliqueLabelRefreshInterval
+}
+
 func (m *ComputeDomainManager) periodicGPUCliqueIDRefresh(ctx context.Context) {
-	ticker := time.NewTicker(gpuCliqueLabelRefreshInterval)
+	ticker := time.NewTicker(m.cliqueIDRefreshInterval())
 	defer ticker.Stop()
 
 	for {
