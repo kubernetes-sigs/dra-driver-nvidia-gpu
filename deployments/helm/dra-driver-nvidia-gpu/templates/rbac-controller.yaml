@@ -11,6 +11,12 @@ rules:
 - apiGroups: ["resource.nvidia.com"]
   resources: ["computedomains/status"]
   verbs: ["update"]
+- apiGroups: ["resource.nvidia.com"]
+  resources: ["computedomaindaemonsets"]
+  verbs: ["get", "list", "watch", "update"]
+- apiGroups: ["resource.nvidia.com"]
+  resources: ["computedomaindaemonsets/status"]
+  verbs: ["update"]
 - apiGroups: ["resource.k8s.io"]
   resources: ["resourceclaimtemplates"]
   verbs: ["get", "list", "watch", "create", "update", "delete"]
@@ -78,7 +84,11 @@ rules:
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: ["resource.nvidia.com"]
   resources: ["computedomaincliques"]
-  verbs: ["get", "list", "watch", "update"]
+  verbs: ["get", "list", "watch", "update", "delete"]
+# Static IMEX daemons are restarted by clique.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

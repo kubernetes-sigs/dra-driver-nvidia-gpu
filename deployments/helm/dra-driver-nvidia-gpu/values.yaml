@@ -88,6 +88,11 @@ resources:
       #   perComputeDomain (default): the driver starts IMEX daemons for each
       #     ComputeDomain on its nodes and removes them with it. A node runs the
       #     workloads of one ComputeDomain at a time.
+      #   static: one long-lived IMEX daemon per node, shared by all
+      #     ComputeDomains, runs from the ComputeDomainDaemonSet object, which
+      #     you create before running workloads, as Helm does not manage it.
+      #     Requires featureGates.ComputeDomainDaemonSet=true and
+      #     featureGates.ComputeDomainChannelReservations=true.
       #   hostManaged: the cluster administrator runs nvidia-imex as a host
       #     service, shared by all ComputeDomains, and the driver only injects
       #     IMEX channels. Requires featureGates.HostManagedIMEXDaemon=true.
@@ -137,6 +142,7 @@ resources:
 #   DRAListTypeAttributes: false       # Publish list-valued DRA device attributes
 #   ConsumableShares: false            # Publish consumable capacity and multi-allocation support for devices
 #   ComputeDomainChannelReservations: false # Assign IMEX channels per ComputeDomain ResourceClaimTemplate
+#   ComputeDomainDaemonSet: false      # Static IMEX daemons with imex.daemonLifecycle=static
 featureGates: {}
 
 # Log verbosity for all components. Zero or greater, higher number means higher

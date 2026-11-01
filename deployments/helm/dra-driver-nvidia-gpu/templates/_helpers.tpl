@@ -247,7 +247,14 @@ ignored. Produces no output on success.
   {{- if not (dig "HostManagedIMEXDaemon" false $gates) -}}
     {{- fail "resources.computeDomains.imex.daemonLifecycle=hostManaged requires featureGates.HostManagedIMEXDaemon=true" -}}
   {{- end -}}
+{{- else if eq $lifecycle "static" -}}
+  {{- if not (dig "ComputeDomainDaemonSet" false $gates) -}}
+    {{- fail "resources.computeDomains.imex.daemonLifecycle=static requires featureGates.ComputeDomainDaemonSet=true" -}}
+  {{- end -}}
+  {{- if not (dig "ComputeDomainChannelReservations" false $gates) -}}
+    {{- fail "resources.computeDomains.imex.daemonLifecycle=static requires featureGates.ComputeDomainChannelReservations=true, as ComputeDomains sharing IMEX daemons are isolated by their channels" -}}
+  {{- end -}}
 {{- else if ne $lifecycle "perComputeDomain" -}}
-  {{- fail (printf "unknown resources.computeDomains.imex.daemonLifecycle %q: must be \"perComputeDomain\" or \"hostManaged\"" $lifecycle) -}}
+  {{- fail (printf "unknown resources.computeDomains.imex.daemonLifecycle %q: must be \"perComputeDomain\", \"static\" or \"hostManaged\"" $lifecycle) -}}
 {{- end -}}
 {{- end -}}

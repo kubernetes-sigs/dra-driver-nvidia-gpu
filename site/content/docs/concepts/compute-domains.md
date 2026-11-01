@@ -17,8 +17,11 @@ The `resources.computeDomains.imex.daemonLifecycle` Helm value determines who ru
 |---|---|
 | `perComputeDomain` | By default, the DRA Driver creates one `nvidia-imex` DaemonSet for each `ComputeDomain` and tracks daemon readiness through `ComputeDomainClique` resources. |
 | `hostManaged` | You run `nvidia-imex` as a host service with a ready command socket, and the DRA Driver does not create daemon DaemonSets or daemon claims; this mode requires the `HostManagedIMEXDaemon` feature gate. |
+| `static` | The DRA Driver runs one static `nvidia-imex` daemon per node, described by the `ComputeDomainDaemonSet` you create, shared by all ComputeDomains with their own channels. It requires the `ComputeDomainDaemonSet` and `ComputeDomainChannelReservations` feature gates. See [Static IMEX daemons](#static-imex-daemons). |
 
 With `hostManaged`, all ComputeDomains share the IMEX daemon of a node. The [`ComputeDomainChannelReservations`](../reference/feature-gates.md) feature gate gives each workload `ResourceClaimTemplate` its own channel, so that they cannot reach each other's memory.
+
+With `static`, one long-lived IMEX daemon per node, from the [`ComputeDomainDaemonSet`](#static-imex-daemons), is shared by all ComputeDomains, as with `hostManaged`.
 
 The `imex.mode` and `imex.isolation` values of earlier releases are deprecated. `imex.mode=hostManaged` still selects `daemonLifecycle=hostManaged`, and `imex.isolation` is ignored.
 
@@ -56,6 +59,18 @@ the health of the host service.
 
 For service and socket configuration, see [Host-managed IMEX](../prerequisites.md#host-managed-imex).
 
+## Static IMEX daemons
+
+With `daemonLifecycle: static`, the IMEX daemons are static and shared by all ComputeDomains:
+
+1. You create the cluster-scoped `ComputeDomainDaemonSet` named `default`. Helm does not manage it, so driver upgrades do not restart the daemons.
+2. The `compute-domain-controller` runs one daemon on every node with the `nvidia.com/gpu.clique` label, from one DaemonSet in the driver namespace.
+3. Each daemon joins the IMEX domain of its NVLink clique through a `ComputeDomainClique` labeled with the `ComputeDomainDaemonSet` UID. Clique membership, DNS names and IP changes work as with per-ComputeDomain daemons.
+4. ComputeDomains work as in host-managed mode with channel reservations. Their claims get channels that are unique in the NVLink clique, and several ComputeDomains can share a node.
+5. When a workload pod claims a channel, the `compute-domain-kubelet-plugin` waits for the static daemon of its node to be ready, then injects the channel of its claim.
+
+Updates of the daemons restart whole cliques, either when you delete their pods or in batches of cliques. See [Static IMEX daemons](../guides/static-imex-daemons.md).
+
 ## Channel reservations
 
 With the Alpha `ComputeDomainChannelReservations` feature gate, each workload `ResourceClaimTemplate` of a ComputeDomain gets its own IMEX channel:
@@ -67,7 +82,7 @@ With the Alpha `ComputeDomainChannelReservations` feature gate, each workload `R
   Pods using the same template can therefore run on the same node.
 - The controller admits each claim and assigns it a channel, which it writes into the claim's `status.devices[].data`.
   With `daemonLifecycle=perComputeDomain`, it decides before the pod is bound to a node, through a DRA binding condition.
-  With `daemonLifecycle=hostManaged`, the pod is bound at once, and the kubelet plugin waits for the channel before it prepares the claim.
+  With `daemonLifecycle=hostManaged` or `static`, the pod is bound at once, and the kubelet plugin waits for the channel before it prepares the claim.
   A channel only needs to be unique in an IMEX domain, so each NVLink clique has its own channels, 1 to `imex.maxChannels - 1`.
   Claims of one template share its channel in a clique, and a channel is freed with its last claim.
   The kubelet plugin injects the channel of the claim's status.
@@ -79,7 +94,7 @@ With the Alpha `ComputeDomainChannelReservations` feature gate, each workload `R
   This covers claims allocated before the scheduler sees a new owner.
   Decisions are serialized per node, so the first claims of two ComputeDomains never both get a free node.
   Workloads of one ComputeDomain, from any of its templates, share a node.
-- With `daemonLifecycle=hostManaged`, several ComputeDomains can share a node, isolated by their channels.
+- With `daemonLifecycle=hostManaged` or `static`, several ComputeDomains can share a node, isolated by their channels.
   A rejected claim, for example from a clique without a free channel, fails to prepare, and the reason shows up as an event of its pod.
 - ComputeDomains created before the gate was enabled keep working as without it: the kubelet plugin still publishes the `channel-0` device their claim templates request, one claim per node, and channel 0 is never assigned to others.
 - The first claim of a ComputeDomain on a node starts or checks the IMEX daemon, and later claims from any of its templates only get their channel injected.
