@@ -15,12 +15,20 @@ steps:
     env:
       - IMG_PREFIX=us-central1-docker.pkg.dev/k8s-staging-images/dra-driver-nvidia
       - GIT_COMMIT=${_PULL_BASE_SHA}
+      - IMG_PROVENANCE=true
+      - IMG_SBOM=true
   - id: publish-chart
     name: gcr.io/k8s-staging-test-infra/gcb-docker-gcloud:v20260127-c1affcc8de
     entrypoint: ./hack/build-and-publish-chart.sh
     env:
       - IMG_PREFIX=us-central1-docker.pkg.dev/k8s-staging-images/dra-driver-nvidia
       - GIT_COMMIT=${_PULL_BASE_SHA}
+      - PULL_BASE_REF=${_PULL_BASE_REF}
+      - BUILD_ID=${BUILD_ID}
+      - PROJECT_ID=${PROJECT_ID}
+      - CHART_PROVENANCE=true
+      - CHART_SBOM=true
+      - COSIGN_OIDC_PROVIDER=google
 substitutions:
   _GIT_TAG: 'v0-placeholder'
   _PULL_BASE_REF: 'main'
