@@ -1,0 +1,47 @@
+# 1-GPU passthrough claim with driver override.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vfio-test3
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: vfio-rct-driveroverride
+  namespace: vfio-test3
+spec:
+  spec:
+    devices:
+      config:
+      - opaque:
+          driver: gpu.nvidia.com
+          parameters:
+            apiVersion: resource.nvidia.com/v1beta1
+            kind: VfioDeviceConfig
+            driverOverride: vfio-pci
+        requests:
+        - gpu
+      requests:
+      - exactly:
+          allocationMode: ExactCount
+          count: 1
+          deviceClassName: vfio.gpu.nvidia.com
+        name: gpu
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: busybox-pod
+  namespace: vfio-test3
+spec:
+  containers:
+    - name: test
+      image: busybox
+      command: ["sleep", "3600"]
+      resources:
+        claims:
+          - name: dra-resource
+  resourceClaims:
+    - name: dra-resource
+      resourceClaimTemplateName: vfio-rct-driveroverride

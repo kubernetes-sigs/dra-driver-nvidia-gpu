@@ -100,15 +100,17 @@ Configures a VFIO passthrough device. Target DeviceClass: `vfio.gpu.nvidia.com`.
 ```yaml
 apiVersion: resource.nvidia.com/v1beta1
 kind: VfioDeviceConfig
+driverOverride: null          # optional
 iommu:
   backendPolicy: LegacyOnly   # LegacyOnly | PreferIommuFD
-  enableAPIDevice: true        # optional, defaults to true
+  enableAPIDevice: true       # optional, defaults to true
 ```
 
 #### Fields
 
 | Field | Type | Description |
 |---|---|---|
+| `driverOverride` | string | Optional. Override the GPU's default passthrough driver that it binds to. Supported Values:<br>- `vfio-pci` |
 | `iommu` | object | Optional. IOMMU backend configuration. Omit to use defaults (`LegacyOnly`, API device enabled). |
 | `iommu.backendPolicy` | string | `LegacyOnly` (default) or `PreferIommuFD`. Selects the IOMMU backend used for device passthrough. |
 | `iommu.enableAPIDevice` | bool | Optional. Expose `/dev/iommu` or `/dev/vfio/vfio` to the workload. Defaults to `true`; set to `false` to opt out (for example, for Kata). Requires the [`DeviceMetadata`](feature-gates.md) feature gate. |
