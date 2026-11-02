@@ -71,6 +71,8 @@ type ComputeDomainManager struct {
 
 	cliqueIDMu sync.RWMutex
 	cliqueID   string
+	// onCliqueIDChange is called with a changed clique ID.
+	onCliqueIDChange func(cliqueID string)
 
 	getCliqueIDFunc func() (string, error)
 }
@@ -118,6 +120,14 @@ func (m *ComputeDomainManager) setCliqueID(cliqueID string) {
 	m.cliqueIDMu.Lock()
 	defer m.cliqueIDMu.Unlock()
 	m.cliqueID = cliqueID
+}
+
+// OnCliqueIDChange registers a function called with each changed GPU clique
+// ID.
+func (m *ComputeDomainManager) OnCliqueIDChange(f func(cliqueID string)) {
+	m.cliqueIDMu.Lock()
+	defer m.cliqueIDMu.Unlock()
+	m.onCliqueIDChange = f
 }
 
 func (m *ComputeDomainManager) Start(ctx context.Context) (rerr error) {
@@ -515,6 +525,12 @@ func (m *ComputeDomainManager) refreshGPUCliqueID(ctx context.Context) error {
 	if oldCliqueID := m.CliqueID(); newCliqueID != "" && newCliqueID != oldCliqueID {
 		klog.Infof("GPU clique ID changed from %q to %q, updating %s node label", oldCliqueID, newCliqueID, gpuCliqueLabelKey)
 		m.setCliqueID(newCliqueID)
+		m.cliqueIDMu.RLock()
+		onChange := m.onCliqueIDChange
+		m.cliqueIDMu.RUnlock()
+		if onChange != nil {
+			onChange(newCliqueID)
+		}
 	}
 
 	if m.config.flags.gpuCliqueLabelEnabled {

@@ -21,7 +21,7 @@ setup() {
   kubectl apply -f demo/specs/imex/channel-injection.yaml
   kubectl wait --for=condition=READY pods imex-channel-injection --timeout=60s
   run kubectl logs imex-channel-injection
-  assert_output --partial "channel0"
+  assert_imex_channel_injected
 
   # Stage 2: upgrade as users would do (explicitly not downgrade the CRD).
   iupgrade_wait "$TEST_CHART_LASTSTABLE_REPO" "$TEST_CHART_LASTSTABLE_VERSION" NOARGS
@@ -53,7 +53,7 @@ setup() {
   kubectl apply -f demo/specs/imex/channel-injection.yaml
   kubectl wait --for=condition=READY pods imex-channel-injection --timeout=60s
   run kubectl logs imex-channel-injection
-  assert_output --partial "channel0"
+  assert_imex_channel_injected
 
   # Stage 4: update CRD, as a user would do.
   kubectl apply -f "${CRD_UPGRADE_URL}"

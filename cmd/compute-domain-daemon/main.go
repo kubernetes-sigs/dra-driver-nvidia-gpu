@@ -169,7 +169,7 @@ func newApp() *cli.App {
 		},
 		&cli.StringFlag{
 			Name:        "imex-config-overrides",
-			Usage:       "Comma-separated KEY=VALUE overrides for arbitrary nvidia-imex daemon config file settings generated in the driverManaged mode.",
+			Usage:       "Comma-separated KEY=VALUE overrides for arbitrary nvidia-imex daemon config file settings generated with the perComputeDomain IMEX daemon lifecycle.",
 			Destination: &flags.imexConfigOverrides,
 			EnvVars:     []string{"IMEX_CONFIG_OVERRIDES"},
 		},

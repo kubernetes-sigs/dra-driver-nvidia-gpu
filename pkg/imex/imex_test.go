@@ -20,95 +20,133 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/component-base/featuregate"
+
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
+// setGates enables the given IMEX feature gates and disables the others for
+// the duration of the test.
+func setGates(t *testing.T, enabled ...featuregate.Feature) {
+	t.Helper()
+	gates := map[string]bool{
+		string(featuregates.HostManagedIMEXDaemon):            false,
+		string(featuregates.ComputeDomainChannelReservations): false,
+	}
+	restore := make(map[string]bool, len(gates))
+	for name := range gates {
+		restore[name] = featuregates.Enabled(featuregate.Feature(name))
+	}
+	for _, gate := range enabled {
+		gates[string(gate)] = true
+	}
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(gates))
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(restore))
+	})
+}
+
 func TestConfigValidate(t *testing.T) {
-	tests := []struct {
-		name        string
-		config      Config
-		gateEnabled bool
-		expectError bool
-		description string
+	tests := map[string]struct {
+		config  Config
+		gates   []featuregate.Feature
+		wantErr string
 	}{
-		{
-			name:        "driverManaged with empty isolation defaults to domain",
-			config:      Config{Mode: ModeDriverManaged, Isolation: ""},
-			gateEnabled: false,
-			expectError: false,
-			description: "empty isolation is treated the same as the domain default",
+		"perComputeDomain": {
+			config: Config{DaemonLifecycle: DaemonLifecyclePerComputeDomain},
 		},
-		{
-			name:        "driverManaged with explicit domain isolation succeeds",
-			config:      Config{Mode: ModeDriverManaged, Isolation: IsolationIMEXDomain},
-			gateEnabled: false,
-			expectError: false,
-			description: "domain is the default, supported isolation strategy under driverManaged too",
+		"hostManaged requires the feature gate": {
+			config:  Config{DaemonLifecycle: DaemonLifecycleHostManaged},
+			wantErr: "HostManagedIMEXDaemon",
 		},
-		{
-			name:        "driverManaged with channel isolation errors",
-			config:      Config{Mode: ModeDriverManaged, Isolation: IsolationIMEXChannel},
-			gateEnabled: false,
-			expectError: true,
-			description: "per-workload channel isolation is not implemented yet, regardless of mode",
+		"hostManaged": {
+			config: Config{DaemonLifecycle: DaemonLifecycleHostManaged},
+			gates:  []featuregate.Feature{featuregates.HostManagedIMEXDaemon},
 		},
-		{
-			name:        "driverManaged with unknown isolation errors",
-			config:      Config{Mode: ModeDriverManaged, Isolation: "bogus"},
-			gateEnabled: true,
-			expectError: true,
-			description: "isolation is validated regardless of mode",
-		},
-		{
-			name:        "hostManaged requires the feature gate",
-			config:      Config{Mode: ModeHostManaged, Isolation: IsolationIMEXDomain},
-			gateEnabled: false,
-			expectError: true,
-			description: "mode=hostManaged is rejected when HostManagedIMEXDaemon is disabled",
-		},
-		{
-			name:        "hostManaged with empty isolation defaults to domain",
-			config:      Config{Mode: ModeHostManaged, Isolation: ""},
-			gateEnabled: true,
-			expectError: false,
-			description: "empty isolation is treated the same as the domain default under hostManaged too",
-		},
-		{
-			name:        "hostManaged with explicit domain isolation succeeds",
-			config:      Config{Mode: ModeHostManaged, Isolation: IsolationIMEXDomain},
-			gateEnabled: true,
-			expectError: false,
-			description: "domain is the default isolation strategy, supported under hostManaged",
-		},
-		{
-			name:        "hostManaged with channel isolation errors for now",
-			config:      Config{Mode: ModeHostManaged, Isolation: IsolationIMEXChannel},
-			gateEnabled: true,
-			expectError: true,
-			description: "per-workload channel isolation is not implemented yet, so it errors out",
-		},
-		{
-			name:        "unknown mode errors",
-			config:      Config{Mode: "bogus"},
-			gateEnabled: true,
-			expectError: true,
-			description: "an unrecognized mode value must be rejected",
+		"unknown lifecycle": {
+			config:  Config{DaemonLifecycle: "bogus"},
+			wantErr: "unknown imex.daemonLifecycle",
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.config.Validate(tt.gateEnabled)
-			if tt.expectError {
-				require.Error(t, err, tt.description)
-			} else {
-				require.NoError(t, err, tt.description)
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			setGates(t, tc.gates...)
+			err := tc.config.Validate()
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
 			}
+			require.NoError(t, err)
 		})
 	}
 }
 
-func TestConfigEffectiveHostManaged(t *testing.T) {
-	require.True(t, Config{Mode: ModeHostManaged}.EffectiveHostManaged())
-	require.False(t, Config{Mode: ModeDriverManaged}.EffectiveHostManaged())
+func TestResolveConfig(t *testing.T) {
+	tests := map[string]struct {
+		lifecycle, mode, isolation string
+		want                       DaemonLifecycle
+		wantWarnings               int
+		wantErr                    string
+	}{
+		"defaults to perComputeDomain": {
+			want: DaemonLifecyclePerComputeDomain,
+		},
+		"daemonLifecycle": {
+			lifecycle: "hostManaged",
+			want:      DaemonLifecycleHostManaged,
+		},
+		"v0.5 driverManaged defaults": {
+			mode: "driverManaged", isolation: "domain",
+			want:         DaemonLifecyclePerComputeDomain,
+			wantWarnings: 2,
+		},
+		"v0.5 hostManaged": {
+			mode: "hostManaged", isolation: "domain",
+			want:         DaemonLifecycleHostManaged,
+			wantWarnings: 2,
+		},
+		"daemonLifecycle wins over the driverManaged default": {
+			lifecycle: "hostManaged", mode: "driverManaged",
+			want:         DaemonLifecycleHostManaged,
+			wantWarnings: 1,
+		},
+		"hostManaged mode contradicts another lifecycle": {
+			lifecycle: "perComputeDomain", mode: "hostManaged",
+			wantErr: "contradicts",
+		},
+		"unknown mode": {
+			mode:    "bogus",
+			wantErr: "unknown imex.mode",
+		},
+		"isolation is ignored": {
+			isolation:    "channel",
+			want:         DaemonLifecyclePerComputeDomain,
+			wantWarnings: 1,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			config, warnings, err := ResolveConfig(tc.lifecycle, tc.mode, tc.isolation)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, config.DaemonLifecycle)
+			require.Len(t, warnings, tc.wantWarnings, warnings)
+		})
+	}
+}
+
+func TestConfigSharedIMEXDaemons(t *testing.T) {
+	host := Config{DaemonLifecycle: DaemonLifecycleHostManaged}
+	require.True(t, host.EffectiveHostManaged())
+	require.True(t, host.SharedIMEXDaemons())
+	require.Equal(t, "daemonLifecycle=hostManaged", host.String())
+
+	perComputeDomain := Config{DaemonLifecycle: DaemonLifecyclePerComputeDomain}
+	require.False(t, perComputeDomain.EffectiveHostManaged())
+	require.False(t, perComputeDomain.SharedIMEXDaemons())
 	require.False(t, Config{}.EffectiveHostManaged())
 }

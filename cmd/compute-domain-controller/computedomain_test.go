@@ -31,7 +31,7 @@ import (
 func TestCalculateGlobalStatusHostManaged(t *testing.T) {
 	m := &ComputeDomainManager{
 		config: &ManagerConfig{
-			imexConfig: imex.Config{Mode: imex.ModeHostManaged, Isolation: imex.IsolationIMEXDomain},
+			imexConfig: imex.Config{DaemonLifecycle: imex.DaemonLifecycleHostManaged},
 		},
 	}
 
@@ -46,7 +46,7 @@ func TestCalculateGlobalStatusHostManaged(t *testing.T) {
 func TestCalculateGlobalStatusDriverManagedUnaffected(t *testing.T) {
 	m := &ComputeDomainManager{
 		config: &ManagerConfig{
-			imexConfig: imex.Config{Mode: imex.ModeDriverManaged},
+			imexConfig: imex.Config{DaemonLifecycle: imex.DaemonLifecyclePerComputeDomain},
 		},
 	}
 
@@ -75,8 +75,8 @@ func TestUpdateGlobalStatusObservesUnchangedStatus(t *testing.T) {
 		mode   imex.Config
 		status string
 	}{
-		"driver-managed": {imex.Config{Mode: imex.ModeDriverManaged}, nvapi.ComputeDomainStatusNotReady},
-		"host-managed":   {imex.Config{Mode: imex.ModeHostManaged, Isolation: imex.IsolationIMEXDomain}, nvapi.ComputeDomainStatusReady},
+		"driver-managed": {imex.Config{DaemonLifecycle: imex.DaemonLifecyclePerComputeDomain}, nvapi.ComputeDomainStatusNotReady},
+		"host-managed":   {imex.Config{DaemonLifecycle: imex.DaemonLifecycleHostManaged}, nvapi.ComputeDomainStatusReady},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -101,7 +101,7 @@ func TestUpdateGlobalStatusObservesUnchangedStatus(t *testing.T) {
 
 func TestNewComputeDomainManagerHostManagedSkipsDaemonAndNodeManagers(t *testing.T) {
 	config := &ManagerConfig{
-		imexConfig: imex.Config{Mode: imex.ModeHostManaged, Isolation: imex.IsolationIMEXDomain},
+		imexConfig: imex.Config{DaemonLifecycle: imex.DaemonLifecycleHostManaged},
 	}
 
 	m := NewComputeDomainManager(config)
@@ -116,7 +116,7 @@ func TestNewComputeDomainManagerHostManagedSkipsDaemonAndNodeManagers(t *testing
 
 func TestNewComputeDomainManagerDriverManagedConstructsDaemonAndNodeManagers(t *testing.T) {
 	config := &ManagerConfig{
-		imexConfig: imex.Config{Mode: imex.ModeDriverManaged},
+		imexConfig: imex.Config{DaemonLifecycle: imex.DaemonLifecyclePerComputeDomain},
 	}
 
 	m := NewComputeDomainManager(config)

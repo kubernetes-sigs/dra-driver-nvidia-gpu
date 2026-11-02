@@ -553,7 +553,7 @@ func TestUnprepareMissingClaimIsNoop(t *testing.T) {
 func hostManagedConfig() *Config {
 	return &Config{
 		flags:      &Flags{imexHostSocketPath: defaultIMEXHostSocketPath},
-		imexConfig: imex.Config{Mode: imex.ModeHostManaged, Isolation: imex.IsolationIMEXDomain},
+		imexConfig: imex.Config{DaemonLifecycle: imex.DaemonLifecycleHostManaged},
 	}
 }
 
@@ -828,7 +828,7 @@ func TestUnprepareDevicesHostManagedSkipsRemoveNodeLabel(t *testing.T) {
 		allocationResult("channel-request", DriverName, "channel-0", nil),
 	})
 
-	require.NoError(t, state.unprepareDevices(context.Background(), &status))
+	require.NoError(t, state.unprepareDevices(context.Background(), "claim-uid", &status, checkpointWithClaims(nil)))
 }
 
 func testDeviceState() *DeviceState {
