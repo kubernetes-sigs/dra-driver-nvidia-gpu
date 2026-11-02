@@ -69,6 +69,11 @@ spec:
         - name: KUBELET_PLUGINS_DIRECTORY_PATH
           value: {{ .Values.kubeletPlugin.kubeletPluginsDirectoryPath | quote }}
         volumeMounts:
+        # Host /dev: the prestart script copies the /dev/nvidia* nodes that
+        # its nvidia-smi check creates into here (hence writable). The init
+        # container is privileged anyway, so this doesn't widen its access.
+        - name: host-dev
+          mountPath: /host-dev
         - name: driver-root-parent
           mountPath: /driver-root-parent
           {{- if eq "/" .Values.nvidiaDriverRoot }}
@@ -353,6 +358,10 @@ spec:
         {{- end }}
       {{- end }}
       volumes:
+      - name: host-dev
+        hostPath:
+          path: /dev
+          type: Directory
       - name: plugins-registry
         hostPath:
           path: {{ .Values.kubeletPlugin.kubeletRegistrarDirectoryPath | quote }}
