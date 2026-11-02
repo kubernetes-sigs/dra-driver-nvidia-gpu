@@ -105,11 +105,27 @@ if ! command -v helm >/dev/null 2>&1; then
   curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 fi
 
-# kind (pinned to the version nvkind vendors) and nvkind. nvkind has no
-# tags; pin a commit SHA. Bump with a reviewable diff after re-validating.
-: "${NVKIND_SHA:=9a3061c75e59ac7e4f29e001f1c5875d46a7cc54}"
-go install sigs.k8s.io/kind@v0.31.0
-go install "github.com/NVIDIA/nvkind/cmd/nvkind@${NVKIND_SHA}"
+# kind and nvkind. nvkind has no tags; pin a commit SHA. Bump with a
+# reviewable diff after re-validating.
+#
+# kind v0.32.0+ is required for Kubernetes 1.37, which dropped the kubeadm
+# v1beta3 config that older kind generates. nvkind still vendors kind v0.31.0
+# (NVIDIA/nvkind#75 bumps it), so nvkind is rebuilt against KIND_VERSION; the
+# pinned nvkind commit includes NVIDIA/nvkind#76, without which the containerd
+# in newer kindest/node images fails to restart after nvidia-ctk configures it.
+: "${KIND_VERSION:=v0.33.0}"
+: "${NVKIND_SHA:=c57050497cffee36f10c8b918d2727c4f26d886e}"
+go install "sigs.k8s.io/kind@${KIND_VERSION}"
+rm -rf /tmp/nvkind-src
+git clone -q https://github.com/NVIDIA/nvkind /tmp/nvkind-src
+git -C /tmp/nvkind-src checkout -q "${NVKIND_SHA}"
+(
+  cd /tmp/nvkind-src
+  GOFLAGS=-mod=mod go get "sigs.k8s.io/kind@${KIND_VERSION}"
+  GOFLAGS=-mod=mod go mod tidy
+  go mod vendor
+  go install ./cmd/nvkind
+)
 
 # `sg docker -c` avoids re-login after usermod -aG docker.
 if sg docker -c "kind get clusters" | grep -qx "${NVKIND_CLUSTER_NAME}"; then

@@ -23,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	resourceapi "k8s.io/api/resource/v1"
@@ -107,6 +109,9 @@ type nvmlDeviceHealthMonitor struct {
 	gpuInfosByUUID    map[string]*GpuInfo
 	skippedXids       map[uint64]bool
 	wg                sync.WaitGroup
+	// heartbeat is when NVML last answered the event wait, in Unix
+	// nanoseconds; see LastHeartbeat.
+	heartbeat atomic.Int64
 }
 
 func newNvmlDeviceHealthMonitor(config *Config, perGPUAllocatable *PerGPUAllocatableDevices, nvdevlib *deviceLib) (*nvmlDeviceHealthMonitor, error) {
@@ -131,7 +136,19 @@ func newNvmlDeviceHealthMonitor(config *Config, perGPUAllocatable *PerGPUAllocat
 		gpuInfosByUUID:    nvdevlib.gpuInfosByUUID,
 		skippedXids:       xidsToSkip(config.flags.additionalXidsToIgnore),
 	}
+	m.markHeartbeat()
 	return m, nil
+}
+
+// LastHeartbeat returns when NVML last answered the monitor's event wait,
+// with an event, a timeout or a lost GPU. A monitor whose wait hangs or keeps
+// failing stops advancing it, and so does one blocked handing over an event.
+func (m *nvmlDeviceHealthMonitor) LastHeartbeat() time.Time {
+	return time.Unix(0, m.heartbeat.Load())
+}
+
+func (m *nvmlDeviceHealthMonitor) markHeartbeat() {
+	m.heartbeat.Store(time.Now().UnixNano())
 }
 
 // RegisterEvents creates the NVML event set and starts recording events for
@@ -230,6 +247,9 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 			return
 		default:
 			event, ret := m.eventSet.Wait(5000) // timeout in 5000 ms.
+			if ret == nvml.SUCCESS || ret == nvml.ERROR_TIMEOUT || ret == nvml.ERROR_GPU_IS_LOST {
+				m.markHeartbeat()
+			}
 			if ret == nvml.ERROR_TIMEOUT {
 				continue
 			}
@@ -283,6 +303,9 @@ func (m *nvmlDeviceHealthMonitor) run(ctx context.Context) {
 				EventType: HealthEventXID,
 				EventData: xid,
 			}
+			// The send can block behind a busy DeviceState lock; the
+			// monitor is working again once it returns.
+			m.markHeartbeat()
 		}
 	}
 }
