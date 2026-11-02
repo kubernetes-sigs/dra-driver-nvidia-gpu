@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"k8s.io/klog/v2"
+
+	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/lookup/root"
 )
 
 const (
@@ -399,6 +401,10 @@ func (vm *VfioPciManager) disableGPUPersistenceMode(pciAddress string) error {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("error checking if nvidia-persistenced is running: %w", err)
 		}
+		if vm.hostRootPersistencedRunning() {
+			vm.tryDisableGPUPersistenceModeFromHostRoot(pciAddress)
+			return nil
+		}
 		klog.V(4).Infof("nvidia-persistenced is not running; nothing to do...")
 		return nil
 	}
@@ -408,6 +414,51 @@ func (vm *VfioPciManager) disableGPUPersistenceMode(pciAddress string) error {
 		return fmt.Errorf("error disabling persistence mode for GPU %q: %w", pciAddress, err)
 	}
 	return nil
+}
+
+// Check if nvidia-persistenced's socket exists under the host root, for hosts
+// that run the daemon outside the driver root (e.g. Talos: driver under
+// /usr/local, socket under /run).
+func (vm *VfioPciManager) hostRootPersistencedRunning() bool {
+	socket := filepath.Join(vm.nvlib.hostRoot, nvidiaPersistencedSocketPath)
+	klog.V(4).Infof("Checking if nvidia-persistenced is running under the host root: %s", socket)
+	_, err := os.Stat(socket)
+	if err != nil && !os.IsNotExist(err) {
+		klog.V(4).Infof("Error checking nvidia-persistenced socket %s: %v", socket, err)
+	}
+	return err == nil
+}
+
+// Disable persistence mode with the host driver's nvidia-smi, chrooted into the
+// host root so it reaches the host's nvidia-persistenced. Best effort: on
+// failure, log and proceed as when the daemon is not detected.
+func (vm *VfioPciManager) tryDisableGPUPersistenceModeFromHostRoot(pciAddress string) {
+	nvidiaSMI, err := hostRootBinaryPath(vm.nvlib.hostRoot, vm.hostDriverRoot, "nvidia-smi")
+	if err != nil {
+		klog.Warningf("nvidia-persistenced is running on the host but persistence mode for GPU %q cannot be disabled: %v", pciAddress, err)
+		return
+	}
+	if err := vm.nvlib.disableGPUPersistenceModeInRoot(pciAddress, vm.nvlib.hostRoot, nvidiaSMI); err != nil {
+		klog.Warningf("Error disabling persistence mode for GPU %q from the host root: %v", pciAddress, err)
+	}
+}
+
+// Locate a driver binary under hostRoot/hostDriverRoot and return its path
+// relative to hostRoot, for running it chrooted into hostRoot.
+func hostRootBinaryPath(hostRoot, hostDriverRoot, name string) (string, error) {
+	path, err := root.New(root.WithDriverRoot(filepath.Join(hostRoot, hostDriverRoot))).BinaryPath(name)
+	if err != nil {
+		return "", err
+	}
+	resolvedHostRoot, err := filepath.EvalSymlinks(hostRoot)
+	if err != nil {
+		return "", fmt.Errorf("error resolving host root %q: %w", hostRoot, err)
+	}
+	rel, err := filepath.Rel(resolvedHostRoot, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", fmt.Errorf("%q resolves to %q, outside the host root %q", name, path, hostRoot)
+	}
+	return "/" + rel, nil
 }
 
 // Check if the expected kernel module is loaded.
