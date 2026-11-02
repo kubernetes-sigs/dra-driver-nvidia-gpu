@@ -48,6 +48,7 @@ For example, on NVIDIA Grace systems, the kubelet plugin automatically selects t
   | **nvidia-persistenced** | On DRA Driver v0.4.0 or later, the DRA Driver automatically disables persistence mode on the target GPU before rebinding it to `vfio-pci` and restores it afterward, so the service can keep running. Older versions don't have this handling and require stopping the service manually. |
   | **dcgm** | Recommended to disable this service. **Note:** DCGM v4.5.0+ can automatically release GPUs when switching between the `nvidia` and `vfio-pci` drivers. |
   | **dcgm-exporter** | Recommended to disable this service. **Note:** dcgm-exporter v4.5.0+ has an experimental feature, `DCGM_EXPORTER_ENABLE_GPU_BIND_UNBIND_WATCH=true` (plus a poll frequency `DCGM_EXPORTER_GPU_BIND_UNBIND_POLL_INTERVAL=1s`), to automatically release GPUs when switching between the `nvidia` and `vfio-pci` drivers. Use with caution. |
+  | **`nvidia_drm` framebuffer console** | **Must be disabled.** The framebuffer console holds the GPU from inside the kernel, not through a process. The DRA Driver can't detect this hold, and the switch to `vfio-pci` hangs until you reboot the node. Set the `nvidia_drm` module parameter `fbdev=0`. On nodes that don't drive a display, you can instead leave the `nvidia_drm` module unloaded. |
 
 - With `PassthroughSupport` enabled, the driver initially advertises both a GPU device and a VFIO device for each eligible physical GPU.
   These are two representations of the same hardware and cannot be used simultaneously.
@@ -265,6 +266,8 @@ For why the count and constraint must be used together, refer to
 
 ## Troubleshooting
 
+### Virt-launcher pod stuck in ContainerCreating
+
 If a VM fails to start because its virt-launcher pod is stuck in `ContainerCreating` state, check the kubelet-plugin logs for prepare errors:
 
 ```bash
@@ -294,4 +297,27 @@ If the command returns an output, note the PID holding the device node of the GP
 
 The subsequent invocation of `NodePrepareResources` call for the workload should then succeed, and the pod should reach the Running state.
 
-If no process is holding the GPU and the VM still fails to start, open a bug.
+### Driver switch hangs with a `non-zero usage count` kernel message
+
+When the process scan finds no holder, the kernel might hold the GPU instead.
+One kernel holder is the `nvidia_drm` framebuffer console.
+To check for a kernel holder, run the following command on the GPU node:
+
+```bash
+dmesg | grep NVRM
+```
+
+If the driver switch started while the GPU was still in use, the kernel log contains the following message:
+
+```text
+NVRM: Attempting to remove device 0000:ba:00.0 with non-zero usage count!
+```
+
+A client such as dcgm-exporter can release the GPU on its own.
+In that case, the next line is `NVRM: Continuing with GPU removal for device ...`, and the switch completes.
+If the `Continuing with GPU removal` line doesn't follow, a kernel holder still has the GPU and the switch hangs.
+A hung switch can't be interrupted.
+
+To resolve this issue, disable the framebuffer console as described in [Limitations and considerations](#limitations-and-considerations), and then reboot the node.
+
+If no process holds the GPU, the kernel log has no `non-zero usage count` line, and the VM still fails to start, open a bug.
