@@ -72,7 +72,20 @@ func (c *ComputeDomainChannelConfig) Normalize() error {
 
 // Validate ensures that ComputeDomainChannelConfig has a valid set of values.
 func (c *ComputeDomainChannelConfig) Validate() error {
-	return ValidateDomainID(c.DomainID)
+	if err := ValidateDomainID(c.DomainID); err != nil {
+		return err
+	}
+	// Unlike the ComputeDomain CRD field, this opaque config gets no schema
+	// enum check, and the kubelet plugin treats anything other than All as
+	// Single, so a typo would otherwise be silently ignored. Empty is allowed
+	// because the field is optional and implies Single.
+	switch c.AllocationMode {
+	case "", ComputeDomainChannelAllocationModeSingle, ComputeDomainChannelAllocationModeAll:
+		return nil
+	default:
+		return fmt.Errorf("unknown channel allocation mode: %v, supported channel allocation modes: %s, %s",
+			c.AllocationMode, ComputeDomainChannelAllocationModeSingle, ComputeDomainChannelAllocationModeAll)
+	}
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
