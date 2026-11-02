@@ -273,7 +273,7 @@ func validateGPUDeviceMinor(uuid string, minor int, devices []cdispec.Device) er
 // with that name. That is an argument for always dynamically generating also
 // full-GPU CDI spec during prepare() (or: to cache it, and re-generate it every
 // now and then during this program's lifetime).
-func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices PreparedDevices) error {
+func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices PreparedDevices, claimContainerEdits *cdiapi.ContainerEdits) error {
 	commonEdits := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{}}
 	if requiresNVIDIADeviceNodes(preparedDevices) {
 		// Generate those parts of the container spec that are not device-specific
@@ -380,6 +380,12 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 			klog.V(7).Infof("Number of device nodes about to inject for device %s: %d", dname, len(dspec.ContainerEdits.DeviceNodes))
 			deviceSpecs = append(deviceSpecs, dspec)
 		}
+	}
+
+	if claimContainerEdits != nil {
+		// Claim-level edits apply whenever any device from this claim-specific
+		// CDI spec is injected.
+		commonEdits = (&cdiapi.ContainerEdits{}).Append(commonEdits).Append(claimContainerEdits)
 	}
 
 	tws0 := time.Now()
