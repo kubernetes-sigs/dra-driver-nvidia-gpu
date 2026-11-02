@@ -41,8 +41,9 @@ spec:
             description: ComputeDomainSpec provides the spec for a ComputeDomain.
             properties:
               channel:
-                description: ComputeDomainChannelSpec provides the spec for a channel
-                  used to run a workload inside a ComputeDomain.
+                description: |-
+                  A single workload ResourceClaimTemplate. Exactly one of channel and
+                  channels must be set.
                 properties:
                   allocationMode:
                     default: Single
@@ -58,6 +59,11 @@ spec:
                       of the ResourceClaimTemplate to generate.
                     properties:
                       name:
+                        description: |-
+                          The name becomes the name of the ResourceClaimTemplate, so it must be a
+                          DNS-1123 subdomain.
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                         type: string
                     required:
                     - name
@@ -65,6 +71,41 @@ spec:
                 required:
                 - resourceClaimTemplate
                 type: object
+              channels:
+                description: |-
+                  Workload ResourceClaimTemplates, each backed by its own IMEX channel.
+                  Pods using the same template share its channel. Requires the
+                  ComputeDomainChannelReservations feature gate.
+                items:
+                  description: |-
+                    ComputeDomainReservedChannelSpec provides the spec for one of several
+                    channels of a ComputeDomain, each reserved for its workload template.
+                  properties:
+                    resourceClaimTemplate:
+                      description: ComputeDomainResourceClaimTemplate provides the
+                        details of the ResourceClaimTemplate to generate.
+                      properties:
+                        name:
+                          description: |-
+                            The name becomes the name of the ResourceClaimTemplate, so it must be a
+                            DNS-1123 subdomain.
+                          maxLength: 253
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                          type: string
+                      required:
+                      - name
+                      type: object
+                  required:
+                  - resourceClaimTemplate
+                  type: object
+                maxItems: 32
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: resourceClaimTemplate names must be unique
+                  rule: self.all(c, self.exists_one(d, d.resourceClaimTemplate.name
+                    == c.resourceClaimTemplate.name))
               numNodes:
                 default: 0
                 description: |-
@@ -94,12 +135,12 @@ spec:
                   API version.
                 minimum: 0
                 type: integer
-            required:
-            - channel
             type: object
             x-kubernetes-validations:
             - message: A computeDomain.spec is immutable
               rule: self == oldSelf
+            - message: exactly one of channel and channels must be set
+              rule: has(self.channel) != has(self.channels)
           status:
             description: |-
               Global ComputeDomain status. Can be used to guide debugging efforts.

@@ -21,6 +21,8 @@ import (
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/utils/ptr"
+
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 )
 
 type ComputeDomainChannelInfo struct {
@@ -31,7 +33,19 @@ type ComputeDomainDaemonInfo struct {
 	ID int `json:"id"`
 }
 
+// sharedChannelID marks the channel device that claims share with channel
+// reservations, each with the channel of its config.
+const sharedChannelID = -1
+
+// Shared reports whether this is the channel device that claims share.
+func (d *ComputeDomainChannelInfo) Shared() bool {
+	return d != nil && d.ID == sharedChannelID
+}
+
 func (d *ComputeDomainChannelInfo) CanonicalName() string {
+	if d.Shared() {
+		return imex.ChannelDeviceName
+	}
 	return fmt.Sprintf("%s-%d", ComputeDomainChannelType, d.ID)
 }
 
@@ -48,6 +62,18 @@ func (d *ComputeDomainDaemonInfo) CanonicalIndex() string {
 }
 
 func (d *ComputeDomainChannelInfo) GetDevice() resourceapi.Device {
+	// The shared device has no ID, as the controller picks the channel, and
+	// its own type, so that DeviceClasses tell it from per-channel devices.
+	if d.Shared() {
+		return resourceapi.Device{
+			Name: d.CanonicalName(),
+			Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
+				"type": {
+					StringValue: ptr.To(imex.ChannelDeviceType),
+				},
+			},
+		}
+	}
 	device := resourceapi.Device{
 		Name: d.CanonicalName(),
 		Attributes: map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{

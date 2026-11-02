@@ -1,0 +1,118 @@
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  namespace: {{ .Namespace }}
+  name: {{ .Name }}
+  labels:
+    {{ .DaemonSetLabelKey }}: {{ .DaemonSetLabelValue }}
+spec:
+  selector:
+    matchLabels:
+      {{ .DaemonSetLabelKey }}: {{ .DaemonSetLabelValue }}
+  # The controller restarts outdated daemons, one batch of cliques at a time.
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        {{ .DaemonSetLabelKey }}: {{ .DaemonSetLabelValue }}
+    spec:
+      serviceAccountName: compute-domain-daemon-service-account
+      # Static IMEX daemons only run on nodes of an NVLink clique, once no
+      # per-ComputeDomain IMEX daemon runs there.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: {{ .CliqueNodeLabelKey }}
+                operator: Exists
+              - key: {{ .ComputeDomainNodeLabelKey }}
+                operator: DoesNotExist
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
+      containers:
+      # The image and IMEX config overrides are set by the controller.
+      - name: compute-domain-daemon
+        command: ["compute-domain-daemon", "-v", "$(LOG_VERBOSITY)", "run"]
+        env:
+        # LOG_VERBOSITY is the source of truth, it's injected via CLI argument
+        # above because of klogs limited configuration interface.
+        - name: LOG_VERBOSITY
+          value: "{{ .LogVerbosity }}"
+        - name: MAX_NODES_PER_IMEX_DOMAIN
+          value: "{{ .MaxNodesPerIMEXDomain }}"
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        # Use runc: explicit "void", as otherwise we inherit "all".
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: void
+        # Fixed rather than inherited from the controller, so that changing
+        # driver feature gates does not change the daemons.
+        - name: FEATURE_GATES
+          value: "IMEXDaemonsWithDNSNames=true,ComputeDomainCliques=true"
+        resources:
+          claims:
+          - name: compute-domain-daemon
+        # The startup probe aggressively checks every second to see if the pod
+        # is healthy. We set a large failureThreshold to avoid having the
+        # startup probe kill the pod if it fails (we just don't want it to go
+        # ready). After the startup probe completes, we run readiness probes
+        # and liveness probes to less aggressively mark this pod as not-ready
+        # if/when necessary.
+        startupProbe:
+          exec:
+            command: ["compute-domain-daemon", "-v", "$(LOG_VERBOSITY)", "check"]
+          initialDelaySeconds: 0
+          periodSeconds: 1
+          timeoutSeconds: 10
+          failureThreshold: 1200 # (1s*1200s)=20min
+          successThreshold: 1
+        livenessProbe:
+          exec:
+            command: ["compute-domain-daemon", "-v", "$(LOG_VERBOSITY)", "check"]
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 20 # (60s*20)=20min
+          successThreshold: 1
+        readinessProbe:
+          exec:
+            command: ["compute-domain-daemon", "-v", "$(LOG_VERBOSITY)", "check"]
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 1
+          successThreshold: 1
+      # Repel all node taints.
+      # See https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/issues/305
+      tolerations:
+        - operator: "Exists"
+          effect: "NoSchedule"
+        - operator: "Exists"
+          effect: "NoExecute"
+        - operator: "Exists"
+          effect: "PreferNoSchedule"
+      resourceClaims:
+      - name: compute-domain-daemon
+        resourceClaimTemplateName: {{ .ResourceClaimTemplateName }}

@@ -42,7 +42,7 @@ setup () {
   kubectl apply -f demo/specs/imex/channel-injection.yaml
   kubectl wait --for=condition=READY pods imex-channel-injection --timeout=100s
   run kubectl logs imex-channel-injection
-  assert_output --partial "channel0"
+  assert_imex_channel_injected
 
   echo "test level 0"
   local _iargs=("--set" "logVerbosity=0")

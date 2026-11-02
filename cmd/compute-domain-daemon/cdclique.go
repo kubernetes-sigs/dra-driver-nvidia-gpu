@@ -209,7 +209,7 @@ func (m *ComputeDomainCliqueManager) ensureCliqueExists(ctx context.Context) err
 			Name:      m.cliqueName(),
 			Namespace: m.config.podNamespace,
 			Labels: map[string]string{
-				computeDomainLabelKey:       m.config.computeDomainUUID,
+				m.config.domainLabelKey:     m.config.computeDomainUUID,
 				computeDomainCliqueLabelKey: m.config.cliqueID,
 			},
 		},
@@ -254,8 +254,8 @@ func (m *ComputeDomainCliqueManager) onAddOrUpdate(ctx context.Context, obj any)
 	}
 
 	// Skip CDCliques that don't match on ComputeDomain UUID
-	if clique.Labels[computeDomainLabelKey] != m.config.computeDomainUUID {
-		klog.Warningf("CDClique processed with non-matching ComputeDomain UID (%v, %v)", clique.Labels[computeDomainLabelKey], m.config.computeDomainUUID)
+	if clique.Labels[m.config.domainLabelKey] != m.config.computeDomainUUID {
+		klog.Warningf("CDClique processed with non-matching domain UID (%v, %v)", clique.Labels[m.config.domainLabelKey], m.config.computeDomainUUID)
 		return nil
 	}
 

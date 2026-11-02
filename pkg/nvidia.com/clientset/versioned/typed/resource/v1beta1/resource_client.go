@@ -30,6 +30,7 @@ type ResourceV1beta1Interface interface {
 	RESTClient() rest.Interface
 	ComputeDomainsGetter
 	ComputeDomainCliquesGetter
+	ComputeDomainDaemonSetsGetter
 }
 
 // ResourceV1beta1Client is used to interact with features provided by the resource.nvidia.com group.
@@ -43,6 +44,10 @@ func (c *ResourceV1beta1Client) ComputeDomains(namespace string) ComputeDomainIn
 
 func (c *ResourceV1beta1Client) ComputeDomainCliques(namespace string) ComputeDomainCliqueInterface {
 	return newComputeDomainCliques(c, namespace)
+}
+
+func (c *ResourceV1beta1Client) ComputeDomainDaemonSets() ComputeDomainDaemonSetInterface {
+	return newComputeDomainDaemonSets(c)
 }
 
 // NewForConfig creates a new ResourceV1beta1Client for the given config.

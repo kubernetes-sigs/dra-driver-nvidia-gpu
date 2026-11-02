@@ -28,6 +28,8 @@ type Interface interface {
 	ComputeDomains() ComputeDomainInformer
 	// ComputeDomainCliques returns a ComputeDomainCliqueInformer.
 	ComputeDomainCliques() ComputeDomainCliqueInformer
+	// ComputeDomainDaemonSets returns a ComputeDomainDaemonSetInformer.
+	ComputeDomainDaemonSets() ComputeDomainDaemonSetInformer
 }
 
 type version struct {
@@ -49,4 +51,9 @@ func (v *version) ComputeDomains() ComputeDomainInformer {
 // ComputeDomainCliques returns a ComputeDomainCliqueInformer.
 func (v *version) ComputeDomainCliques() ComputeDomainCliqueInformer {
 	return &computeDomainCliqueInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// ComputeDomainDaemonSets returns a ComputeDomainDaemonSetInformer.
+func (v *version) ComputeDomainDaemonSets() ComputeDomainDaemonSetInformer {
+	return &computeDomainDaemonSetInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }

@@ -69,9 +69,11 @@ type Flags struct {
 	maxNodesPerIMEXDomain int
 	logVerbosityCDDaemon  int
 
+	imexDaemonLifecycle string
 	imexMode            string
 	imexIsolation       string
 	imexConfigOverrides string
+	imexMaxChannels     int
 
 	httpEndpoint string
 	metricsPath  string
@@ -155,24 +157,35 @@ func newApp() *cli.App {
 			Destination: &flags.maxNodesPerIMEXDomain,
 		},
 		&cli.StringFlag{
+			Name:        "imex-daemon-lifecycle",
+			Usage:       "Who runs the nvidia-imex daemons: perComputeDomain (default; the driver runs them for each ComputeDomain), static (one per node from the ComputeDomainDaemonSet) or hostManaged (the admin runs them as a host service).",
+			Destination: &flags.imexDaemonLifecycle,
+			EnvVars:     []string{"IMEX_DAEMON_LIFECYCLE"},
+		},
+		&cli.StringFlag{
 			Name:        "imex-mode",
-			Usage:       "IMEX deployment mode: driverManaged or hostManaged.",
-			Value:       string(imex.ModeDriverManaged),
+			Usage:       "Deprecated: use --imex-daemon-lifecycle. hostManaged maps to --imex-daemon-lifecycle=hostManaged.",
 			Destination: &flags.imexMode,
 			EnvVars:     []string{"IMEX_MODE"},
 		},
 		&cli.StringFlag{
 			Name:        "imex-isolation",
-			Usage:       "IMEX isolation strategy: domain (default; all workloads in the same IMEX domain share channel 0) or channel (not yet supported).",
-			Value:       string(imex.IsolationIMEXDomain),
+			Usage:       "Deprecated and ignored: IMEX channels follow the ComputeDomainChannelReservations feature gate.",
 			Destination: &flags.imexIsolation,
 			EnvVars:     []string{"IMEX_ISOLATION"},
 		},
 		&cli.StringFlag{
 			Name:        "imex-config-overrides",
-			Usage:       "Comma-separated KEY=VALUE overrides for arbitrary nvidia-imex daemon config file settings generated in the driverManaged mode.",
+			Usage:       "Comma-separated KEY=VALUE overrides for arbitrary nvidia-imex daemon config file settings generated with the perComputeDomain IMEX daemon lifecycle.",
 			Destination: &flags.imexConfigOverrides,
 			EnvVars:     []string{"IMEX_CONFIG_OVERRIDES"},
+		},
+		&cli.IntFlag{
+			Name:        "imex-max-channels",
+			Usage:       "IMEX channel IDs [0, N) assigned in each NVLink clique (ComputeDomainChannelReservations feature gate). At most the IMEX channels of the nodes.",
+			Value:       imex.DefaultMaxChannels,
+			Destination: &flags.imexMaxChannels,
+			EnvVars:     []string{"IMEX_MAX_CHANNELS"},
 		},
 		&cli.StringFlag{
 			Category:    "HTTP server:",
@@ -237,8 +250,14 @@ func newApp() *cli.App {
 				return fmt.Errorf("feature gate validation failed: %w", err)
 			}
 
-			imexConfig := imex.Config{Mode: imex.Mode(flags.imexMode), Isolation: imex.Isolation(flags.imexIsolation)}
-			if err := imexConfig.Validate(featuregates.Enabled(featuregates.HostManagedIMEXDaemon)); err != nil {
+			imexConfig, warnings, err := imex.ResolveConfig(flags.imexDaemonLifecycle, flags.imexMode, flags.imexIsolation)
+			for _, warning := range warnings {
+				klog.Warning(warning)
+			}
+			if err != nil {
+				return fmt.Errorf("imex configuration validation failed: %w", err)
+			}
+			if err := imexConfig.Validate(); err != nil {
 				return fmt.Errorf("imex configuration validation failed: %w", err)
 			}
 			imexConfigOverrides, err := imex.ParseConfigOverrides(flags.imexConfigOverrides)
@@ -247,6 +266,9 @@ func newApp() *cli.App {
 			}
 			if err := imex.ValidateConfigOverrides(imexConfigOverrides); err != nil {
 				return fmt.Errorf("invalid imex-config-overrides: %w", err)
+			}
+			if err := imex.ValidateMaxChannels(flags.imexMaxChannels); err != nil {
+				return err
 			}
 			if imexConfig.EffectiveHostManaged() {
 				// The driver never creates per-ComputeDomain IMEX DaemonSets or
