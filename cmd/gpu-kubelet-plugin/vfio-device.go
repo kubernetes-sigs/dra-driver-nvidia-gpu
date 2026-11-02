@@ -25,10 +25,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"k8s.io/klog/v2"
 )
 
@@ -42,8 +44,13 @@ const (
 	vfioDevicesPath              = "/dev/vfio/devices"
 	iommuDevicePath              = "/dev/iommu"
 	nvidiaPersistencedSocketPath = "/run/nvidia-persistenced/socket"
-	gpuFreeCheckInterval         = 1 * time.Second
-	gpuFreeCheckTimeout          = 60 * time.Second
+	// The kubelet plugin mounts the host's /proc here when PassthroughSupport
+	// is enabled, so it lists every process in the host PID namespace.
+	procRoot = "/proc"
+	// NV_MAJOR_DEVICE_NUMBER: /dev/nvidia<minor> is always char device 195:<minor>.
+	nvidiaDeviceMajor    = 195
+	gpuFreeCheckInterval = 1 * time.Second
+	gpuFreeCheckTimeout  = 60 * time.Second
 	// Keep driverChangeTimeout short to avoid blocking the plugin process
 	// for too long from serving other device preparation/unpreparation
 	// requests.
@@ -153,13 +160,11 @@ func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) e
 // WaitForGPUFree does a best effort scan of the GPU clients running on the host and
 // waits for them to exit on their own.
 //
-// This polls the GPU's /dev/nvidia* device node in the driver installation path on
-// the host periodically to see if any process has open fds to it. This acts as a
-// limited safety net to ensure that we don't mistakenly try to unbind a GPU from
-// the nvidia driver while it is busy.
-// Note: Here, we can only check if there are any GPU clients running on the host rootfs
-// where the driver is installed. If you have containerized GPU clients that work
-// with their own view of the device nodes, we will not able to detect it.
+// This periodically scans the host's /proc for processes with open fds to the
+// GPU's /dev/nvidia<minor> character device. This acts as a limited safety net
+// to ensure that we don't mistakenly try to unbind a GPU from the nvidia driver
+// while it is busy. Matching by device number rather than path also detects
+// containerized GPU clients that work with their own view of the device nodes.
 func (vm *VfioPciManager) WaitForGPUFree(ctx context.Context, info *VfioDeviceInfo) error {
 	if info.parent == nil {
 		return nil
@@ -168,27 +173,80 @@ func (vm *VfioPciManager) WaitForGPUFree(ctx context.Context, info *VfioDeviceIn
 	ticker := time.NewTicker(gpuFreeCheckInterval)
 	defer ticker.Stop()
 
-	gpuDeviceNode := filepath.Join(vm.hostDriverRoot, "dev", fmt.Sprintf("nvidia%d", info.parent.minor))
 	var err error
 	for {
 		select {
 		case <-timeout:
 			return fmt.Errorf("timed out waiting for gpu to be free: %w", err)
 		case <-ticker.C:
-			out, cmdErr := execCommandWithChroot(vm.nvlib.hostRoot, "fuser", []string{gpuDeviceNode}) //nolint:gosec
-			if cmdErr != nil {
-				// fuser returns exit code 1 if no process is using the device.
-				if exitErr, ok := cmdErr.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-					return nil
-				}
-				err = fmt.Errorf("unexpected error checking if gpu device %q is free: %w", info.PciBusID, cmdErr)
+			holders, scanErr := findCharDeviceHolders(procRoot, nvidiaDeviceMajor, uint32(info.parent.minor)) //nolint:gosec
+			if scanErr != nil {
+				err = fmt.Errorf("unexpected error checking if gpu device %q is free: %w", info.PciBusID, scanErr)
 				klog.V(6).Infof("%v", err)
 				continue
 			}
-			err = fmt.Errorf("gpu device %q has open fds by process(es): %q", info.PciBusID, string(out))
+			if len(holders) == 0 {
+				return nil
+			}
+			err = fmt.Errorf("gpu device %q has open fds by process(es): %s", info.PciBusID, strings.Join(holders, ","))
 			klog.V(6).Infof("%v", err)
 		}
 	}
+}
+
+// findCharDeviceHolders returns "<pid>(<exe>)" for every process under procRoot
+// holding an open fd to the character device major:minor. Processes that exit
+// or whose fds cannot be read mid-scan are skipped.
+func findCharDeviceHolders(procRoot string, major, minor uint32) ([]string, error) {
+	procs, err := os.ReadDir(procRoot)
+	if err != nil {
+		return nil, fmt.Errorf("error listing %q: %w", procRoot, err)
+	}
+	var holders []string
+	for _, p := range procs {
+		// Only the numeric entries of /proc are processes; the rest (self,
+		// sys, meminfo, ...) are kernel interfaces.
+		if _, err := strconv.Atoi(p.Name()); err != nil {
+			continue
+		}
+		// /proc/<pid>/fd holds one symlink per open fd. Listing it fails with
+		// ENOENT for a process that exited mid-scan, and with EACCES for one
+		// we may not inspect, which the privileged plugin does not expect;
+		// either way there is nothing to check, so skip it.
+		fdDir := filepath.Join(procRoot, p.Name(), "fd")
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue
+		}
+		for _, fd := range fds {
+			// Stat follows the fd symlink to the open file itself, so this
+			// works even when the process sees the device node under a path
+			// that does not exist in our mount namespace.
+			var st unix.Stat_t
+			if err := unix.Stat(filepath.Join(fdDir, fd.Name()), &st); err != nil {
+				continue
+			}
+			// A character device is identified by the major:minor packed into
+			// st_rdev, regardless of the node's name or location.
+			rdev := uint64(st.Rdev) //nolint:gosec,unconvert
+			if uint32(st.Mode)&unix.S_IFMT == unix.S_IFCHR && unix.Major(rdev) == major && unix.Minor(rdev) == minor {
+				holders = append(holders, fmt.Sprintf("%s(%s)", p.Name(), processExeName(procRoot, p.Name())))
+				break
+			}
+		}
+	}
+	return holders, nil
+}
+
+// processExeName returns the basename of /proc/<pid>/exe. Unlike
+// /proc/<pid>/comm it is not truncated to 15 bytes. It is empty when the link
+// cannot be read, e.g. for a process that exited mid-scan.
+func processExeName(procRoot, pid string) string {
+	exe, err := os.Readlink(filepath.Join(procRoot, pid, "exe"))
+	if err != nil {
+		return ""
+	}
+	return filepath.Base(exe)
 }
 
 // Unconfigure binds the GPU to the nvidia driver.
