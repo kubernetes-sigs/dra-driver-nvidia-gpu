@@ -160,6 +160,12 @@ echo "--- Step 1: Building mock NVML library ---"
 MOCKNVML_DIR="${K8S_TEST_INFRA_DIR}/pkg/gpu/mocknvml"
 BUILT_LIB="${MOCKNVML_DIR}/libnvidia-ml.so.${DRIVER_VERSION}"
 
+# XID events and NVML_FI_DEV_GET_GPU_RECOVERY_ACTION are patched in before the
+# library is built. Drop any earlier artifact so this checkout is recompiled.
+echo "--- Applying GPU health-control support ---"
+bash "${SCRIPT_DIR}/apply-health-control.sh" "${MOCKNVML_DIR}"
+rm -f "${MOCKNVML_DIR}"/libnvidia-ml.so.*
+
 # Check if already built with correct version
 if [ -f "${BUILT_LIB}" ]; then
   echo "Mock NVML library already built: ${BUILT_LIB}"

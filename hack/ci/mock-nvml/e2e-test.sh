@@ -202,6 +202,14 @@ if [ "${K8S_MINOR}" -ge 35 ]; then
   FEATURE_GATES="DRAExtendedResource=true,DRAPartitionableDevices=true"
   echo "K8s >= 1.35 (${RESOLVED_K8S_VERSION}): enabling DRAExtendedResource,DRAPartitionableDevices"
 fi
+# GPU health taints are stored on ResourceSlice devices. Through 1.35 that
+# field is behind DRADeviceTaints and is off by default. 1.36 enables it by
+# default; setting a removed gate would make Kind reject the cluster config.
+ENABLE_DRA_DEVICE_TAINTS=false
+if [ "${K8S_MINOR}" -le 35 ]; then
+  ENABLE_DRA_DEVICE_TAINTS=true
+  echo "K8s <= 1.35 (${RESOLVED_K8S_VERSION}): enabling DRADeviceTaints"
+fi
 TEST_DRA_LIST_TYPE_ATTRIBUTES=false
 if [ "${K8S_MINOR}" -ge 37 ]; then
   TEST_DRA_LIST_TYPE_ATTRIBUTES=true
@@ -233,6 +241,11 @@ KINDEOF
   if [ "${TEST_DRA_LIST_TYPE_ATTRIBUTES}" = "true" ]; then
     cat << 'KINDEOF'
   DRAListTypeAttributes: true
+KINDEOF
+  fi
+  if [ "${ENABLE_DRA_DEVICE_TAINTS}" = "true" ]; then
+    cat << 'KINDEOF'
+  DRADeviceTaints: true
 KINDEOF
   fi
   cat << 'KINDEOF'
