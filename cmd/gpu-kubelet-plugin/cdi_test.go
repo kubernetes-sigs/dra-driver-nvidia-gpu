@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -316,6 +317,48 @@ func TestCreateClaimSpecFileRejectsMismatchedGPUDeviceMinor(t *testing.T) {
 	err := handler.CreateClaimSpecFile("claim", preparedDevices, nil)
 	require.ErrorContains(t, err, "expected device node /dev/nvidia0")
 	require.Equal(t, 2, fake.deviceSpecCalls)
+}
+
+func TestCreateClaimSpecFileMergesClaimContainerEdits(t *testing.T) {
+	fake := &fakeNVCDI{
+		getCommonEdits: func() (*cdiapi.ContainerEdits, error) {
+			return containerEdits("/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools"), nil
+		},
+		getDeviceSpecs: func(...string) ([]cdispec.Device, error) {
+			return deviceSpecs("/dev/nvidia0"), nil
+		},
+	}
+	cdiRoot := t.TempDir()
+	handler := &CDIHandler{
+		nvcdiClaim: fake,
+		specCache:  utilcache.NewExpiring(),
+		cdiRoot:    cdiRoot,
+	}
+	preparedDevices := PreparedDevices{{
+		Devices: PreparedDeviceList{{
+			Gpu: &PreparedGpu{
+				Info: &GpuInfo{UUID: "GPU-0", minor: 0},
+				Device: &CheckpointedDevice{
+					DeviceName: "gpu-0",
+				},
+			},
+		}},
+	}}
+	ipcInfo := &LocalIPCInfo{HostPath: t.TempDir(), ContainerPath: localIPCContainerPath}
+
+	err := handler.CreateClaimSpecFile("claim", preparedDevices, ipcInfo.GetCDIContainerEdits())
+	require.NoError(t, err)
+
+	specName := cdiapi.GenerateTransientSpecName(cdiVendor, cdiClaimClass, "claim")
+	spec, err := cdiapi.ReadSpec(filepath.Join(cdiRoot, specName+".yaml"), 0)
+	require.NoError(t, err)
+	edits := spec.ContainerEdits
+	require.Contains(t, edits.Env, "NVIDIA_DRA_LOCAL_IPC_DIR="+localIPCContainerPath)
+	require.Len(t, edits.Mounts, 1)
+	require.Equal(t, ipcInfo.HostPath, edits.Mounts[0].HostPath)
+	require.Equal(t, localIPCContainerPath, edits.Mounts[0].ContainerPath)
+	// Claim edits are appended to, not substituted for, the common NVIDIA edits.
+	require.Len(t, edits.DeviceNodes, 3)
 }
 
 func TestGetDeviceSpecsByUUIDAndMinorRefreshesStaleCache(t *testing.T) {

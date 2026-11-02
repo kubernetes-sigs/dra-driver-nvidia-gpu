@@ -119,7 +119,7 @@ Requires [`PassthroughSupport`](feature-gates.md) (Alpha, default: false). `iomm
 
 ### LocalIPCConfig
 
-Enables a writable directory scoped to an entire ResourceClaim for same-node IPC. It must not specify `requests`: every container consuming any device from the ResourceClaim receives the same directory.
+Exposes a writable directory for same-node IPC, such as UNIX domain sockets, shared by every container that consumes a GPU device from the ResourceClaim. It must not specify `requests`. For cross-Pod IPC, all Pods must reference the same ResourceClaim; a ResourceClaimTemplate creates a separate claim and directory for each Pod.
 
 ```yaml
 apiVersion: resource.nvidia.com/v1beta1
@@ -131,13 +131,13 @@ enabled: true
 
 | Field | Type | Description |
 |---|---|---|
-| `enabled` | bool | When `true`, exposes the directory at `/run/nvidia-dra/local-ipc`. Defaults to `false` and requires the [`LocalIPCDirectory`](feature-gates.md) feature gate. |
+| `enabled` | bool | When `true`, mounts the directory at `/run/nvidia-dra/local-ipc` and sets `NVIDIA_DRA_LOCAL_IPC_DIR` to that path. Defaults to `false`. |
 
-The driver injects the directory through CDI and sets `NVIDIA_DRA_LOCAL_IPC_DIR=/run/nvidia-dra/local-ipc`. Workload Pods do not need `hostPath` or `hostIPC` for this rendezvous. The driver provides only the directory; applications own their socket protocol, file permissions, and transferred handles.
+The driver provides only the directory; applications own their socket protocol, file permissions, and transferred handles.
 
-When claim-wide configurations are provided by both a DeviceClass and a ResourceClaim, the ResourceClaim configuration takes precedence.
-
-When the feature gate is disabled, new preparations with `enabled: true` are rejected. The driver continues to restore and remove directories for claims already in `PrepareCompleted` until they are unprepared.
+{{% alert title="Note" %}}
+Requires [`LocalIPCDirectory`](feature-gates.md) (Alpha, default: false).
+{{% /alert %}}
 
 ## ComputeDomain CRDs
 
