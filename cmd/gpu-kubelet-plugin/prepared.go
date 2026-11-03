@@ -89,6 +89,31 @@ func (d *PreparedDevice) CanonicalName() string {
 	panic("unexpected type for AllocatableDevice")
 }
 
+// CheckpointedName is CanonicalName for a device read back from a checkpoint,
+// where an entry may name no device at all: CanonicalName panics on one that
+// sets no kind, and Type reports the first kind it finds, so an entry that sets
+// two would answer for only one of the devices it holds.
+func (d PreparedDevice) CheckpointedName() (DeviceName, bool) {
+	var device *CheckpointedDevice
+	kinds := 0
+	if d.Gpu != nil {
+		device = d.Gpu.Device
+		kinds++
+	}
+	if d.Mig != nil {
+		device = d.Mig.Device
+		kinds++
+	}
+	if d.Vfio != nil {
+		device = d.Vfio.Device
+		kinds++
+	}
+	if kinds != 1 || device == nil || device.DeviceName == "" {
+		return "", false
+	}
+	return device.DeviceName, true
+}
+
 // Return only devices representing full, physical GPUs.
 func (l PreparedDeviceList) Gpus() PreparedDeviceList {
 	var devices PreparedDeviceList
@@ -269,4 +294,35 @@ func (c *PreparedClaim) GetNonAdminDevices() map[string]struct{} {
 		requested[r.Device] = struct{}{}
 	}
 	return requested
+}
+
+// GetHeldDevices returns the devices the claim holds, and whether that could be
+// determined at all. An allocation missing from a checkpointed claim does not
+// make it a claim that holds nothing: it was prepared with devices of its own.
+// An entry among those that names no device leaves the whole claim unaccounted
+// for, because a caller tears down whatever the list it gets leaves out.
+func (c *PreparedClaim) GetHeldDevices() ([]DeviceName, bool) {
+	if c.Status.Allocation != nil {
+		results := c.Status.Allocation.Devices.Results
+		names := make([]DeviceName, 0, len(results))
+		for _, r := range results {
+			names = append(names, r.Device)
+		}
+		return names, true
+	}
+
+	var names []DeviceName
+	for _, group := range c.PreparedDevices {
+		if group == nil {
+			return nil, false
+		}
+		for _, device := range group.Devices {
+			name, ok := device.CheckpointedName()
+			if !ok {
+				return nil, false
+			}
+			names = append(names, name)
+		}
+	}
+	return names, len(names) > 0
 }

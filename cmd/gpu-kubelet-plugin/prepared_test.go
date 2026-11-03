@@ -177,6 +177,57 @@ func TestPreparedDeviceCanonicalName(t *testing.T) {
 	}
 }
 
+func TestPreparedDeviceCheckpointedName(t *testing.T) {
+	tests := map[string]struct {
+		device PreparedDevice
+		want   DeviceName
+		wantOK bool
+	}{
+		"full GPU": {
+			device: newPreparedGpu("gpu-0", "GPU-0000"),
+			want:   "gpu-0",
+			wantOK: true,
+		},
+		"MIG device": {
+			device: newPreparedMigDevice("mig-0", "MIG-0000"),
+			want:   "mig-0",
+			wantOK: true,
+		},
+		"vfio device": {
+			device: newPreparedVfioDevice("vfio-0", "VFIO-0000"),
+			want:   "vfio-0",
+			wantOK: true,
+		},
+		// The kind this one is missing is what CanonicalName panics on.
+		"no kind set": {
+			device: PreparedDevice{},
+		},
+		// Type would report this as a full GPU, and the MIG device it also
+		// holds would go unnamed.
+		"two kinds set": {
+			device: PreparedDevice{
+				Gpu: newPreparedGpu("gpu-0", "GPU-0000").Gpu,
+				Mig: newPreparedMigDevice("mig-0", "MIG-0000").Mig,
+			},
+		},
+		"no checkpointed device": {
+			device: PreparedDevice{Mig: &PreparedMigDevice{}},
+		},
+		"no device name": {
+			device: newPreparedMigDevice("", "MIG-0000"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, ok := tc.device.CheckpointedName()
+
+			require.Equal(t, tc.wantOK, ok)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestPreparedDeviceListGpus(t *testing.T) {
 	tests := map[string]struct {
 		devices   PreparedDeviceList
@@ -576,6 +627,69 @@ func TestPreparedClaimGetNonAdminDevices(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			require.Equal(t, tc.want, tc.claim.GetNonAdminDevices())
+		})
+	}
+}
+
+// The cleanup paths tear down every device this does not name, so a list that is
+// short by one device is worse than no list at all.
+func TestPreparedClaimGetHeldDevices(t *testing.T) {
+	held := func(devices ...PreparedDevice) PreparedDevices {
+		return PreparedDevices{{Devices: devices}}
+	}
+	allocated := func(names ...DeviceName) resourceapi.ResourceClaimStatus {
+		results := make([]resourceapi.DeviceRequestAllocationResult, 0, len(names))
+		for _, name := range names {
+			results = append(results, resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: name})
+		}
+		return resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
+			Devices: resourceapi.DeviceAllocationResult{Results: results},
+		}}
+	}
+
+	tests := map[string]struct {
+		claim  PreparedClaim
+		want   []DeviceName
+		wantOK bool
+	}{
+		"the allocation answers whenever the checkpoint has one": {
+			claim:  PreparedClaim{Status: allocated("gpu-0", "mig-0"), PreparedDevices: held(newPreparedGpu("gpu-1", "GPU-0001"))},
+			want:   []DeviceName{"gpu-0", "mig-0"},
+			wantOK: true,
+		},
+		"an allocation of nothing is still an answer": {
+			claim:  PreparedClaim{Status: allocated()},
+			want:   []DeviceName{},
+			wantOK: true,
+		},
+		"prepared devices answer when the allocation is missing": {
+			claim:  PreparedClaim{PreparedDevices: held(newPreparedMigDevice("mig-0", "MIG-0000"))},
+			want:   []DeviceName{"mig-0"},
+			wantOK: true,
+		},
+		"a full GPU answers for itself": {
+			claim:  PreparedClaim{PreparedDevices: held(newPreparedGpu("gpu-0", "GPU-0000"))},
+			want:   []DeviceName{"gpu-0"},
+			wantOK: true,
+		},
+		"neither recorded": {
+			claim: PreparedClaim{},
+		},
+		// The readable device beside it is what made a partial list look whole.
+		"an entry that names no device": {
+			claim: PreparedClaim{PreparedDevices: held(newPreparedMigDevice("mig-0", "MIG-0000"), PreparedDevice{})},
+		},
+		"a nil device group": {
+			claim: PreparedClaim{PreparedDevices: append(held(newPreparedMigDevice("mig-0", "MIG-0000")), nil)},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, ok := tc.claim.GetHeldDevices()
+
+			require.Equal(t, tc.wantOK, ok)
+			require.Equal(t, tc.want, got)
 		})
 	}
 }
