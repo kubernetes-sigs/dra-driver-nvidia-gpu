@@ -27,7 +27,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
-	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/fabricmanager"
 )
 
 // Represents a specific, full, physical GPU device.
@@ -41,7 +41,6 @@ type GpuInfo struct {
 	productName           string
 	brand                 string
 	architecture          string
-	architectureID        nvml.DeviceArchitecture
 	cudaComputeCapability string
 	driverVersion         string
 	cudaDriverVersion     string
@@ -203,17 +202,11 @@ func (d *GpuInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.DeviceA
 		}
 	}
 
-	if featuregates.Enabled(featuregates.FabricManagerPartitioning) && d.supportsFabricManagerPartitioning() {
+	if fabricmanager.SupportsFabricManagerPartitioning() {
 		d.addFabricManagerAttributes(attrs)
 	}
 
 	return attrs
-}
-
-// supportsFabricManagerPartitioning reports whether this GPU meets the minimum
-// architecture requirement for Fabric Manager partitioning.
-func (d *GpuInfo) supportsFabricManagerPartitioning() bool {
-	return d != nil && d.architectureID >= nvml.DEVICE_ARCH_HOPPER
 }
 
 // addFabricManagerAttributes publishes the NVML-reported gpuModuleID and
@@ -312,12 +305,8 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 	addDeviceAttribute(device.Attributes, d.pciBusIDAttr)
 	addDeviceAttribute(device.Attributes, d.pcieRootAttr)
 
-	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
-		if d.parent == nil {
-			klog.V(4).Infof("No parent GPU for %s; skipping Fabric Manager attributes", d.CanonicalName())
-		} else if d.parent.supportsFabricManagerPartitioning() {
-			d.parent.addFabricManagerAttributes(device.Attributes)
-		}
+	if d.parent != nil && fabricmanager.SupportsFabricManagerPartitioning() {
+		d.parent.addFabricManagerAttributes(device.Attributes)
 	}
 	addDeviceAttribute(device.Attributes, d.numaNodeAttr)
 

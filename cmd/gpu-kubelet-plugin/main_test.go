@@ -25,6 +25,17 @@ import (
 )
 
 func TestValidateCLIFlagsConsumableShares(t *testing.T) {
+	oldConsumableShares := featuregates.Enabled(featuregates.ConsumableShares)
+	oldPassthrough := featuregates.Enabled(featuregates.PassthroughSupport)
+	oldFabricManager := featuregates.Enabled(featuregates.FabricManagerPartitioning)
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+			string(featuregates.ConsumableShares):          oldConsumableShares,
+			string(featuregates.PassthroughSupport):        oldPassthrough,
+			string(featuregates.FabricManagerPartitioning): oldFabricManager,
+		}))
+	})
+
 	tests := []struct {
 		name                 string
 		featureGate          bool
@@ -84,7 +95,9 @@ func TestValidateCLIFlagsConsumableShares(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
-				string(featuregates.ConsumableShares): tc.featureGate,
+				string(featuregates.ConsumableShares):          tc.featureGate,
+				string(featuregates.PassthroughSupport):        false,
+				string(featuregates.FabricManagerPartitioning): false,
 			}))
 
 			flags := &Flags{
@@ -97,6 +110,56 @@ func TestValidateCLIFlagsConsumableShares(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestValidateCLIFlagsHostRoot(t *testing.T) {
+	oldPassthrough := featuregates.Enabled(featuregates.PassthroughSupport)
+	oldFabricManager := featuregates.Enabled(featuregates.FabricManagerPartitioning)
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+			string(featuregates.PassthroughSupport):        oldPassthrough,
+			string(featuregates.FabricManagerPartitioning): oldFabricManager,
+		}))
+	})
+
+	for name, tc := range map[string]struct {
+		passthrough   bool
+		fabricManager bool
+		hostRoot      func(t *testing.T) string
+		wantError     bool
+	}{
+		"neither feature requires host root": {},
+		"passthrough requires host root": {
+			passthrough: true,
+			wantError:   true,
+		},
+		"fabric manager requires host root": {
+			fabricManager: true,
+			wantError:     true,
+		},
+		"fabric manager accepts mounted host root": {
+			fabricManager: true,
+			hostRoot:      func(t *testing.T) string { return t.TempDir() },
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+				string(featuregates.PassthroughSupport):        tc.passthrough,
+				string(featuregates.FabricManagerPartitioning): tc.fabricManager,
+			}))
+
+			flags := &Flags{consumableShares: "disabled"}
+			if tc.hostRoot != nil {
+				flags.hostRoot = tc.hostRoot(t)
+			}
+			err := validateCLIFlags(flags)
+			if tc.wantError {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }
