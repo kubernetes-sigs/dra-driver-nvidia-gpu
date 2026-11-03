@@ -38,7 +38,7 @@ After applying this resource, the controller creates:
 These objects describe the default `driverManaged` mode.
 In `hostManaged` mode, the controller creates the workload `ResourceClaimTemplate` but does not create the per-domain daemon DaemonSet.
 The host service must be ready through its configured command socket before a workload claim can prepare.
-Host-managed mode currently provides domain isolation and channel 0 only, even if the `ComputeDomain` requests `allocationMode: All`.
+Host-managed mode reserves one distinct channel per ComputeDomain, even if the `ComputeDomain` requests `allocationMode: All`.
 See [Host-managed IMEX](../prerequisites.md#host-managed-imex) before you select this mode.
 
 ## Use the channel in a workload
@@ -104,9 +104,16 @@ IMEX channels are injected:
 
 Use `All` only in `driverManaged` mode for workloads that need access to every
 channel in the IMEX domain.
-In `hostManaged` mode, domain isolation shares channel 0 among workloads.
+In `hostManaged` mode, every worker of a ComputeDomain receives its reserved channel ID across nodes. Different ComputeDomains receive different IDs.
 The controller forces the generated workload claim to `Single`, so a requested
 `All` is equivalent to `Single` when using host-managed mode and does not expose additional channels.
+
+The example above uses channel 0 for driver-managed mode. In host-managed mode,
+inspect the generated template's `spec.spec.devices.requests[0].exactly.selectors`
+to find the reserved ID, and substitute that ID in the startup and validation
+commands. For example, a domain reserved channel 1 must check
+`/dev/nvidia-caps-imex-channels/channel1`. Delete the ComputeDomain and its claims
+to release its reservation; deleting a worker alone keeps the domain's channel.
 
 ## Check status
 
@@ -170,8 +177,11 @@ the Helm value.
    DaemonSet nor a daemon `ResourceClaimTemplate`.
 
 3. Save the clique-affined workload above as `my-workload.yaml`, apply it, and
-   verify `channel0` with both `test -c` and the workload log commands shown
+   substitute the channel ID selected in its generated claim template, and
+   verify that device with both `test -c` and the workload log commands shown
    after the manifest.
+   Set `CHANNEL_ID` to that reserved ID in your shell for the recovery check
+   below (for example, `CHANNEL_ID=1`).
    A `Running` pod without that device check is not sufficient.
 
 4. In a maintenance window on a test node, exercise readiness failure and
@@ -223,11 +233,12 @@ the Helm value.
 
    ```bash
    kubectl wait --for=condition=Ready pod/my-workload --timeout=5m
-   kubectl exec my-workload -- test -c /dev/nvidia-caps-imex-channels/channel0
+   kubectl exec my-workload -- test -c "/dev/nvidia-caps-imex-channels/channel${CHANNEL_ID}"
    ```
 
 5. Delete the workload and `ComputeDomain`. The controller removes the workload
-   claim template, but it does not stop or reconfigure the host service:
+   claim template and releases its channel reservation after the workload claims
+   are removed. It does not stop or reconfigure the host service:
 
    ```bash
    kubectl delete pod my-workload

@@ -93,8 +93,9 @@ resources:
       #     Requires featureGates.HostManagedIMEXDaemon=true
       mode: driverManaged
       # isolation selects the IMEX isolation strategy. The value can be one of:
-      #   domain (default): In this mode, all workloads running in the
-      #     same IMEX domain will share the same channel (0).
+      #   domain (default): All workers of a ComputeDomain share one channel.
+      #     Driver-managed mode uses channel 0 in its own IMEX domain;
+      #     host-managed mode reserves a distinct channel per ComputeDomain.
       #   channel: not supported. In this mode, each workload will get a unique
       #     channel within an IMEX domain.
       isolation: "domain"

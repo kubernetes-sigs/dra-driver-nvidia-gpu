@@ -12,6 +12,9 @@ rules:
   resources: ["computedomains/status"]
   verbs: ["update"]
 - apiGroups: ["resource.k8s.io"]
+  resources: ["resourceslices", "resourceclaims"]
+  verbs: ["list"]
+- apiGroups: ["resource.k8s.io"]
   resources: ["resourceclaimtemplates"]
   verbs: ["get", "list", "watch", "create", "update", "delete"]
 - apiGroups: ["coordination.k8s.io"]
@@ -57,6 +60,15 @@ metadata:
   name: {{ include "dra-driver-nvidia-gpu.name" $ }}-role-controller
   namespace: {{ $namespace }}
 rules:
+{{- if eq $namespace (include "dra-driver-nvidia-gpu.namespace" $) }}
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["compute-domain-imex-channel-reservations"]
+  verbs: ["get", "update"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["create"]
+{{- end }}
 - apiGroups: ["apps"]
   resources: ["daemonsets"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

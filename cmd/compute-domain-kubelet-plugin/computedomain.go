@@ -72,7 +72,8 @@ type ComputeDomainManager struct {
 	cliqueIDMu sync.RWMutex
 	cliqueID   string
 
-	getCliqueIDFunc func() (string, error)
+	getCliqueIDFunc  func() (string, error)
+	onCliqueIDChange func(context.Context, string) error
 }
 
 type ComputeDomainDaemonSettings struct {
@@ -118,6 +119,12 @@ func (m *ComputeDomainManager) setCliqueID(cliqueID string) {
 	m.cliqueIDMu.Lock()
 	defer m.cliqueIDMu.Unlock()
 	m.cliqueID = cliqueID
+}
+
+// SetCliqueIDChangeCallback registers the ResourceSlice republisher used when
+// NVML reports a different physical fabric domain.
+func (m *ComputeDomainManager) SetCliqueIDChangeCallback(callback func(context.Context, string) error) {
+	m.onCliqueIDChange = callback
 }
 
 func (m *ComputeDomainManager) Start(ctx context.Context) (rerr error) {
@@ -515,6 +522,12 @@ func (m *ComputeDomainManager) refreshGPUCliqueID(ctx context.Context) error {
 	if oldCliqueID := m.CliqueID(); newCliqueID != "" && newCliqueID != oldCliqueID {
 		klog.Infof("GPU clique ID changed from %q to %q, updating %s node label", oldCliqueID, newCliqueID, gpuCliqueLabelKey)
 		m.setCliqueID(newCliqueID)
+		if m.onCliqueIDChange != nil {
+			if err := m.onCliqueIDChange(ctx, newCliqueID); err != nil {
+				m.setCliqueID(oldCliqueID)
+				return fmt.Errorf("republish resources for GPU clique ID %q: %w", newCliqueID, err)
+			}
+		}
 	}
 
 	if m.config.flags.gpuCliqueLabelEnabled {
