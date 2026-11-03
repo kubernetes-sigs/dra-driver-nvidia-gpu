@@ -141,12 +141,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		config:            config,
 		cplock:            flock.NewFlock(cpLockPath),
 		checkpointManager: checkpointManager,
-		/*fmManager:         fmManager,
-		tsManager:         tsManager,
-		mpsManager:        mpsManager,
-		vfioPciManager:    vfioPciManager,
-		perGPUAllocatable: perGPUAllocatable,*/
-		nvdevlib: nvdevlib,
+		nvdevlib:          nvdevlib,
 	}
 	state.checkpointCleanupManager = NewCheckpointCleanupManager(state, config.clientsets.Resource)
 
