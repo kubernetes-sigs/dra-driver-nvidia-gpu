@@ -107,18 +107,10 @@ const (
 	// VGPUSupport enables advertising NVIDIA vGPU partition devices
 	// (type=vgpu) as partitionable devices in ResourceSlices:
 	// a per-GPU CounterSet plus abstract per-profile slot partitions.
-	// Requires cluster-side DRAPartitionableDevices.
+	// Requires cluster-side DRAPartitionableDevices and
+	// DRADeviceCompatibilityGroups; the driver publishes KEP-5963
+	// compatibility groups unconditionally on this path.
 	VGPUSupport featuregate.Feature = "VGPUSupport"
-
-	// DRADeviceCompatibilityGroups makes the driver publish the
-	// compatibilityGroups field (KEP-5963) on device consumesCounters
-	// entries in ResourceSlices, for scheme/family exclusivity between
-	// partitions sharing a CounterSet (disjoint vGPU
-	// profile families). Mirrors the Kubernetes feature gate of the same
-	// name: enabling this in the driver is only safe when the cluster (API
-	// server and kube-scheduler) has DRADeviceCompatibilityGroups enabled;
-	// otherwise the scheduler ignores devices that declare groups.
-	DRADeviceCompatibilityGroups featuregate.Feature = "DRADeviceCompatibilityGroups"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -222,13 +214,6 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		},
 	},
 	VGPUSupport: {
-		{
-			Default:    false,
-			PreRelease: featuregate.Alpha,
-			Version:    version.MajorMinor(0, 6),
-		},
-	},
-	DRADeviceCompatibilityGroups: {
 		{
 			Default:    false,
 			PreRelease: featuregate.Alpha,

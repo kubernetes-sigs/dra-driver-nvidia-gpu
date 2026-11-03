@@ -43,14 +43,27 @@ consumableShares: ""
 
 # NVIDIA vGPU support (alpha). vGPU partition devices are advertised through
 # the partitionable-devices ResourceSlice model; this requires
-# featureGates.VGPUSupport=true, cluster-side DRAPartitionableDevices, and a
-# host running the NVIDIA vGPU Manager.
+# featureGates.VGPUSupport=true, cluster-side DRAPartitionableDevices and
+# DRADeviceCompatibilityGroups, and a host running the NVIDIA vGPU Manager.
 vgpu:
-  # profiles is a comma-separated allowlist of vGPU type names to advertise
-  # as vGPU partition devices, e.g. "NVIDIA L40S-12Q,NVIDIA L40S-24Q".
-  # Types not in the allowlist are never advertised, even if the host
-  # supports them. The empty list (default) advertises no vGPU partitions.
-  profiles: ""
+  # policy selects which vGPU profiles the driver advertises. It is rendered
+  # into a ConfigMap and projected into the GPU kubelet plugin. Profiles not
+  # selected by the policy are never advertised, even if the host supports
+  # them; the empty policy (default) advertises no vGPU partitions.
+  #
+  # Each rule selects GPUs by model and lists the profiles to advertise on
+  # them. A rule without gpuModel applies to every GPU on the node, and a GPU
+  # takes the union of every rule it matches.
+  #
+  #   policy:
+  #     apiVersion: resource.nvidia.com/v1beta1
+  #     kind: VgpuProfilePolicy
+  #     rules:
+  #     - gpuModel: "NVIDIA L40S"
+  #       profiles:
+  #       - name: "NVIDIA L40S-12Q"
+  #       - name: "NVIDIA L40S-24Q"
+  policy: {}
 
 allowDefaultNamespace: false
 
@@ -140,7 +153,6 @@ resources:
 #   DRAListTypeAttributes: false       # Publish list-valued DRA device attributes
 #   ConsumableShares: false            # Publish consumable capacity and multi-allocation support for devices
 #   VGPUSupport: false                 # Advertise NVIDIA vGPU partition devices in ResourceSlices
-#   DRADeviceCompatibilityGroups: false # Publish KEP-5963 compatibility groups; requires the cluster gate of the same name
 featureGates: {}
 
 # Log verbosity for all components. Zero or greater, higher number means higher

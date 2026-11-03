@@ -68,7 +68,7 @@ type GpuInfo struct {
 
 	// vgp profiles advertised for this physical GPU with the VGPUSupport
 	// feature gate: the intersection of host-supported vGPU types and the
-	// admin allowlist.
+	// profiles the admin policy selects for this GPU model.
 	vgpuProfiles []*VgpuProfileSpec
 }
 

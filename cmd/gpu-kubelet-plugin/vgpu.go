@@ -26,8 +26,6 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
-
-	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
 // Name of the counter published in the per-GPU CounterSet for the vGPU
@@ -60,7 +58,7 @@ const (
 
 // VgpuProfileSpec describes one vGPU profile (type) advertised on a physical
 // GPU: the intersection of the vGPU types the host reports as supported and
-// the administrator's profile allowlist (--vgpu-profiles).
+// the profiles the administrator's catalog selects for this GPU model.
 type VgpuProfileSpec struct {
 	// Full vGPU type name as reported by NVML, e.g. "NVIDIA L40S-12Q".
 	Name string
@@ -136,7 +134,6 @@ func (i *VgpuPartitionInfo) Attributes() map[resourceapi.QualifiedName]resourcea
 		"slot": {
 			IntValue: ptr.To(int64(i.Slot)),
 		},
-		// Parent GPU identity, per docs/design/vgpu-support.md section 6.2.2.
 		"uuid": {
 			StringValue: &i.Parent.UUID,
 		},
@@ -177,19 +174,16 @@ func (i *VgpuPartitionInfo) compatibilityGroup() string {
 // framebuffer cost. The partition device itself is the instance-slot bound:
 // only MaxInstances slot devices per profile are advertised.
 //
-// CompatibilityGroups (KEP-5963) is declared only when the driver's
-// DRADeviceCompatibilityGroups gate is enabled; publishing groups while the
-// cluster-side gate is off would make kube-scheduler ignore these devices
-// entirely (docs/design/vgpu-support.md, section 6.1.1 skew rule 2).
+// CompatibilityGroups (KEP-5963) is always declared on the vGPU path:
+// VGPUSupport needs the cluster-side DRADeviceCompatibilityGroups gate
+// as a prerequisite.
 func (i *VgpuPartitionInfo) PartConsumesCounters() []resourceapi.DeviceCounterConsumption {
 	consumption := resourceapi.DeviceCounterConsumption{
 		CounterSet: i.Parent.VgpuSharedCounterSetName(),
 		Counters: map[string]resourceapi.Counter{
 			vgpuFramebufferCounterName: {Value: *resource.NewQuantity(int64(i.Profile.FramebufferBytes), resource.BinarySI)},
 		},
-	}
-	if featuregates.Enabled(featuregates.DRADeviceCompatibilityGroups) {
-		consumption.CompatibilityGroups = []string{i.compatibilityGroup()}
+		CompatibilityGroups: []string{i.compatibilityGroup()},
 	}
 	return []resourceapi.DeviceCounterConsumption{consumption}
 }
@@ -201,18 +195,6 @@ func (i *VgpuPartitionInfo) PartGetDevice() resourceapi.Device {
 		Attributes:       i.Attributes(),
 		ConsumesCounters: i.PartConsumesCounters(),
 	}
-}
-
-// parseVgpuProfileAllowlist parses the --vgpu-profiles flag: a comma-separated
-// allowlist of full vGPU type names (e.g. "NVIDIA L40S-12Q,NVIDIA L40S-24Q").
-func parseVgpuProfileAllowlist(raw string) map[string]bool {
-	allowed := make(map[string]bool)
-	for _, name := range strings.Split(raw, ",") {
-		if name = strings.TrimSpace(name); name != "" {
-			allowed[name] = true
-		}
-	}
-	return allowed
 }
 
 // Sysfs attribute name of the vendor-specific VFIO vGPU type attribute

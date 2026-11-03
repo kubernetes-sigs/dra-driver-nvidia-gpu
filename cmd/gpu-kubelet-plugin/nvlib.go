@@ -39,6 +39,7 @@ import (
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/lookup/root"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/vgpuprofiles"
 )
 
 type GPUMinor = int
@@ -59,13 +60,12 @@ type deviceLib struct {
 	gpuUUIDbyPCIBusID map[PCIBusID]string
 	devhandleByUUID   map[string]nvml.Device
 
-	// vgpuProfileAllowlist holds the set of vGPU type names the administrator
-	// allows this driver to advertise (from --vgpu-profiles). Empty means
-	// advertise no vGPU partitions at all.
-	vgpuProfileAllowlist map[string]bool
+	// vgpuPolicy selects which vGPU profiles this driver advertises, per
+	// GPU model. An empty policy advertises no vGPU partitions at all.
+	vgpuPolicy *vgpuprofiles.Policy
 }
 
-func newDeviceLib(driver *root.Driver, hostRoot string, vgpuProfiles string) (*deviceLib, error) {
+func newDeviceLib(driver *root.Driver, hostRoot string, policy *vgpuprofiles.Policy) (*deviceLib, error) {
 	vfioEnabled := false
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
 		var err error
@@ -101,20 +101,20 @@ func newDeviceLib(driver *root.Driver, hostRoot string, vgpuProfiles string) (*d
 	)
 
 	d := deviceLib{
-		Interface:            nvdev.New(nvmllib),
-		nvmllib:              nvmllib,
-		driverLibraryPath:    driverLibraryPath,
-		devRoot:              driver.DevRoot,
-		hostRoot:             hostRoot,
-		vfioEnabled:          vfioEnabled,
-		sysfsRoot:            sysfsRoot,
-		nvidiaSMIPath:        nvidiaSMIPath,
-		nvpci:                nvpci,
-		nvpasst:              nvpassthrough,
-		gpuInfosByUUID:       make(map[string]*GpuInfo),
-		gpuUUIDbyPCIBusID:    make(map[PCIBusID]string),
-		devhandleByUUID:      make(map[string]nvml.Device),
-		vgpuProfileAllowlist: parseVgpuProfileAllowlist(vgpuProfiles),
+		Interface:         nvdev.New(nvmllib),
+		nvmllib:           nvmllib,
+		driverLibraryPath: driverLibraryPath,
+		devRoot:           driver.DevRoot,
+		hostRoot:          hostRoot,
+		vfioEnabled:       vfioEnabled,
+		sysfsRoot:         sysfsRoot,
+		nvidiaSMIPath:     nvidiaSMIPath,
+		nvpci:             nvpci,
+		nvpasst:           nvpassthrough,
+		gpuInfosByUUID:    make(map[string]*GpuInfo),
+		gpuUUIDbyPCIBusID: make(map[PCIBusID]string),
+		devhandleByUUID:   make(map[string]nvml.Device),
+		vgpuPolicy:        policy,
 	}
 
 	// Current design: when DynamicMIG is enabled, use one long-lived NVML
@@ -341,7 +341,7 @@ func (l deviceLib) GetPerGpuAllocatableDevices(indices ...int) (*PerGPUAllocatab
 
 		// Alongside the allocatable full GPU, announce abstract,
 		// not yet instantiated vGPU partitions for the
-		// allowlisted vGPU types the host can create on it. MIG-enabled
+		// policy-selected vGPU types the host can create on it. MIG-enabled
 		// GPUs are intentionally skipped: MIG-backed vGPU partitions are
 		// a later phase.
 		if featuregates.Enabled(featuregates.VGPUSupport) && !gpuInfo.migEnabled {
@@ -414,14 +414,20 @@ func (l deviceLib) discoverMigDevicesByGPU(gpuInfo *GpuInfo) ([]*AllocatableDevi
 
 // enumerateVgpuPartitions inspects the vGPU types the NVIDIA vGPU Manager on
 // this host can create for the given physical GPU, intersects them with the
-// administrator's profile allowlist, and returns one abstract partition
-// device per (profile, slot). It records the accepted profile
-// specs on gpuInfo so the ResourceSlice builder can derive the per-GPU
+// profiles the administrator's policy selects for this GPU model, and returns
+// one abstract partition device per (profile, slot). It records the accepted
+// profile specs on gpuInfo so the ResourceSlice builder can derive the per-GPU
 // CounterSet for the vGPU partitioning scheme.
 //
-// An empty allowlist or a host without vGPU support yields no partitions, not an error.
+// An empty policy or a host without vGPU support yields no partitions, not an error.
 func (l deviceLib) enumerateVgpuPartitions(gpuInfo *GpuInfo, d nvdev.Device) (AllocatableDevices, error) {
-	if len(l.vgpuProfileAllowlist) == 0 {
+	if l.vgpuPolicy == nil || l.vgpuPolicy.Empty() {
+		return nil, nil
+	}
+
+	selected := l.vgpuPolicy.ProfilesForGPU(gpuInfo.productName)
+	if len(selected) == 0 {
+		klog.V(4).Infof("vGPU profile policy selects no profiles for GPU %s (model %q)", gpuInfo.CanonicalName(), gpuInfo.productName)
 		return nil, nil
 	}
 
@@ -463,15 +469,17 @@ func (l deviceLib) enumerateVgpuPartitions(gpuInfo *GpuInfo, d nvdev.Device) (Al
 	}
 
 	var profiles []*VgpuProfileSpec
+	matched := make(map[string]bool, len(selected))
 	for _, profileID := range types {
 		name, ret := profileID.GetName()
 		if ret != nvml.SUCCESS {
 			return nil, fmt.Errorf("error getting name of vGPU type %d: %w", profileID.GetID(), ret)
 		}
 		klog.V(4).Infof("Creatable vGPU Types and Names: %v %v", types, name)
-		if !l.vgpuProfileAllowlist[name] {
+		if _, ok := selected[name]; !ok {
 			continue
 		}
+		matched[name] = true
 
 		framebufferBytes, ret := profileID.GetFramebufferSize()
 		if ret != nvml.SUCCESS {
@@ -494,8 +502,23 @@ func (l deviceLib) enumerateVgpuPartitions(gpuInfo *GpuInfo, d nvdev.Device) (Al
 		})
 	}
 
+	// Report profiles the policy asks for that this host cannot create.
+	// Previously these were dropped silently, leaving a typo or a
+	// wrong-model policy indistinguishable from "vGPU just isn't working".
+	var unmatched []string
+	for name := range selected {
+		if !matched[name] {
+			unmatched = append(unmatched, name)
+		}
+	}
+	if len(unmatched) > 0 {
+		slices.Sort(unmatched)
+		klog.Warningf("GPU %s (model %q): vGPU profiles in the policy are not creatable on this host and will not be advertised: %v",
+			gpuInfo.CanonicalName(), gpuInfo.productName, unmatched)
+	}
+
 	if len(profiles) == 0 {
-		klog.V(4).Infof("No allowlisted vGPU profiles for GPU %s (creatable types: %d)", gpuInfo.CanonicalName(), len(types))
+		klog.Warningf("No policy-selected vGPU profiles are creatable on GPU %s (creatable types: %d)", gpuInfo.CanonicalName(), len(types))
 		return nil, nil
 	}
 

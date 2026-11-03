@@ -523,12 +523,6 @@ func TestValidateFeatureGates(t *testing.T) {
 			description: "should be valid when only VGPUSupport is enabled",
 		},
 		{
-			name:        "VGPUSupport enabled with DRADeviceCompatibilityGroups",
-			fgMap:       map[featuregate.Feature]bool{VGPUSupport: true, DRADeviceCompatibilityGroups: true},
-			expectError: false,
-			description: "should allow publishing vGPU partitions with compatibility groups",
-		},
-		{
 			name:         "DeviceMetadata enabled without PassthroughSupport",
 			fgMap:        map[featuregate.Feature]bool{DeviceMetadata: true, PassthroughSupport: false},
 			expectError:  true,

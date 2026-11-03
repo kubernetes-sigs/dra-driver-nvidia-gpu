@@ -17,6 +17,8 @@ limitations under the License.
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -99,4 +101,105 @@ func TestValidateCLIFlagsConsumableShares(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveVgpuPolicy(t *testing.T) {
+	writePolicy := func(t *testing.T, doc string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "policy.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(doc), 0o600))
+		return path
+	}
+
+	validPolicy := `
+apiVersion: resource.nvidia.com/v1beta1
+kind: VgpuProfilePolicy
+rules:
+- gpuModel: "NVIDIA L40S"
+  profiles:
+  - name: "NVIDIA L40S-12Q"
+`
+
+	t.Run("no policy file leaves the policy unset", func(t *testing.T) {
+		flags := &Flags{}
+		require.NoError(t, resolveVgpuPolicy(flags))
+		require.Nil(t, flags.vgpuPolicy)
+	})
+
+	t.Run("policy file requires the VGPUSupport gate", func(t *testing.T) {
+		setVgpuSupport(t, false)
+		flags := &Flags{vgpuPolicyFile: writePolicy(t, validPolicy)}
+		require.ErrorContains(t, resolveVgpuPolicy(flags), "VGPUSupport")
+	})
+
+	t.Run("policy file is parsed and scoped by GPU model", func(t *testing.T) {
+		setVgpuSupport(t, true)
+		flags := &Flags{vgpuPolicyFile: writePolicy(t, validPolicy)}
+		require.NoError(t, resolveVgpuPolicy(flags))
+		require.NotNil(t, flags.vgpuPolicy)
+		require.Contains(t, flags.vgpuPolicy.ProfilesForGPU("NVIDIA L40S"), "NVIDIA L40S-12Q")
+		require.Empty(t, flags.vgpuPolicy.ProfilesForGPU("NVIDIA A100-SXM4-40GB"))
+	})
+
+	t.Run("invalid policy file is rejected at startup", func(t *testing.T) {
+		setVgpuSupport(t, true)
+		flags := &Flags{vgpuPolicyFile: writePolicy(t, "apiVersion: example.com/v1\nkind: VgpuProfilePolicy\n")}
+		require.ErrorContains(t, resolveVgpuPolicy(flags), "invalid --vgpu-policy-file")
+	})
+
+	t.Run("explicitly requested missing policy file is rejected at startup", func(t *testing.T) {
+		setVgpuSupport(t, true)
+		flags := &Flags{vgpuPolicyFile: filepath.Join(t.TempDir(), "absent.yaml")}
+		require.ErrorContains(t, resolveVgpuPolicy(flags), "invalid --vgpu-policy-file")
+	})
+
+	// The flag defaults to the ConfigMap mount path, which only exists when
+	// an administrator configured a policy. Its absence must not keep the
+	// plugin from starting on a node with no vGPU policy at all.
+	t.Run("absent default policy file is not an error", func(t *testing.T) {
+		setVgpuSupport(t, true)
+		require.NoFileExists(t, defaultVgpuPolicyFile, "test environment unexpectedly has a policy mounted")
+		flags := &Flags{vgpuPolicyFile: defaultVgpuPolicyFile}
+		require.NoError(t, resolveVgpuPolicy(flags))
+		require.Nil(t, flags.vgpuPolicy)
+	})
+
+	// The gate check must not fire merely because the flag has a default.
+	t.Run("absent default policy file does not require the gate", func(t *testing.T) {
+		setVgpuSupport(t, false)
+		flags := &Flags{vgpuPolicyFile: defaultVgpuPolicyFile}
+		require.NoError(t, resolveVgpuPolicy(flags))
+		require.Nil(t, flags.vgpuPolicy)
+	})
+}
+
+// The default path is only correct as long as the chart keeps mounting the
+// policy ConfigMap there, and nothing else ties the two together now that the
+// chart no longer passes the path explicitly.
+func TestDefaultVgpuPolicyFileMatchesChartMount(t *testing.T) {
+	chart, err := os.ReadFile(filepath.Join("..", "..", "deployments", "helm",
+		"dra-driver-nvidia-gpu", "templates", "kubeletplugin.yaml"))
+	require.NoError(t, err)
+
+	dir, file := filepath.Split(defaultVgpuPolicyFile)
+	require.Contains(t, string(chart), "mountPath: "+filepath.Clean(dir),
+		"chart mounts the vGPU policy ConfigMap somewhere other than defaultVgpuPolicyFile")
+
+	cm, err := os.ReadFile(filepath.Join("..", "..", "deployments", "helm",
+		"dra-driver-nvidia-gpu", "templates", "configmap-vgpu-policy.yaml"))
+	require.NoError(t, err)
+	require.Contains(t, string(cm), file+": |",
+		"ConfigMap key does not match the basename of defaultVgpuPolicyFile")
+}
+
+func setVgpuSupport(t *testing.T, enabled bool) {
+	t.Helper()
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+		string(featuregates.VGPUSupport): enabled,
+	}))
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+			string(featuregates.VGPUSupport): false,
+		}))
+	})
 }

@@ -309,10 +309,6 @@ spec:
         - name: CONSUMABLE_SHARES
           value: "{{ .Values.consumableShares }}"
         {{- end }}
-        {{- if .Values.vgpu.profiles }}
-        - name: VGPU_PROFILES
-          value: {{ .Values.vgpu.profiles | quote }}
-        {{- end }}
         {{- if .Values.featureGates }}
         - name: FEATURE_GATES
           value: "{{ range $key, $value := .Values.featureGates }}{{ $key }}={{ $value }},{{ end }}"
@@ -339,6 +335,11 @@ spec:
         - name: driver-root
           mountPath: /driver-root
           mountPropagation: HostToContainer
+        {{- if .Values.vgpu.policy }}
+        - name: vgpu-policy
+          mountPath: /etc/nvidia-dra/vgpu
+          readOnly: true
+        {{- end }}
         {{- if and .Values.featureGates (and (hasKey .Values.featureGates "PassthroughSupport") .Values.featureGates.PassthroughSupport) }}
         - name: host-root
           mountPath: /host-root
@@ -382,6 +383,11 @@ spec:
         hostPath:
           path: {{ .Values.nvidiaDriverRoot }}
           type: DirectoryOrCreate
+      {{- if .Values.vgpu.policy }}
+      - name: vgpu-policy
+        configMap:
+          name: {{ include "dra-driver-nvidia-gpu.name" . }}-vgpu-policy
+      {{- end }}
       {{- if .Values.altProcDevices }}
       - name: alt-proc-devices
         hostPath:

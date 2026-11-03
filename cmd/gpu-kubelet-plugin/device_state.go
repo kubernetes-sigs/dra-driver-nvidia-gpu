@@ -129,7 +129,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	devRoot := driver.DevRoot
 	klog.Infof("Using devRoot=%v", devRoot)
 
-	nvdevlib, err := newDeviceLib(driver, config.flags.hostRoot, config.flags.vgpuProfiles)
+	nvdevlib, err := newDeviceLib(driver, config.flags.hostRoot, config.flags.vgpuPolicy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
 	}

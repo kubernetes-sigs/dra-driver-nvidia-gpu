@@ -22,8 +22,6 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/api/validate/constraints"
-
-	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
 type PartCapacityMap map[resourceapi.QualifiedName]resourceapi.DeviceCapacity
@@ -152,7 +150,12 @@ func (d *GpuInfo) PartConsumesCounters() []resourceapi.DeviceCounterConsumption 
 		CounterSet: counterSetName,
 		Counters:   counters,
 	}
-	if featuregates.Enabled(featuregates.DRADeviceCompatibilityGroups) {
+	// Only the vGPU publish path declares a compatibility group: VGPUSupport
+	// documents the cluster-side DRADeviceCompatibilityGroups gate as a
+	// prerequisite, so groups are published unconditionally there. The
+	// DynamicMIG publish path has no such cluster-gate requirement and stays
+	// group-free (docs/design/vgpu-support.md, section 6.1.1).
+	if len(d.vgpuProfiles) > 0 {
 		consumption.CompatibilityGroups = []string{gpuFullCompatibilityGroup}
 	}
 	return []resourceapi.DeviceCounterConsumption{consumption}

@@ -39,11 +39,17 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/metrics"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/vgpuprofiles"
 )
 
 const (
 	DriverName                         = "gpu.nvidia.com"
 	DriverPluginCheckpointFileBasename = "checkpoint.json"
+
+	// defaultVgpuPolicyFile is where the Helm chart projects the vGPU
+	// profile policy ConfigMap. Keep in sync with the volume mount in
+	// deployments/helm/dra-driver-nvidia-gpu/templates/kubeletplugin.yaml.
+	defaultVgpuPolicyFile = "/etc/nvidia-dra/vgpu/policy.yaml"
 )
 
 type Flags struct {
@@ -68,7 +74,10 @@ type Flags struct {
 	klogVerbosity                 int
 	additionalXidsToIgnore        string
 	consumableShares              string
-	vgpuProfiles                  string
+	vgpuPolicyFile                string
+
+	// vgpuPolicy is the parsed result of --vgpu-policy-file.
+	vgpuPolicy *vgpuprofiles.Policy
 }
 
 type Config struct {
@@ -222,11 +231,11 @@ func newApp() *cli.App {
 			EnvVars:     []string{"CONSUMABLE_SHARES"},
 		},
 		&cli.StringFlag{
-			Name:        "vgpu-profiles",
-			Usage:       "A comma-separated allowlist of vGPU type names to advertise as vGPU partition devices (e.g. 'NVIDIA L40S-12Q,NVIDIA L40S-24Q'). An empty list advertises no vGPU partitions.",
-			Value:       "", // GRID A100-4C,GRID A100-40C
-			Destination: &flags.vgpuProfiles,
-			EnvVars:     []string{"VGPU_PROFILES"},
+			Name:        "vgpu-policy-file",
+			Usage:       "Absolute path to a VgpuProfilePolicy document selecting which vGPU profiles to advertise as vGPU partition devices, per GPU model. Defaults to the path the policy ConfigMap is mounted at; no policy advertises no vGPU partitions.",
+			Value:       defaultVgpuPolicyFile,
+			Destination: &flags.vgpuPolicyFile,
+			EnvVars:     []string{"VGPU_POLICY_FILE"},
 		},
 	}
 	cliFlags = append(cliFlags, flags.kubeClientConfig.Flags()...)
@@ -325,10 +334,40 @@ func validateCLIFlags(flags *Flags) error {
 		}
 	}
 
-	if flags.vgpuProfiles != "" && !featuregates.Enabled(featuregates.VGPUSupport) {
-		return fmt.Errorf("--vgpu-profiles requires feature gate %s to be enabled", featuregates.VGPUSupport)
+	if err := resolveVgpuPolicy(flags); err != nil {
+		return err
 	}
 
+	return nil
+}
+
+// resolveVgpuPolicy parses the vGPU profile selection policy, if one was
+// supplied, so that the rest of the plugin only ever sees the parsed form.
+func resolveVgpuPolicy(flags *Flags) error {
+	if flags.vgpuPolicyFile == "" {
+		return nil
+	}
+
+	// The flag defaults to the path the policy ConfigMap is mounted at, and
+	// that mount only exists when an administrator configured a policy. An
+	// absent file at the default path therefore means "no vGPU profiles
+	// selected", whereas an explicitly requested path that does not exist
+	// is a misconfiguration worth failing on.
+	if flags.vgpuPolicyFile == defaultVgpuPolicyFile {
+		if _, err := os.Stat(flags.vgpuPolicyFile); errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+	}
+
+	if !featuregates.Enabled(featuregates.VGPUSupport) {
+		return fmt.Errorf("vGPU profile selection requires feature gate %s to be enabled", featuregates.VGPUSupport)
+	}
+
+	policy, err := vgpuprofiles.ParseFile(flags.vgpuPolicyFile)
+	if err != nil {
+		return fmt.Errorf("invalid --vgpu-policy-file %q: %w", flags.vgpuPolicyFile, err)
+	}
+	flags.vgpuPolicy = policy
 	return nil
 }
 
