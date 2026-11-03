@@ -145,24 +145,57 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	}
 	state.checkpointCleanupManager = NewCheckpointCleanupManager(state, config.clientsets.Resource)
 
+	currentBootID, err := bootid.GetCurrentBootID()
+	if err != nil {
+		return nil, fmt.Errorf("read node boot id: %w", err)
+	}
+
 	checkpoints, err := checkpointManager.ListCheckpoints()
 	if err != nil {
 		return nil, fmt.Errorf("unable to list checkpoints: %w", err)
 	}
 
-	var deviceCheckpoint *Checkpoint
+	var found bool
+	var needsRecreate bool
+	var cp *Checkpoint
 	for _, c := range checkpoints {
 		if c == DriverPluginCheckpointFileBasename {
-			cp, err := state.getCheckpoint(ctx)
+			found = true
+			cp, err = state.getCheckpoint(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("unable to get checkpoint: %w", err)
 			}
-			deviceCheckpoint = cp
-			break
+			storedBootID := cp.GetNodeBootID()
+			if storedBootID == "" { //nolint:gocritic,staticcheck
+				// legacy checkpoint file does not contain a boot ID, inject current boot ID
+				// note: this is a temporary workaround to ensure that the checkpoint file is always updated with the current boot ID
+				// note: this will temporary break the assertion that its prepared devices are prepared by the same boot ID
+				klog.V(4).Info("The existing checkpoint file does not contain a boot ID, injecting current boot ID")
+				err := state.updateCheckpoint(ctx, func(checkpoint *Checkpoint) {
+					checkpoint.V2.NodeBootID = currentBootID
+				})
+				if err != nil {
+					return nil, fmt.Errorf("unable to update checkpoint: %w", err)
+				}
+				syncPreparedDevicesGaugeFromCheckpoint(config.flags.nodeName, cp)
+			} else if storedBootID == currentBootID {
+				syncPreparedDevicesGaugeFromCheckpoint(config.flags.nodeName, cp)
+			} else {
+				klog.Infof("Invalidating checkpoint: checkpoint nodeBootID %q != current %q", storedBootID, currentBootID)
+				needsRecreate = true
+			}
 		}
 	}
 
-	cpPerGPUAllocatable, err := state.getPerGPUAllocatableDevicesFromCheckpoint(deviceCheckpoint)
+	if !found || needsRecreate {
+		klog.Infof("Create empty checkpoint")
+		cp = &Checkpoint{V2: &CheckpointV2{NodeBootID: currentBootID}}
+		if err := state.createCheckpoint(ctx, cp); err != nil {
+			return nil, fmt.Errorf("unable to create fresh checkpoint: %w", err)
+		}
+	}
+
+	cpPerGPUAllocatable, err := state.getPerGPUAllocatableDevicesFromCheckpoint(cp)
 	if err != nil {
 		return nil, fmt.Errorf("error restoring per-GPU allocatable devices from checkpoint: %w", err)
 	}
@@ -248,46 +281,6 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 				return nil, fmt.Errorf("attaching fabric manager partitions for GPU %s: %w", gpu.CanonicalName(), err)
 			}
 		}
-	}
-
-	currentBootID, err := bootid.GetCurrentBootID()
-	if err != nil {
-		return nil, fmt.Errorf("read node boot id: %w", err)
-	}
-
-	for _, c := range checkpoints {
-		if c == DriverPluginCheckpointFileBasename {
-			cp, err := state.getCheckpoint(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("unable to get checkpoint: %w", err)
-			}
-			storedBootID := cp.GetNodeBootID()
-			if storedBootID == "" { //nolint:gocritic,staticcheck
-				// legacy checkpoint file does not contain a boot ID, inject current boot ID
-				// note: this is a temporary workaround to ensure that the checkpoint file is always updated with the current boot ID
-				// note: this will temporary break the assertion that its prepared devices are prepared by the same boot ID
-				klog.V(4).Info("The existing checkpoint file does not contain a boot ID, injecting current boot ID")
-				err := state.updateCheckpoint(ctx, func(checkpoint *Checkpoint) {
-					checkpoint.V2.NodeBootID = currentBootID
-				})
-				if err != nil {
-					return nil, fmt.Errorf("unable to update checkpoint: %w", err)
-				}
-				syncPreparedDevicesGaugeFromCheckpoint(config.flags.nodeName, cp)
-				return state, nil
-			} else if storedBootID == currentBootID {
-				syncPreparedDevicesGaugeFromCheckpoint(config.flags.nodeName, cp)
-				return state, nil
-			} else {
-				klog.Infof("Invalidating checkpoint: checkpoint nodeBootID %q != current %q", storedBootID, currentBootID)
-			}
-		}
-	}
-
-	klog.Infof("Create empty checkpoint")
-	newCheckpoint := &Checkpoint{V2: &CheckpointV2{NodeBootID: currentBootID}}
-	if err := state.createCheckpoint(ctx, newCheckpoint); err != nil {
-		return nil, fmt.Errorf("unable to create fresh checkpoint: %w", err)
 	}
 
 	return state, nil
