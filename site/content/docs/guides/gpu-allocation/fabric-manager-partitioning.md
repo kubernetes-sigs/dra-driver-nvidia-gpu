@@ -67,7 +67,7 @@ Before enabling the feature:
 - Meet the general driver [prerequisites](../../prerequisites.md).
 - Use a supported HGX Hopper or newer system, or a supported single-node NVL
   system, with an NVSwitch-managed fabric and a supported partition topology.
-  On pre-Hopper GPUs, the driver treats `FabricManagerPartitioning` as disabled.
+  The driver does not publish Fabric Manager attributes for pre-Hopper GPUs.
 - Run NVIDIA Fabric Manager on each participating node with `FABRIC_MODE=1`, and
   `FM_CMD_UNIX_SOCKET_PATH=/run/nvidia-fabricmanager/socket`.
 - Ensure the target GPUs are visible to NVML when the GPU kubelet plugin

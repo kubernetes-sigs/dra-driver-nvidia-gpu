@@ -99,11 +99,6 @@ func newFabricManager(nvdevlib *deviceLib, driver *root.Driver) (*fabricmanager.
 		return nil, nil
 	}
 
-	if !nvdevlib.supportsFabricManagerPartitioning() {
-		klog.Infof("FabricManagerPartitioning requires Hopper or newer GPUs; treating the feature as disabled on this node")
-		return nil, nil
-	}
-
 	if common.UsingAltProcDevices() {
 		klog.Infof("Mock NVML proc is in use; skipping Fabric Manager")
 		return nil, nil
@@ -127,18 +122,6 @@ func newFabricManager(nvdevlib *deviceLib, driver *root.Driver) (*fabricmanager.
 		return nil, fmt.Errorf("FabricManagerPartitioning enabled but Fabric Manager could not be opened: %w", err)
 	}
 	return fmManager, nil
-}
-
-func (l *deviceLib) supportsFabricManagerPartitioning() bool {
-	if l == nil || len(l.gpuInfosByUUID) == 0 {
-		return false
-	}
-	for _, gpu := range l.gpuInfosByUUID {
-		if !gpu.supportsFabricManagerPartitioning() {
-			return false
-		}
-	}
-	return true
 }
 
 func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
@@ -1429,6 +1412,9 @@ func (s *DeviceState) resolveFabricPartition(gpus []*GpuInfo) (int, error) {
 		if gpu == nil {
 			return 0, fmt.Errorf("fabric manager: missing physical GPU identity")
 		}
+		if !gpu.supportsFabricManagerPartitioning() {
+			return 0, fmt.Errorf("fabric manager: GPU %q does not support partitioning", gpu.UUID)
+		}
 		physicalID, found, err := s.fmManager.PhysicalIDForGPU(gpu.UUID, gpu.pciBusID, gpu.gpuModuleID)
 		if err != nil {
 			return 0, err
@@ -1470,6 +1456,18 @@ func (s *DeviceState) gpuInfosFromPreparedClaim(results []resourceapi.DeviceRequ
 	return gpus
 }
 
+func allGPUsSupportFabricManagerPartitioning(gpus []*GpuInfo) bool {
+	if len(gpus) == 0 {
+		return false
+	}
+	for _, gpu := range gpus {
+		if !gpu.supportsFabricManagerPartitioning() {
+			return false
+		}
+	}
+	return true
+}
+
 // deactivateFabricPartition releases the FM partition formed by the physical
 // GPUs backing the claim's allocation results. It is a no-op when Fabric
 // Manager partitioning is disabled or when the claim has no allocation.
@@ -1481,6 +1479,10 @@ func (s *DeviceState) deactivateFabricPartition(claimUID string, pc *PreparedCla
 	}
 	gpus := s.gpuInfosFromPreparedClaim(pc.Status.Allocation.Devices.Results)
 	if len(gpus) == 0 {
+		return nil
+	}
+	if !allGPUsSupportFabricManagerPartitioning(gpus) {
+		klog.V(4).Infof("Fabric Manager: skipping partition deactivation for a claim containing an unsupported or unavailable GPU")
 		return nil
 	}
 	if isConsumableSharesEnabled(s.config) {
@@ -1509,6 +1511,10 @@ func (s *DeviceState) deactivateFabricPartition(claimUID string, pc *PreparedCla
 // identity in FM. Keep the NVML module ID unchanged for the gpuModuleID attribute.
 func (s *DeviceState) attachFabricManagerPartitions(gpu *GpuInfo) error {
 	if !s.fabricManagerPartitioningEnabled() || gpu == nil {
+		return nil
+	}
+	if !gpu.supportsFabricManagerPartitioning() {
+		gpu.partitionsBySize = nil
 		return nil
 	}
 	physicalID, found, err := s.fmManager.PhysicalIDForGPU(gpu.UUID, gpu.pciBusID, gpu.gpuModuleID)
@@ -1543,6 +1549,10 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 
 	gpus := s.gpuInfosFromPreparedClaim(claim.Status.Allocation.Devices.Results)
 	if len(gpus) == 0 {
+		return nil
+	}
+	if !allGPUsSupportFabricManagerPartitioning(gpus) {
+		klog.V(4).Infof("Fabric Manager: skipping partition activation for a claim containing an unsupported or unavailable GPU")
 		return nil
 	}
 	partitionID, err := s.resolveFabricPartition(gpus)

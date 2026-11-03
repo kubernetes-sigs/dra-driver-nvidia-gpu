@@ -213,7 +213,9 @@ func (d *GpuInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.DeviceA
 // supportsFabricManagerPartitioning reports whether this GPU meets the minimum
 // architecture requirement for Fabric Manager partitioning.
 func (d *GpuInfo) supportsFabricManagerPartitioning() bool {
-	return d != nil && d.architectureID >= nvml.DEVICE_ARCH_HOPPER
+	return d != nil &&
+		d.architectureID != nvml.DEVICE_ARCH_UNKNOWN &&
+		d.architectureID >= nvml.DEVICE_ARCH_HOPPER
 }
 
 // addFabricManagerAttributes publishes the NVML-reported gpuModuleID and

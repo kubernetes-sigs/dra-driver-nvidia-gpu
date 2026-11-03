@@ -262,59 +262,6 @@ func TestGpuInfoAttributesAddressingMode(t *testing.T) {
 	})
 }
 
-func TestSupportsFabricManagerPartitioning(t *testing.T) {
-	tests := map[string]struct {
-		gpus map[string]*GpuInfo
-		want bool
-	}{
-		"no GPUs": {
-			gpus: nil,
-			want: false,
-		},
-		"Ampere": {
-			gpus: map[string]*GpuInfo{"gpu": {architectureID: nvml.DEVICE_ARCH_AMPERE}},
-			want: false,
-		},
-		"Hopper": {
-			gpus: map[string]*GpuInfo{"gpu": {architectureID: nvml.DEVICE_ARCH_HOPPER}},
-			want: true,
-		},
-		"newer than Hopper": {
-			gpus: map[string]*GpuInfo{"gpu": {architectureID: nvml.DEVICE_ARCH_BLACKWELL}},
-			want: true,
-		},
-		"mixed Hopper and Ampere": {
-			gpus: map[string]*GpuInfo{
-				"hopper": {architectureID: nvml.DEVICE_ARCH_HOPPER},
-				"ampere": {architectureID: nvml.DEVICE_ARCH_AMPERE},
-			},
-			want: false,
-		},
-	}
-
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			l := &deviceLib{gpuInfosByUUID: tc.gpus}
-			require.Equal(t, tc.want, l.supportsFabricManagerPartitioning())
-		})
-	}
-}
-
-func TestNewFabricManagerTreatsFeatureAsDisabledOnAmpere(t *testing.T) {
-	oldGate := featuregates.Enabled(featuregates.FabricManagerPartitioning)
-	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): true}))
-	t.Cleanup(func() {
-		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): oldGate}))
-	})
-
-	nvdevlib := &deviceLib{
-		gpuInfosByUUID: map[string]*GpuInfo{"gpu": {architectureID: nvml.DEVICE_ARCH_AMPERE}},
-	}
-	manager, err := newFabricManager(nvdevlib, nil)
-	require.NoError(t, err)
-	require.Nil(t, manager)
-}
-
 func TestFabricManagerAttributesRequireHopperOrNewer(t *testing.T) {
 	oldGate := featuregates.Enabled(featuregates.FabricManagerPartitioning)
 	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): true}))
@@ -326,9 +273,10 @@ func TestFabricManagerAttributesRequireHopperOrNewer(t *testing.T) {
 		architecture nvml.DeviceArchitecture
 		want         bool
 	}{
-		"Ampere":    {architecture: nvml.DEVICE_ARCH_AMPERE, want: false},
-		"Hopper":    {architecture: nvml.DEVICE_ARCH_HOPPER, want: true},
-		"Blackwell": {architecture: nvml.DEVICE_ARCH_BLACKWELL, want: true},
+		"Ampere":               {architecture: nvml.DEVICE_ARCH_AMPERE, want: false},
+		"Hopper":               {architecture: nvml.DEVICE_ARCH_HOPPER, want: true},
+		"Blackwell":            {architecture: nvml.DEVICE_ARCH_BLACKWELL, want: true},
+		"unknown architecture": {architecture: nvml.DEVICE_ARCH_UNKNOWN, want: false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			gpu := newTestGpuInfo(nil)
@@ -341,6 +289,12 @@ func TestFabricManagerAttributesRequireHopperOrNewer(t *testing.T) {
 			_, hasPartition := attrs["partition1"]
 			require.Equal(t, tc.want, hasModuleID)
 			require.Equal(t, tc.want, hasPartition)
+
+			vfioAttrs := (&VfioDeviceInfo{parent: gpu}).GetDevice().Attributes
+			_, vfioHasModuleID := vfioAttrs["gpuModuleID"]
+			_, vfioHasPartition := vfioAttrs["partition1"]
+			require.Equal(t, tc.want, vfioHasModuleID)
+			require.Equal(t, tc.want, vfioHasPartition)
 		})
 	}
 }
