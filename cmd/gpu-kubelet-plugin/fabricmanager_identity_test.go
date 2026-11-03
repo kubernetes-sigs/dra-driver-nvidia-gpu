@@ -18,6 +18,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -38,7 +40,11 @@ func a100FabricIdentityFixture() ([]fabricmanager.Partition, map[int]*GpuInfo) {
 	for i, module := range modules {
 		uuid := fmt.Sprintf("GPU-00000000-0000-0000-0000-%012d", module)
 		members[i] = fabricmanager.PartitionGPU{PhysicalID: i + 9, UUID: uuid, PCIBusID: "00000000:" + buses[i] + ":00.0"}
-		gpus[module] = &GpuInfo{UUID: uuid, pciBusID: "0000:" + buses[i] + ":00.0", gpuModuleID: module}
+		gpus[module] = &GpuInfo{
+			UUID:        uuid,
+			pciBusID:    "0000:" + buses[i] + ":00.0",
+			gpuModuleID: module,
+		}
 	}
 	partitions := []fabricmanager.Partition{
 		{ID: 2, GPUs: members},
@@ -52,6 +58,37 @@ func a100FabricIdentityFixture() ([]fabricmanager.Partition, map[int]*GpuInfo) {
 		partitions = append(partitions, fabricmanager.Partition{ID: 27 + i, GPUs: members[i : i+1]})
 	}
 	return partitions, gpus
+}
+
+// setFabricManagerPartitioningForTest sets the FabricManagerPartitioning gate
+// and drives fabricmanager.CheckFabricManagerSupport with a synthetic host root,
+// with or without an NVSwitch fabric. Both are restored when the test ends.
+func setFabricManagerPartitioningForTest(t *testing.T, enabled bool) {
+	t.Helper()
+	previousGate := featuregates.Enabled(featuregates.FabricManagerPartitioning)
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+			string(featuregates.FabricManagerPartitioning): previousGate,
+		}))
+	})
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+		string(featuregates.FabricManagerPartitioning): enabled,
+	}))
+
+	newHostRoot := func(nvswitch bool) string {
+		hostRoot := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(hostRoot, "sys", "module"), 0o755))
+		if nvswitch {
+			devicesDir := filepath.Join(hostRoot, "proc", "driver", "nvidia-nvswitch", "devices")
+			require.NoError(t, os.MkdirAll(devicesDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(devicesDir, "0000:00:00.0"), []byte("device"), 0o644))
+		}
+		return hostRoot
+	}
+	disabledHostRoot := newHostRoot(false)
+	t.Cleanup(func() { require.NoError(t, fabricmanager.CheckFabricManagerSupport(disabledHostRoot)) })
+	require.NoError(t, fabricmanager.CheckFabricManagerSupport(newHostRoot(enabled)))
+	require.Equal(t, enabled, fabricmanager.SupportsFabricManagerPartitioning())
 }
 
 func TestResolveFabricPartitionGPUIdentity(t *testing.T) {
@@ -90,11 +127,7 @@ func TestResolveFabricPartitionGPUIdentity(t *testing.T) {
 }
 
 func TestFabricPartitionAttributesGPUIdentity(t *testing.T) {
-	oldGate := featuregates.Enabled(featuregates.FabricManagerPartitioning)
-	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): true}))
-	t.Cleanup(func() {
-		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): oldGate}))
-	})
+	setFabricManagerPartitioningForTest(t, true)
 	partitions, gpus := a100FabricIdentityFixture()
 	manager, err := fabricmanager.Open(&testFMClient{partitions: partitions})
 	require.NoError(t, err)
@@ -119,11 +152,7 @@ func TestFabricPartitionAttributesGPUIdentity(t *testing.T) {
 }
 
 func TestFabricPartitionLifecycleGPUIdentity(t *testing.T) {
-	oldGate := featuregates.Enabled(featuregates.FabricManagerPartitioning)
-	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): true}))
-	t.Cleanup(func() {
-		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): oldGate}))
-	})
+	setFabricManagerPartitioningForTest(t, true)
 	for _, vfio := range []bool{false, true} {
 		t.Run(fmt.Sprintf("vfio=%t", vfio), func(t *testing.T) {
 			partitions, gpus := a100FabricIdentityFixture()
@@ -184,11 +213,7 @@ func TestResolveFabricPartitionIdentityValidation(t *testing.T) {
 // H100 and later FM topologies can omit UUID and PCI identity entirely. In
 // that representation, FM physical IDs equal the NVML module IDs.
 func TestFabricPartitionWithoutFMIdentity(t *testing.T) {
-	oldGate := featuregates.Enabled(featuregates.FabricManagerPartitioning)
-	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): true}))
-	t.Cleanup(func() {
-		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): oldGate}))
-	})
+	setFabricManagerPartitioningForTest(t, true)
 	for _, emptyPCI := range []string{"", "00000000:00:00.0"} {
 		t.Run("PCI="+emptyPCI, func(t *testing.T) {
 			partitions, gpus := a100FabricIdentityFixture()

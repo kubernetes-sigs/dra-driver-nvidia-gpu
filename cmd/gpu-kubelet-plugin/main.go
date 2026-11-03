@@ -135,7 +135,7 @@ func newApp() *cli.App {
 			Value:       "/host-root",
 			Destination: &flags.hostRoot,
 			EnvVars:     []string{"HOST_ROOT"},
-			Usage:       "the path where the root path of the host file system is mounted in the container (required when PassthroughSupport feature gate is enabled)",
+			Usage:       "the path where the root path of the host file system is mounted in the container (required when PassthroughSupport or FabricManagerPartitioning is enabled)",
 		},
 		&cli.StringFlag{
 			Name:        "nvidia-cdi-hook-path",
@@ -290,12 +290,13 @@ func newApp() *cli.App {
 
 // Input validation of CLI flags.
 func validateCLIFlags(flags *Flags) error {
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if featuregates.Enabled(featuregates.PassthroughSupport) || featuregates.Enabled(featuregates.FabricManagerPartitioning) {
 		if flags.hostRoot == "" {
-			return fmt.Errorf("host root is required when PassthroughSupport feature gate is enabled")
+			return fmt.Errorf("host root is required when PassthroughSupport or FabricManagerPartitioning feature gate is enabled")
 		}
-		// Host root FS must be mounted in the container for passthrough support to work.
-		// vsekar: This requirement is for being able to run `modprobe` to load the vfio driver.
+		// Host root FS must be mounted in the container for passthrough support
+		// and Fabric Manager host compatibility detection.
+		// Passthrough uses this to run `modprobe` to load the vfio driver.
 		// This mount would also be a duplicate if the nvidia driver is installed to the host rootFS.
 		// TODO: Reduce scope of the host mounts for least access.
 		if _, err := os.Stat(flags.hostRoot); err != nil {

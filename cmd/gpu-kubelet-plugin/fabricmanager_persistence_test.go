@@ -229,11 +229,7 @@ func TestFabricPartitionPersistenceScope(t *testing.T) {
 
 func enableFabricPartitioningForTest(t *testing.T) {
 	t.Helper()
-	oldGate := featuregates.Enabled(featuregates.FabricManagerPartitioning)
-	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): true}))
-	t.Cleanup(func() {
-		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): oldGate}))
-	})
+	setFabricManagerPartitioningForTest(t, true)
 }
 
 func TestFabricPartitionPersistenceCleanup(t *testing.T) {
