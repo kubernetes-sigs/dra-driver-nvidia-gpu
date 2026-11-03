@@ -349,7 +349,6 @@ spec:
           mountPropagation: Bidirectional
         - name: procfs
           mountPath: /proc/
-          mountPropagation: Bidirectional
         {{- end }}
       {{- end }}
       volumes:
