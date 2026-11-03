@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"path"
 	"strconv"
 	"sync"
 
@@ -34,6 +33,8 @@ import (
 	"k8s.io/klog/v2"
 	drapb "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 	registerapi "k8s.io/kubelet/pkg/apis/pluginregistration/v1"
+
+	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/common"
 )
 
 type healthcheck struct {
@@ -62,9 +63,7 @@ func startHealthcheck(ctx context.Context, config *Config, helper *kubeletplugin
 
 	regSockPath := (&url.URL{
 		Scheme: "unix",
-		// TODO: this needs to adapt when seamless upgrades
-		// are enabled and the filename includes a uid.
-		Path: path.Join(config.flags.kubeletRegistrarDirectoryPath, DriverName+"-reg.sock"),
+		Path:   common.RegistrarSocketPath(config.flags.kubeletRegistrarDirectoryPath, DriverName, config.flags.podUID),
 	}).String()
 	klog.V(6).Infof("connecting to registration socket path=%s", regSockPath)
 	regConn, err := grpc.NewClient(
@@ -77,7 +76,7 @@ func startHealthcheck(ctx context.Context, config *Config, helper *kubeletplugin
 
 	draSockPath := (&url.URL{
 		Scheme: "unix",
-		Path:   path.Join(config.DriverPluginPath(), "dra.sock"),
+		Path:   common.DRASocketPath(config.DriverPluginPath(), config.flags.podUID),
 	}).String()
 	klog.V(6).Infof("connecting to DRA socket path=%s", draSockPath)
 	draConn, err := grpc.NewClient(

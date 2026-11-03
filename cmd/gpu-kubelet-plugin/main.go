@@ -64,6 +64,7 @@ type Flags struct {
 	serviceAccountName            string
 	kubeletRegistrarDirectoryPath string
 	kubeletPluginsDirectoryPath   string
+	podUID                        string
 	healthcheckPort               int
 	klogVerbosity                 int
 	additionalXidsToIgnore        string
@@ -181,6 +182,12 @@ func newApp() *cli.App {
 			Value:       kubeletplugin.KubeletPluginsDir,
 			Destination: &flags.kubeletPluginsDirectoryPath,
 			EnvVars:     []string{"KUBELET_PLUGINS_DIRECTORY_PATH"},
+		},
+		&cli.StringFlag{
+			Name:        "pod-uid",
+			Usage:       "UID of this kubelet plugin pod. When set, the plugin uses socket names that contain it, so that two plugin pods can run on one node during a rolling update with maxSurge. Requires kubelet 1.33 or later.",
+			Destination: &flags.podUID,
+			EnvVars:     []string{"POD_UID"},
 		},
 		&cli.IntFlag{
 			Name:        "healthcheck-port",
