@@ -13,6 +13,9 @@
 # limitations under the License.
 
 {{- if or .Values.resources.computeDomains.enabled .Values.resources.gpus.enabled }}
+{{- $passthroughSupportEnabled := and .Values.featureGates (and (hasKey .Values.featureGates "PassthroughSupport") .Values.featureGates.PassthroughSupport) }}
+{{- $fabricManagerPartitioningEnabled := and .Values.featureGates (and (hasKey .Values.featureGates "FabricManagerPartitioning") .Values.featureGates.FabricManagerPartitioning) }}
+{{- $hostRootRequired := or $passthroughSupportEnabled $fabricManagerPartitioningEnabled }}
 {{- if .Values.resources.computeDomains.enabled }}
 {{- include "dra-driver-nvidia-gpu.validateIMEXConfig" . }}
 {{- end }}
@@ -273,7 +276,7 @@ spec:
           value: void
         - name: CDI_ROOT
           value: /var/run/cdi
-        {{- if and .Values.featureGates (and (hasKey .Values.featureGates "PassthroughSupport") .Values.featureGates.PassthroughSupport) }}
+        {{- if $hostRootRequired }}
         - name: HOST_ROOT
           value: "/host-root"
         {{- end }}
@@ -335,11 +338,13 @@ spec:
         - name: driver-root
           mountPath: /driver-root
           mountPropagation: HostToContainer
-        {{- if and .Values.featureGates (and (hasKey .Values.featureGates "PassthroughSupport") .Values.featureGates.PassthroughSupport) }}
+        {{- if $hostRootRequired }}
         - name: host-root
           mountPath: /host-root
           mountPropagation: HostToContainer
           readOnly: true
+        {{- end }}
+        {{- if $passthroughSupportEnabled }}
         - name: lib-modules
           mountPath: /lib/modules/
           mountPropagation: HostToContainer
@@ -384,14 +389,15 @@ spec:
           path: {{ .Values.altProcDevices }}
           type: File
       {{- end }}
-      {{- if and .Values.featureGates (and (hasKey .Values.featureGates "PassthroughSupport") .Values.featureGates.PassthroughSupport) }}
+      {{- if $hostRootRequired }}
       # This is the root filesystem of the host. This is used to execute the required
-      # system commands against the host FS. For example, to test and load the vfio-pci
-      # module variant for a GPU.
+      # system commands against the host FS and to inspect host kernel modules.
       - name: host-root
         hostPath:
           path: /
           type: Directory
+      {{- end }}
+      {{- if $passthroughSupportEnabled }}
       # This is needed by `https://github.com/NVIDIA/go-nvlib/pkg/nvpassthrough` pkg
       # to detect the vfio-pci driver variant to use with a GPU.
       - name: lib-modules

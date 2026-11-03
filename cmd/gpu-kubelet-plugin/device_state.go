@@ -45,7 +45,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
-	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/common"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/lookup/root"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/bootid"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/fabricmanager"
@@ -90,31 +89,10 @@ type DeviceState struct {
 	cplock *flock.Flock
 }
 
-// newFabricManager opens a Fabric Manager connection when the
-// FabricManagerPartitioning feature is enabled and this node has an
-// NVSwitch/NVLink fabric. It returns (nil, nil) when Fabric Manager is not
-// applicable (feature disabled, mock NVML in use, or no fabric detected).
-func newFabricManager(nvdevlib *deviceLib, driver *root.Driver) (*fabricmanager.Manager, error) {
-	if !featuregates.Enabled(featuregates.FabricManagerPartitioning) {
-		return nil, nil
-	}
-
-	if !nvdevlib.supportsFabricManagerPartitioning() {
-		klog.Infof("FabricManagerPartitioning requires Hopper or newer GPUs; treating the feature as disabled on this node")
-		return nil, nil
-	}
-
-	if common.UsingAltProcDevices() {
-		klog.Infof("Mock NVML proc is in use; skipping Fabric Manager")
-		return nil, nil
-	}
-
-	hasFabric, err := fabricmanager.HasFabricManagerFabric(nvdevlib.hostRoot)
-	if err != nil {
-		return nil, fmt.Errorf("FabricManagerPartitioning enabled but fabric detection failed: %w", err)
-	}
-	if !hasFabric {
-		klog.Infof("FabricManagerPartitioning enabled but no NVSwitch/NVLink5 fabric detected on this node; skipping Fabric Manager")
+// newFabricManager opens a Fabric Manager connection when partitioning is
+// effectively enabled on this node
+func newFabricManager(driver *root.Driver) (*fabricmanager.Manager, error) {
+	if !fabricmanager.SupportsFabricManagerPartitioning() {
 		return nil, nil
 	}
 
@@ -129,22 +107,14 @@ func newFabricManager(nvdevlib *deviceLib, driver *root.Driver) (*fabricmanager.
 	return fmManager, nil
 }
 
-func (l *deviceLib) supportsFabricManagerPartitioning() bool {
-	if l == nil || len(l.gpuInfosByUUID) == 0 {
-		return false
-	}
-	for _, gpu := range l.gpuInfosByUUID {
-		if !gpu.supportsFabricManagerPartitioning() {
-			return false
-		}
-	}
-	return true
-}
-
 func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	driver := root.New(root.WithDriverRoot(config.flags.containerDriverRoot))
 	devRoot := driver.DevRoot
 	klog.Infof("Using devRoot=%v", devRoot)
+
+	if err := fabricmanager.CheckFabricManagerSupport(config.flags.hostRoot); err != nil {
+		return nil, fmt.Errorf("failed to detect Fabric Manager partitioning support: %w", err)
+	}
 
 	nvdevlib, err := newDeviceLib(driver, config.flags.hostRoot)
 	if err != nil {
@@ -215,7 +185,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		vfioPciManager = NewVfioPciManager(driver.Root, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
 	}
 
-	fmManager, err := newFabricManager(nvdevlib, driver)
+	fmManager, err := newFabricManager(driver)
 	if err != nil {
 		return nil, err
 	}
@@ -1530,7 +1500,7 @@ func (s *DeviceState) attachFabricManagerPartitions(gpu *GpuInfo) error {
 }
 
 func (s *DeviceState) fabricManagerPartitioningEnabled() bool {
-	return featuregates.Enabled(featuregates.FabricManagerPartitioning) && s.fmManager != nil
+	return featuregates.Enabled(featuregates.FabricManagerPartitioning) && fabricmanager.SupportsFabricManagerPartitioning() && s.fmManager != nil
 }
 
 // activateFabricPartition activates the FM partition formed by the physical
