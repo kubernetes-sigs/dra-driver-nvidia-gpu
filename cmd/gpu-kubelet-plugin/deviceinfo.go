@@ -65,6 +65,11 @@ type GpuInfo struct {
 	// includes this GPU. Used to publish the `partition1`/`partition2`/
 	// `partition4`/`partition8` device attributes.
 	partitionsBySize map[int]int
+
+	// vgp profiles advertised for this physical GPU with the VGPUSupport
+	// feature gate: the intersection of host-supported vGPU types and the
+	// profiles the admin policy selects for this GPU model.
+	vgpuProfiles []*VgpuProfileSpec
 }
 
 // Represents a specific (concrete, incarnated, created) MIG device. Annotated

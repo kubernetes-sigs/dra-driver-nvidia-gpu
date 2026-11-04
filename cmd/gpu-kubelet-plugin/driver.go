@@ -77,6 +77,16 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 
 	useSplitSlices := false
 
+	if featuregates.Enabled(featuregates.VGPUSupport) {
+		// vGPU partitions are advertised as partitionable devices,
+		// so the cluster must support that ResourceSlice model.
+		klog.V(1).Infof("VGPUSupport enabled: advertising vGPU partitions as partitionable devices")
+		useSplitSlices, err = shouldUseSplitResourceSlices(config.clientsets.Core)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine ResourceSlice model: %w", err)
+		}
+	}
+
 	if featuregates.Enabled(featuregates.DynamicMIG) {
 		if !state.IsMigCapable() {
 			klog.Warningf("DynamicMIG enabled but no MIG capable GPU found on this node; falling back to legacy Full GPU support")
@@ -252,6 +262,8 @@ func (d *driver) generateSplitResourceSlices(nodeName string) resourceslice.Driv
 					gpuInfo = device.Gpu
 				case device.MigDynamic != nil:
 					gpuInfo = device.MigDynamic.Parent
+				case device.Vgpu != nil:
+					gpuInfo = device.Vgpu.Parent
 				}
 			}
 
@@ -311,6 +323,8 @@ func (d *driver) generateCombinedResourceSlices(nodeName string) resourceslice.D
 					gpuInfo = device.Gpu
 				case device.MigDynamic != nil:
 					gpuInfo = device.MigDynamic.Parent
+				case device.Vgpu != nil:
+					gpuInfo = device.Vgpu.Parent
 				}
 			}
 
@@ -496,7 +510,7 @@ func (d *driver) nodeUnprepareResource(ctx context.Context, claimRef kubeletplug
 
 func (d *driver) publishResources(ctx context.Context, config *Config) error {
 
-	if featuregates.Enabled(featuregates.DynamicMIG) {
+	if featuregates.Enabled(featuregates.DynamicMIG) || featuregates.Enabled(featuregates.VGPUSupport) {
 		// From KEP 4815: "we will add client-side validation in the
 		// ResourceSlice controller helper, so that any errors in the
 		// ResourceSlices will be caught before they even are applied to the
@@ -504,7 +518,7 @@ func (d *driver) publishResources(ctx context.Context, config *Config) error {
 		//
 		// TODO: implement error handler for bad slices:
 		// https://github.com/kubernetes/kubernetes/commit/a171795e313ee9f407fef4897c1a1e2052120991
-		klog.V(4).Infof("featuregates.DynamicMIG enabled: construct ResourceSlice objects according to KEP 4815 (partitionable devices)")
+		klog.V(4).Infof("featuregates.DynamicMIG or featuregates.VGPUSupport enabled: construct ResourceSlice objects according to KEP 4815 (partitionable devices)")
 		resources := d.GenerateDriverResources(config.flags.nodeName)
 		if err := d.pluginhelper.PublishResources(ctx, resources); err != nil {
 			return err
