@@ -100,3 +100,27 @@ func TestValidateCLIFlagsConsumableShares(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCLIFlagsVfioOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		passthrough bool
+		fabric      bool
+		wantError   string
+	}{
+		{name: "requires passthrough", wantError: "--vfio-only requires"},
+		{name: "rejects fabric partitioning", passthrough: true, fabric: true, wantError: "incompatible"},
+		{name: "valid", passthrough: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setVfioTestFeatureGate(t, featuregates.PassthroughSupport, tc.passthrough)
+			setVfioTestFeatureGate(t, featuregates.FabricManagerPartitioning, tc.fabric)
+			err := validateCLIFlags(&Flags{vfioOnly: true, hostRoot: t.TempDir(), consumableShares: "disabled"})
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}

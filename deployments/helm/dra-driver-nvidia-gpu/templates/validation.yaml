@@ -136,3 +136,16 @@
 {{- $error = printf "%s\nPlease ensure your cluster supports Dynamic Resource Allocation (DRA) with one of these API versions." $error }}
 {{- fail $error }}
 {{- end }}
+
+
+{{- if .Values.vfioOnly }}
+{{- if not .Values.featureGates.PassthroughSupport }}
+{{- fail "vfioOnly requires featureGates.PassthroughSupport=true" }}
+{{- end }}
+{{- if .Values.resources.computeDomains.enabled }}
+{{- fail "vfioOnly requires resources.computeDomains.enabled=false" }}
+{{- end }}
+{{- if .Values.featureGates.FabricManagerPartitioning }}
+{{- fail "vfioOnly is incompatible with featureGates.FabricManagerPartitioning" }}
+{{- end }}
+{{- end }}

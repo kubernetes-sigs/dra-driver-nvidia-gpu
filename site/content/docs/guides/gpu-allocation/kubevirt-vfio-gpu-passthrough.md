@@ -101,6 +101,27 @@ For example, on NVIDIA Grace systems, the kubelet plugin automatically selects t
   If a conflict occurs, delete and recreate the failed pod and its resource claim after the other workload completes device preparation.
   When the claim is generated from a `ResourceClaimTemplate`, deleting the pod also deletes the generated claim.
 
+## Use nodes without an NVIDIA driver
+
+For a dedicated passthrough node pool without NVSwitch/NVLink fabric, set `vfioOnly=true` in addition to the installation settings below.
+This passes `--vfio-only` to the GPU kubelet plugin and skips the init container's NVIDIA driver check.
+The plugin uses PCI discovery and publishes only `vfio` devices; it does not publish full-GPU or MIG devices or start NVML health monitoring.
+IOMMU and `PassthroughSupport` are required.
+`FabricManagerPartitioning` and ComputeDomains must be disabled.
+
+GPUs must be unbound or already bound to a VFIO driver before preparation.
+The plugin leaves GPUs bound to VFIO when claims are released, including after a plugin restart.
+Install the NVIDIA driver inside the guest VM as required by the workload.
+
+Choose this mode explicitly for the node pool; the plugin does not switch modes when driver files appear or disappear.
+Drain GPU workloads and release their claims before changing the mode, installing a host NVIDIA driver, or rolling back to a driver version without this option.
+Use `kubeletPlugin.nodeSelector` to target the dedicated nodes.
+If GPU Operator manages the cluster, configure it to omit the host NVIDIA driver and host GPU clients on these nodes and avoid deploying another device manager for the same GPUs.
+Set `nvidiaDriverRoot=/` for this deployment so it does not depend on an Operator-provided driver mount.
+
+After installation, inspect the node's ResourceSlices as described in [View resources](view-resources.md).
+Every published device on a VFIO-only node has `gpu.nvidia.com/type: vfio`.
+
 ## Install the DRA Driver
 
 Install the driver with passthrough support and device metadata:

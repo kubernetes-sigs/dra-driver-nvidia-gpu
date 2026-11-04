@@ -40,6 +40,9 @@ selectorLabelsOverride: {}
 gpuResourcesEnabledOverride: false
 # Configure consumable shares support ("disabled", "memory", "unlimited", or a positive integer)
 consumableShares: ""
+# Publish only VFIO devices without an NVIDIA driver. Requires PassthroughSupport,
+# IOMMU, resources.computeDomains.enabled=false, and a node without NVLink fabric.
+vfioOnly: false
 
 allowDefaultNamespace: false
 

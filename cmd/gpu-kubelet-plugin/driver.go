@@ -134,7 +134,7 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 	// On plugin restart, previously prepared devices and their workloads can remain
 	// live and emit an XID before the kubelet service is available. NVML does not
 	// retain events that occur before registration.
-	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) {
+	if featuregates.Enabled(featuregates.NVMLDeviceHealthCheck) && !state.nvdevlib.vfioOnly {
 		deviceHealthMonitor, err := newNvmlDeviceHealthMonitor(config, state.perGPUAllocatable, state.nvdevlib)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create NVML device health monitor: %w", err)

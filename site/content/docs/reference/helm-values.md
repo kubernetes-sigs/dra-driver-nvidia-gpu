@@ -85,6 +85,7 @@ Drain ComputeDomain workload pods and delete existing `ComputeDomain` resources 
 | Value | Default | Description |
 |---|---|---|
 | `featureGates` | `{}` | Key-value map of feature gate names to `true` or `false`. Passed to all driver components. Includes both driver-specific gates and upstream Kubernetes logging gates. |
+| `vfioOnly` | `false` | Publishes only VFIO devices without requiring NVIDIA driver libraries or binaries. Requires `featureGates.PassthroughSupport=true`, IOMMU, `resources.computeDomains.enabled=false`, and nodes without NVSwitch/NVLink fabric. Leaves released devices bound to VFIO. See [VFIO passthrough](../guides/gpu-allocation/kubevirt-vfio-gpu-passthrough.md#use-nodes-without-an-nvidia-driver). |
 | `consumableShares` | `""` | Selects the NVIDIA driver's capacity-accounting policy for Kubernetes DRA consumable capacity on full GPUs and MIG devices; set it to `memory`, `unlimited`, or a positive integer, while an empty value leaves sharing disabled; requires `featureGates.ConsumableShares=true`; see [Consumable capacity](../guides/gpu-allocation/consumable-capacity.md). |
 
 See [Feature gates](feature-gates/) for available gates, defaults, and mutual-exclusion rules.
