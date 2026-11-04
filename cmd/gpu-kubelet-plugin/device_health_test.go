@@ -769,3 +769,65 @@ func TestClearDynamicMIGXIDTaint(t *testing.T) {
 	require.Len(t, static.Taints(), 1)
 	assert.Equal(t, TaintKeyXID, static.Taints()[0].Key)
 }
+func TestSendBatchedHealthEvent(t *testing.T) {
+	devA := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-a"}}
+	devB := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-b"}}
+
+	t.Run("empty devices sends nothing", func(t *testing.T) {
+		m := &nvmlDeviceHealthMonitor{unhealthy: make(chan *DeviceHealthEvent, 1)}
+		m.sendBatchedHealthEvent(nil, HealthEventGPULost)
+		assert.Len(t, m.unhealthy, 0)
+	})
+
+	t.Run("normal batched send", func(t *testing.T) {
+		m := &nvmlDeviceHealthMonitor{unhealthy: make(chan *DeviceHealthEvent, 1)}
+		m.sendBatchedHealthEvent([]*AllocatableDevice{devA, devB}, HealthEventGPULost)
+		require.Len(t, m.unhealthy, 1)
+		event := <-m.unhealthy
+		assert.Equal(t, HealthEventGPULost, event.EventType)
+		assert.Len(t, event.Devices, 2)
+	})
+
+	t.Run("full channel drops without blocking", func(t *testing.T) {
+		m := &nvmlDeviceHealthMonitor{unhealthy: make(chan *DeviceHealthEvent, 1)}
+		m.unhealthy <- &DeviceHealthEvent{} // fill the channel
+		// Must return instead of blocking; the second event is dropped.
+		m.sendBatchedHealthEvent([]*AllocatableDevice{devA}, HealthEventUnmonitored)
+		assert.Len(t, m.unhealthy, 1)
+	})
+}
+
+func TestSendHealthEventForAllDevices(t *testing.T) {
+	devA := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-a"}}
+	devB := &AllocatableDevice{MigStatic: &MigDeviceInfo{ParentUUID: "GPU-a"}}
+	m := &nvmlDeviceHealthMonitor{
+		unhealthy: make(chan *DeviceHealthEvent, 1),
+		perGPUAllocatable: &PerGPUAllocatableDevices{
+			allocatablesMap: map[PCIBusID]AllocatableDevices{
+				"0000:01:00.0": {"gpu": devA, "mig": devB},
+			},
+		},
+	}
+
+	m.sendHealthEventForAllDevices(HealthEventGPULost)
+
+	require.Len(t, m.unhealthy, 1)
+	event := <-m.unhealthy
+	assert.Equal(t, HealthEventGPULost, event.EventType)
+	assert.Len(t, event.Devices, 2)
+}
+
+func TestResolveDeviceByEventAddressUnknownPCIBus(t *testing.T) {
+	// Parent GPU is in the UUID index but its PCI bus is absent from the
+	// allocatable inventory: an inconsistent inventory must surface an error.
+	parent := &GpuInfo{UUID: "GPU-parent-1", pciBusID: "0000:01:00.0"}
+	monitor := &nvmlDeviceHealthMonitor{
+		perGPUAllocatable: &PerGPUAllocatableDevices{
+			allocatablesMap: map[PCIBusID]AllocatableDevices{},
+		},
+		gpuInfosByUUID: map[string]*GpuInfo{parent.UUID: parent},
+	}
+
+	_, err := monitor.resolveDeviceByEventAddress(parent.UUID, nil, FullGPUInstanceID, FullGPUInstanceID)
+	require.ErrorContains(t, err, "failed to find PCI Bus ID")
+}
