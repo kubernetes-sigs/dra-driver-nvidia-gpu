@@ -425,7 +425,7 @@ func (l deviceLib) enumerateVgpuPartitions(gpuInfo *GpuInfo, d nvdev.Device) (Al
 		return nil, nil
 	}
 
-	selected := l.vgpuPolicy.ProfilesForGPU(gpuInfo.productName)
+	selected := l.vgpuPolicy.SelectedProfiles()
 	if len(selected) == 0 {
 		klog.V(4).Infof("vGPU profile policy selects no profiles for GPU %s (model %q)", gpuInfo.CanonicalName(), gpuInfo.productName)
 		return nil, nil

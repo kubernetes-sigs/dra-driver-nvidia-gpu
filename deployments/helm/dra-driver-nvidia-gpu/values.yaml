@@ -51,15 +51,13 @@ vgpu:
   # selected by the policy are never advertised, even if the host supports
   # them; the empty policy (default) advertises no vGPU partitions.
   #
-  # Each rule selects GPUs by model and lists the profiles to advertise on
-  # them. A rule without gpuModel applies to every GPU on the node, and a GPU
-  # takes the union of every rule it matches.
+  # The selection applies to every GPU on the node; profiles the host cannot
+  # create are skipped at discovery time.
   #
   #   policy:
   #     apiVersion: resource.nvidia.com/v1beta1
   #     kind: VgpuProfilePolicy
   #     rules:
-  #     - gpuModel: "NVIDIA L40S"
   #       profiles:
   #       - name: "NVIDIA L40S-12Q"
   #       - name: "NVIDIA L40S-24Q"

@@ -50,25 +50,15 @@ type Policy struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`
 
-	// Rules selects the profiles to advertise. A GPU is matched against
-	// every rule, and the profiles of all matching rules are unioned, so a
-	// policy can carry one model-specific rule per SKU plus a shared
-	// catch-all rule. An empty list advertises no vGPU partitions.
-	Rules []Rule `json:"rules,omitempty"`
+	// Rules selects the profiles to advertise. The selection applies to
+	// every GPU on the node; profiles the host cannot create are skipped
+	// at discovery time. An empty value advertises no vGPU partitions.
+	Rules Rules `json:"rules,omitempty"`
 }
 
-// Rule advertises a set of vGPU profiles on the GPUs it selects.
-type Rule struct {
-	// GpuModel matches a GPU's product name as reported by NVML, e.g.
-	// "NVIDIA L40S". An empty value matches every GPU on the node.
-	//
-	// This is the policy's only selector today. It exists from the first
-	// version because adding a scoping dimension later would change the
-	// meaning of every previously written policy, whereas widening the set
-	// of supported matchers is additive.
-	GpuModel string `json:"gpuModel,omitempty"`
-
-	// Profiles are the vGPU profiles to advertise on matching GPUs.
+// Rules advertises a set of vGPU profiles.
+type Rules struct {
+	// Profiles are the vGPU profiles to advertise.
 	Profiles []Profile `json:"profiles"`
 }
 
@@ -117,57 +107,36 @@ func (p *Policy) Validate() error {
 		return fmt.Errorf("unsupported kind %q in vGPU profile policy, expected %q", p.Kind, Kind)
 	}
 
-	for i, rule := range p.Rules {
-		if len(rule.Profiles) == 0 {
-			return fmt.Errorf("rules[%d]: at least one profile is required", i)
+	// Duplicates are rejected rather than silently collapsed: a repeated
+	// name usually means two entries were meant to differ in a field that
+	// does not exist yet.
+	seen := make(map[string]bool, len(p.Rules.Profiles))
+	for j, profile := range p.Rules.Profiles {
+		if strings.TrimSpace(profile.Name) == "" {
+			return fmt.Errorf("rules.profiles[%d]: name is required", j)
 		}
-		// Duplicates are rejected per rule rather than silently collapsed:
-		// a repeated name usually means two entries were meant to differ
-		// in a field that does not exist yet.
-		seen := make(map[string]bool, len(rule.Profiles))
-		for j, profile := range rule.Profiles {
-			if strings.TrimSpace(profile.Name) == "" {
-				return fmt.Errorf("rules[%d].profiles[%d]: name is required", i, j)
-			}
-			if seen[profile.Name] {
-				return fmt.Errorf("rules[%d].profiles[%d]: duplicate profile %q", i, j, profile.Name)
-			}
-			seen[profile.Name] = true
+		if seen[profile.Name] {
+			return fmt.Errorf("rules.profiles[%d]: duplicate profile %q", j, profile.Name)
 		}
+		seen[profile.Name] = true
 	}
 	return nil
 }
 
 // Empty reports whether the policy advertises nothing at all.
 func (p *Policy) Empty() bool {
-	for _, rule := range p.Rules {
-		if len(rule.Profiles) > 0 {
-			return false
-		}
-	}
-	return true
+	return len(p.Rules.Profiles) == 0
 }
 
-// ProfilesForGPU returns the profiles the policy advertises on a GPU with the
-// given NVML product name, keyed by profile name. It returns nil when the GPU
-// matches no rule.
-func (p *Policy) ProfilesForGPU(productName string) map[string]Profile {
+// SelectedProfiles returns the profiles the policy advertises, keyed by
+// profile name. It returns nil when the policy selects nothing.
+func (p *Policy) SelectedProfiles() map[string]Profile {
 	var selected map[string]Profile
-	for _, rule := range p.Rules {
-		if rule.GpuModel != "" && rule.GpuModel != productName {
-			continue
+	for _, profile := range p.Rules.Profiles {
+		if selected == nil {
+			selected = make(map[string]Profile)
 		}
-		for _, profile := range rule.Profiles {
-			if selected == nil {
-				selected = make(map[string]Profile)
-			}
-			// A model-specific rule and a catch-all rule may name the
-			// same profile; first match wins so that ordering gives
-			// administrators a predictable override.
-			if _, ok := selected[profile.Name]; !ok {
-				selected[profile.Name] = profile
-			}
-		}
+		selected[profile.Name] = profile
 	}
 	return selected
 }

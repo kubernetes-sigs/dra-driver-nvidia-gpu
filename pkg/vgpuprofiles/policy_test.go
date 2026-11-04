@@ -37,22 +37,22 @@ func TestParse(t *testing.T) {
 apiVersion: resource.nvidia.com/v1beta1
 kind: VgpuProfilePolicy
 rules:
-- gpuModel: "NVIDIA L40S"
   profiles:
   - name: "NVIDIA L40S-12Q"
 `,
 			wantRules:   1,
 			wantProfile: "NVIDIA L40S-12Q",
 		},
-		"catch-all rule without gpuModel": {
+		"several profiles": {
 			doc: `
 apiVersion: resource.nvidia.com/v1beta1
 kind: VgpuProfilePolicy
 rules:
-- profiles:
+  profiles:
   - name: "NVIDIA L40S-12Q"
+  - name: "NVIDIA L40S-24Q"
 `,
-			wantRules:   1,
+			wantRules:   2,
 			wantProfile: "NVIDIA L40S-12Q",
 		},
 		"no rules is valid and advertises nothing": {
@@ -61,6 +61,41 @@ apiVersion: resource.nvidia.com/v1beta1
 kind: VgpuProfilePolicy
 `,
 			wantRules: 0,
+		},
+		"empty profile list is valid and advertises nothing": {
+			doc: `
+apiVersion: resource.nvidia.com/v1beta1
+kind: VgpuProfilePolicy
+rules:
+  profiles: []
+`,
+			wantRules: 0,
+		},
+		// A GPU model selector is no longer part of the format; a
+		// document carrying one must fail loudly rather than be
+		// silently reinterpreted as "applies to every GPU".
+		"gpuModel is rejected": {
+			doc: `
+apiVersion: resource.nvidia.com/v1beta1
+kind: VgpuProfilePolicy
+rules:
+  gpuModel: "NVIDIA L40S"
+  profiles:
+  - name: "NVIDIA L40S-12Q"
+`,
+			wantErr: "error decoding vGPU profile policy",
+		},
+		// The previous format made rules a list; such a document must
+		// not silently decode into the object form.
+		"list-shaped rules is rejected": {
+			doc: `
+apiVersion: resource.nvidia.com/v1beta1
+kind: VgpuProfilePolicy
+rules:
+- profiles:
+  - name: "NVIDIA L40S-12Q"
+`,
+			wantErr: "error decoding vGPU profile policy",
 		},
 		"wrong apiVersion": {
 			doc: `
@@ -79,7 +114,7 @@ kind: NotACatalog
 		"missing envelope": {
 			doc: `
 rules:
-- profiles:
+  profiles:
   - name: "NVIDIA L40S-12Q"
 `,
 			wantErr: "unsupported apiVersion",
@@ -91,38 +126,28 @@ rules:
 apiVersion: resource.nvidia.com/v1beta1
 kind: VgpuProfilePolicy
 rules:
-- profiles:
+  profiles:
   - name: "NVIDIA L40S-12Q"
     maxInstances: 4
 `,
 			wantErr: "error decoding vGPU profile policy",
-		},
-		"rule without profiles": {
-			doc: `
-apiVersion: resource.nvidia.com/v1beta1
-kind: VgpuProfilePolicy
-rules:
-- gpuModel: "NVIDIA L40S"
-  profiles: []
-`,
-			wantErr: "at least one profile is required",
 		},
 		"profile without name": {
 			doc: `
 apiVersion: resource.nvidia.com/v1beta1
 kind: VgpuProfilePolicy
 rules:
-- profiles:
+  profiles:
   - name: ""
 `,
 			wantErr: "name is required",
 		},
-		"duplicate profile in one rule": {
+		"duplicate profile": {
 			doc: `
 apiVersion: resource.nvidia.com/v1beta1
 kind: VgpuProfilePolicy
 rules:
-- profiles:
+  profiles:
   - name: "NVIDIA L40S-12Q"
   - name: "NVIDIA L40S-12Q"
 `,
@@ -139,9 +164,9 @@ rules:
 				return
 			}
 			require.NoError(t, err)
-			require.Len(t, c.Rules, tc.wantRules)
+			require.Len(t, c.Rules.Profiles, tc.wantRules)
 			if tc.wantProfile != "" {
-				assert.Equal(t, tc.wantProfile, c.Rules[0].Profiles[0].Name)
+				assert.Equal(t, tc.wantProfile, c.Rules.Profiles[0].Name)
 			}
 		})
 	}
@@ -153,7 +178,7 @@ func TestParseFile(t *testing.T) {
 apiVersion: resource.nvidia.com/v1beta1
 kind: VgpuProfilePolicy
 rules:
-- profiles:
+  profiles:
   - name: "NVIDIA L40S-12Q"
 `), 0o600))
 
@@ -165,42 +190,28 @@ rules:
 	require.Error(t, err)
 }
 
-func TestProfilesForGPU(t *testing.T) {
+func TestSelectedProfiles(t *testing.T) {
 	c, err := Parse([]byte(`
 apiVersion: resource.nvidia.com/v1beta1
 kind: VgpuProfilePolicy
 rules:
-- gpuModel: "NVIDIA L40S"
   profiles:
   - name: "NVIDIA L40S-12Q"
   - name: "NVIDIA L40S-24Q"
-- gpuModel: "NVIDIA A100-SXM4-40GB"
-  profiles:
-  - name: "NVIDIA A100-4C"
-- profiles:
-  - name: "NVIDIA SHARED-EVERYWHERE"
 `))
 	require.NoError(t, err)
 
-	t.Run("model-specific rule unions with catch-all", func(t *testing.T) {
-		got := c.ProfilesForGPU("NVIDIA L40S")
-		require.Len(t, got, 3)
+	t.Run("every profile is selected", func(t *testing.T) {
+		got := c.SelectedProfiles()
+		require.Len(t, got, 2)
 		assert.Contains(t, got, "NVIDIA L40S-12Q")
 		assert.Contains(t, got, "NVIDIA L40S-24Q")
-		assert.Contains(t, got, "NVIDIA SHARED-EVERYWHERE")
-		assert.NotContains(t, got, "NVIDIA A100-4C")
 	})
 
-	t.Run("unmatched model still gets the catch-all rule", func(t *testing.T) {
-		got := c.ProfilesForGPU("NVIDIA H100 PCIe")
-		require.Len(t, got, 1)
-		assert.Contains(t, got, "NVIDIA SHARED-EVERYWHERE")
-	})
-
-	t.Run("empty policy matches nothing", func(t *testing.T) {
+	t.Run("empty policy selects nothing", func(t *testing.T) {
 		empty := &Policy{APIVersion: APIVersion, Kind: Kind}
 		require.NoError(t, empty.Validate())
 		assert.True(t, empty.Empty())
-		assert.Nil(t, empty.ProfilesForGPU("NVIDIA L40S"))
+		assert.Nil(t, empty.SelectedProfiles())
 	})
 }

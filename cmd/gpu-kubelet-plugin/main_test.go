@@ -115,7 +115,6 @@ func TestResolveVgpuPolicy(t *testing.T) {
 apiVersion: resource.nvidia.com/v1beta1
 kind: VgpuProfilePolicy
 rules:
-- gpuModel: "NVIDIA L40S"
   profiles:
   - name: "NVIDIA L40S-12Q"
 `
@@ -137,8 +136,7 @@ rules:
 		flags := &Flags{vgpuPolicyFile: writePolicy(t, validPolicy)}
 		require.NoError(t, resolveVgpuPolicy(flags))
 		require.NotNil(t, flags.vgpuPolicy)
-		require.Contains(t, flags.vgpuPolicy.ProfilesForGPU("NVIDIA L40S"), "NVIDIA L40S-12Q")
-		require.Empty(t, flags.vgpuPolicy.ProfilesForGPU("NVIDIA A100-SXM4-40GB"))
+		require.Contains(t, flags.vgpuPolicy.SelectedProfiles(), "NVIDIA L40S-12Q")
 	})
 
 	t.Run("invalid policy file is rejected at startup", func(t *testing.T) {
