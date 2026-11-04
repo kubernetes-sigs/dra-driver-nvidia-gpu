@@ -120,6 +120,10 @@ func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) e
 		return fmt.Errorf("error verifying disabled VFs: %w", err)
 	}
 
+	if driver == nvidiaDriver && !vm.nvidiaEnabled {
+		return fmt.Errorf("GPU %q is bound to the NVIDIA driver in VFIO-only mode; unbind it before using this mode", info.PciBusID)
+	}
+
 	if driver == nvidiaDriver {
 		// Disable GPU Persistence Mode.
 		err = vm.disableGPUPersistenceMode(info.PciBusID)

@@ -97,6 +97,7 @@ helm-lint: helm-test
 
 helm-test:
 	hack/test-helm-policy-service-account.sh
+	hack/test-helm-vfio-only.sh
 
 helm-package:
 	helm package deployments/helm/dra-driver-nvidia-gpu

@@ -21,6 +21,12 @@ _driver_root_path="/driver-root-parent/$(basename "${NVIDIA_DRIVER_ROOT%/}")"
 echo "create symlink: /driver-root -> ${_driver_root_path}"
 ln -s "${_driver_root_path}" /driver-root
 
+# Dedicated passthrough nodes do not need NVIDIA libraries or nvidia-smi.
+if [ "${VFIO_ONLY:-false}" = "true" ]; then
+    echo "VFIO-only mode: skipping NVIDIA driver validation"
+    exit 0
+fi
+
 emit_common_err () {
     printf '%b' \
         "Check failed. Has the NVIDIA GPU driver been set up? " \

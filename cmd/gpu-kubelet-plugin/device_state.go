@@ -129,7 +129,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	devRoot := driver.DevRoot
 	klog.Infof("Using devRoot=%v", devRoot)
 
-	nvdevlib, err := newDeviceLib(driver, config.flags.hostRoot)
+	nvdevlib, err := newDeviceLib(driver, config.flags.hostRoot, config.flags.vfioOnly)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create device library: %w", err)
 	}
@@ -195,7 +195,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 
 	var vfioPciManager *VfioPciManager
 	if featuregates.Enabled(featuregates.PassthroughSupport) && nvdevlib.IsVfioEnabled() {
-		vfioPciManager = NewVfioPciManager(driver.Root, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
+		vfioPciManager = NewVfioPciManager(driver.Root, hostDriverRoot, nvdevlib, !nvdevlib.vfioOnly)
 	}
 
 	fmManager, err := newFabricManager(nvdevlib, driver)
@@ -1257,6 +1257,9 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 			return fmt.Errorf("error adding allocatable device: %w", err)
 		}
 	case VfioDeviceType:
+		if s.nvdevlib.vfioOnly {
+			return nil
+		}
 		gpu, _, err := s.nvdevlib.discoverGPUByPCIBusID(device.Vfio.PciBusID)
 		if err != nil {
 			return fmt.Errorf("error discovering gpu by pci bus id: %w", err)
