@@ -92,6 +92,7 @@ func NewComputeDomainManager(config *Config, getCliqueIDFunc func() (string, err
 	if err != nil {
 		return nil, fmt.Errorf("error getting cliqueID: %w", err)
 	}
+	klog.Infof("Discovered GPU clique ID: %q", cliqueID)
 
 	m := &ComputeDomainManager{
 		config:          config,
