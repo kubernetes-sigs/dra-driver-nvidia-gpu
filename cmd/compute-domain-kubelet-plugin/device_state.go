@@ -208,6 +208,24 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		return nil, permanentError{fmt.Errorf("stale prepare for claim %s: claim prepare was already aborted", ResourceClaimToString(claim))}
 	}
 
+	// Remember attempts that fail overlap validation so Unprepare can abort
+	// their retries without tearing down another claim's devices. Never
+	// downgrade PrepareStarted: it may already have device-side effects.
+	if !exists || preparedClaim.CheckpointState == ClaimCheckpointStatePrepareAborted ||
+		(preparedClaim.CheckpointState == ClaimCheckpointStatePreparePending && !claimMatchesPreparedClaim(preparedClaim, claim)) {
+		err := s.updateCheckpoint(func(cp *Checkpoint) {
+			cp.V2.PreparedClaims[claimUID] = PreparedClaim{
+				CheckpointState: ClaimCheckpointStatePreparePending,
+				Status:          claim.Status,
+				Name:            claim.Name,
+				Namespace:       claim.Namespace,
+			}
+		})
+		if err != nil {
+			return nil, fmt.Errorf("unable to checkpoint pending prepare: %w", err)
+		}
+	}
+
 	// In certain scenarios, the same device can be prepared/allocated more than once for different claims
 	// due to races between data processing in different goroutines in the scheduler, or when pods are
 	// force-deleted while the kubelet still considers the devices allocated.
@@ -281,6 +299,14 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 		// Prepare+Checkpoint are done transactionally). Note that
 		// claimRef.String() contains namespace, name, UID.
 		klog.V(2).Infof("Unprepare noop: claim not found in checkpoint data: %v", claimRef.String())
+		return nil
+	}
+
+	if pc.CheckpointState == ClaimCheckpointStatePreparePending {
+		// No device preparation or CDI creation has started for this entry.
+		if err := s.markClaimPrepareAbortedInCheckpoint(claimRef, pc); err != nil {
+			return fmt.Errorf("error marking pending claim PrepareAborted in checkpoint: %w", err)
+		}
 		return nil
 	}
 
