@@ -668,7 +668,8 @@ func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Con
 		ComputeDomain: config.DomainID,
 	}
 
-	if s.computeDomainManager.CliqueID() == "" {
+	cliqueID := s.computeDomainManager.CliqueID()
+	if cliqueID == "" && !featuregates.Enabled(featuregates.NodeLocalFabricIPC) {
 		// Non-fabric node (e.g. not part of an MNNVL clique): do not inject
 		// IMEX channel device nodes, but let the claim succeed.
 		return &configState, nil
@@ -676,6 +677,9 @@ func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Con
 
 	if err := s.nvdevlib.checkHostIMEXReady(s.config.flags.imexHostSocketPath); err != nil {
 		return nil, fmt.Errorf("host nvidia-imex daemon readiness check failed: %w", err)
+	}
+	if cliqueID == "" {
+		klog.V(1).Infof("injecting IMEX channel %d for node-local CUDA fabric IPC", channelID)
 	}
 
 	if channelID < 0 || channelID >= len(s.nvdevlib.nvCapImexChanDevInfos) {
@@ -723,9 +727,17 @@ func (s *DeviceState) applyComputeDomainChannelConfigDriverManaged(ctx context.C
 		return nil, fmt.Errorf("error asserting ComputeDomain Ready: %w", err)
 	}
 
-	if s.computeDomainManager.CliqueID() == "" {
+	cliqueID := s.computeDomainManager.CliqueID()
+	if cliqueID == "" && !featuregates.Enabled(featuregates.NodeLocalFabricIPC) {
 		// Do not inject IMEX channel device nodes.
 		return &configState, nil
+	}
+	if cliqueID == "" {
+		klog.V(1).Infof("injecting %d IMEX channel(s) for node-local CUDA fabric IPC", chancount)
+	}
+	if chancount > len(s.nvdevlib.nvCapImexChanDevInfos) {
+		return nil, fmt.Errorf("applyComputeDomainChannelConfigDriverManaged: requested %d channels, but node has %d IMEX channels",
+			chancount, len(s.nvdevlib.nvCapImexChanDevInfos))
 	}
 
 	for _, info := range s.nvdevlib.nvCapImexChanDevInfos[:chancount] {
@@ -790,10 +802,8 @@ func (s *DeviceState) applyComputeDomainDaemonConfig(ctx context.Context, config
 	}
 	configState.containerEdits = configState.containerEdits.Append(edits)
 
-	// Only inject dev nodes related to
-	// /proc/driver/nvidia/capabilities/fabric-imex-mgmt if IMEX is supported
-	// (if we want to start the IMEX daemon process in the CD daemon pod).
-	if s.computeDomainManager.CliqueID() != "" {
+	// Inject the IMEX management device whenever this daemon will run nvidia-imex.
+	if s.computeDomainManager.CliqueID() != "" || featuregates.Enabled(featuregates.NodeLocalFabricIPC) {
 		nvcapPath := nvidiaCapFabricImexMgmtPath
 		if common.UsingAltProcDevices() {
 			nvcapPath = filepath.Join(s.config.flags.containerDriverRoot, "proc/driver/nvidia/capabilities/fabric-imex-mgmt")

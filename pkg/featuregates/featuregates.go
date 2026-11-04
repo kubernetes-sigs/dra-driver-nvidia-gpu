@@ -92,6 +92,10 @@ const (
 	// the cluster admin owns the host nvidia-imex daemon lifecycle.
 	HostManagedIMEXDaemon featuregate.Feature = "HostManagedIMEXDaemon"
 
+	// NodeLocalFabricIPC runs a single-node IMEX service and exposes its channel
+	// to ComputeDomain workloads on nodes without an MNNVL clique.
+	NodeLocalFabricIPC featuregate.Feature = "NodeLocalFabricIPC"
+
 	// DRAListTypeAttributes allows the GPU kubelet plugin to publish list-valued
 	// DRA device attributes. The cluster must have the Kubernetes feature gate
 	// of the same name enabled before enabling this in the driver.
@@ -189,6 +193,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Default:    false,
 			PreRelease: featuregate.Alpha,
 			Version:    version.MajorMinor(0, 5),
+		},
+	},
+	NodeLocalFabricIPC: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 6),
 		},
 	},
 	DRAListTypeAttributes: {
