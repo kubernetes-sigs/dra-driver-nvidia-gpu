@@ -259,3 +259,30 @@ func TestGpuInfoAttributesAddressingMode(t *testing.T) {
 		require.Equal(t, "hmm", *attr.StringValue)
 	})
 }
+
+func TestFabricManagerAttributesFollowNodeLocalState(t *testing.T) {
+	for name, enabled := range map[string]bool{
+		"disabled": false,
+		"enabled":  true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			setFabricManagerPartitioningForTest(t, enabled)
+			gpu := newTestGpuInfo(nil)
+			gpu.gpuModuleID = 1
+			gpu.partitionsBySize = map[int]int{1: 7}
+
+			attrs := gpu.Attributes()
+			_, hasModuleID := attrs["gpuModuleID"]
+			_, hasPartition := attrs["partition1"]
+			require.Equal(t, enabled, hasModuleID)
+			require.Equal(t, enabled, hasPartition)
+
+			vfio := &VfioDeviceInfo{parent: gpu}
+			vfioAttrs := vfio.GetDevice().Attributes
+			_, hasModuleID = vfioAttrs["gpuModuleID"]
+			_, hasPartition = vfioAttrs["partition1"]
+			require.Equal(t, enabled, hasModuleID)
+			require.Equal(t, enabled, hasPartition)
+		})
+	}
+}

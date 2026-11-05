@@ -27,7 +27,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
-	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/fabricmanager"
 )
 
 // Represents a specific, full, physical GPU device.
@@ -202,7 +202,7 @@ func (d *GpuInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.DeviceA
 		}
 	}
 
-	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
+	if fabricmanager.SupportsFabricManagerPartitioning() {
 		d.addFabricManagerAttributes(attrs)
 	}
 
@@ -305,12 +305,8 @@ func (d *VfioDeviceInfo) GetDevice() resourceapi.Device {
 	addDeviceAttribute(device.Attributes, d.pciBusIDAttr)
 	addDeviceAttribute(device.Attributes, d.pcieRootAttr)
 
-	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
-		if d.parent == nil {
-			klog.V(4).Infof("No parent GPU for %s; skipping Fabric Manager attributes", d.CanonicalName())
-		} else {
-			d.parent.addFabricManagerAttributes(device.Attributes)
-		}
+	if d.parent != nil && fabricmanager.SupportsFabricManagerPartitioning() {
+		d.parent.addFabricManagerAttributes(device.Attributes)
 	}
 	addDeviceAttribute(device.Attributes, d.numaNodeAttr)
 
