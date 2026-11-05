@@ -270,6 +270,7 @@ func (l deviceLib) GetPerGpuAllocatableDevices(knownPerGPUAllocatable *PerGPUAll
 				// nodes can only have at most 16 GPUs.
 				return fmt.Errorf("no free index found for GPU %v", i)
 			} else {
+				klog.Infof("Reserved index %d for GPU %s", idx, gpuInfo.PciBusID)
 				gpuInfo.Index = idx
 			}
 
@@ -540,6 +541,7 @@ func (l deviceLib) DiscoverGpuDeviceByUUID(index int, uuid string) (*Allocatable
 	if idx := l.gpuIndexer.Reserve(index, gpuInfo.PciBusID); idx == -1 {
 		return nil, fmt.Errorf("failed to reserve index %d for GPU %s", index, uuid)
 	} else {
+		klog.Infof("Reserved index %d for GPU %s", idx, gpuInfo.PciBusID)
 		gpuInfo.Index = idx
 	}
 
@@ -565,6 +567,7 @@ func (l deviceLib) discoverVfioDeviceByPciBusID(index int, pciBusID string) (*Al
 	if idx := l.gpuIndexer.Reserve(index, pciBusID); idx == -1 {
 		return nil, fmt.Errorf("failed to reserve index %d for VFIO device %s", index, pciBusID)
 	} else {
+		klog.Infof("Reserved index %d for VFIO device %s", idx, pciBusID)
 		vfioDeviceInfo.Index = idx
 	}
 	allocatable := &AllocatableDevice{
