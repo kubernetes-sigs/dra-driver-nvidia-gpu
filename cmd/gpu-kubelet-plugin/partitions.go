@@ -82,8 +82,7 @@ func (d *GpuInfo) PartSharedCounterSets() []resourceapi.CounterSet {
 	}
 	counters := addCountersForMemSlices(capacitiesToCounters(d.MaxCapacities), 0, d.MemSliceCount)
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		memory := d.fullGpuCapacity()["memory"].Value
-		counters = addCountersForGpuShare(counters, memory.Value(), memory.Value())
+		counters = addCountersForGpuShare(counters, 100)
 	}
 	return []resourceapi.CounterSet{{
 		Name:     d.GetSharedCounterSetName(),
@@ -104,8 +103,7 @@ func (d *GpuInfo) PartConsumesCounters() []resourceapi.DeviceCounterConsumption 
 	}
 	counters := addCountersForMemSlices(capacitiesToCounters(d.MaxCapacities), 0, d.MemSliceCount)
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		memory := d.PartCapacities()["memory"].Value
-		counters = addCountersForGpuShare(counters, memory.Value(), memory.Value())
+		counters = addCountersForGpuShare(counters, 100)
 	}
 	return []resourceapi.DeviceCounterConsumption{{
 		CounterSet: d.GetSharedCounterSetName(),
@@ -235,7 +233,7 @@ func (i MigSpec) PartConsumesCounters() []resourceapi.DeviceCounterConsumption {
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
 		memory := i.Capacities()["memory"].Value
 		totalMemory := i.Parent.PartCapacities()["memory"].Value
-		counters = addCountersForGpuShare(counters, memory.Value(), totalMemory.Value())
+		counters = addCountersForGpuShare(counters, calculateGpuShare(memory.Value(), totalMemory.Value()))
 	}
 	return []resourceapi.DeviceCounterConsumption{{
 		CounterSet: i.Parent.GetSharedCounterSetName(),
@@ -255,7 +253,7 @@ func (v *VfioDeviceInfo) PartConsumesCounters() []resourceapi.DeviceCounterConsu
 	}
 	return []resourceapi.DeviceCounterConsumption{{
 		CounterSet: counterSetName,
-		Counters:   addCountersForGpuShare(counters, 0, 0),
+		Counters:   addCountersForGpuShare(counters, 100),
 	}}
 }
 
@@ -275,7 +273,7 @@ func (v *VfioDeviceInfo) PartSharedCounterSets() []resourceapi.CounterSet {
 		return nil
 	}
 	counters := make(map[string]resourceapi.Counter)
-	counters = addCountersForGpuShare(counters, 0, 0)
+	counters = addCountersForGpuShare(counters, 100)
 	return []resourceapi.CounterSet{{
 		Name:     v.GetSharedCounterSetName(),
 		Counters: counters,
@@ -328,23 +326,11 @@ func addCountersForMemSlices(counters map[string]resourceapi.Counter, start int,
 	return counters
 }
 
-func addCountersForGpuShare(counters map[string]resourceapi.Counter, memory int64, totalMemory int64) map[string]resourceapi.Counter {
-	// If we don't have memory & total memory, then it means we've a gpu in passthrough mode,
-	// so set the gpu-share to 100%.
-	// For all other scenarios, we can calculate the gpu-share as the gpu memory is available via nvml APIs.
-	if memory == 0 && totalMemory == 0 {
-		counters["gpu-share"] = resourceapi.Counter{Value: *resource.NewQuantity(100, resource.BinarySI)}
-		return counters
-	}
-	// Calcuate the gpu-share as a percentage of the total memory consumed by the device.
-	// Full GPU: always at 100%.
-	// VFIO: always at 100%.
-	// MIG: calculate the gpu-share as a percentage of the total memory consumed by the device.
-	gpuShare := (memory * 100) / totalMemory
-	// Unlikely to happen, but cap the gpu-share at 100%.
-	if gpuShare > 100 {
-		gpuShare = 100
-	}
+// Add counter for the gpu-share of the device.
+// Full GPU: always at 100%.
+// VFIO: always at 100%.
+// MIG: gpu-share is the percentage of the total memory consumed by the device.
+func addCountersForGpuShare(counters map[string]resourceapi.Counter, gpuShare int64) map[string]resourceapi.Counter {
 	counters["gpu-share"] = resourceapi.Counter{Value: *resource.NewQuantity(gpuShare, resource.BinarySI)}
 	return counters
 }
@@ -361,4 +347,14 @@ func memsliceCounterName(i int) string {
 // Helper for creating an integer-based DeviceCapacity. Accept any integer type.
 func intcap[T constraints.Integer](i T) resourceapi.DeviceCapacity {
 	return resourceapi.DeviceCapacity{Value: *resource.NewQuantity(int64(i), resource.BinarySI)}
+}
+
+// Calcuate the gpu-share as a percentage of the total memory consumed by the device.
+func calculateGpuShare(memory int64, totalMemory int64) int64 {
+	share := (memory * 100) / totalMemory
+	// Unlikely to happen, but cap the gpu-share at 100%.
+	if share > 100 {
+		share = 100
+	}
+	return share
 }
