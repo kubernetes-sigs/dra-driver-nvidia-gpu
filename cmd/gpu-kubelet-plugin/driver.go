@@ -459,16 +459,6 @@ func (d *driver) nodePrepareResource(ctx context.Context, claim *resourceapi.Res
 		}
 	}
 
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		// Re-advertise updated resourceslice after preparing devices.
-		if err = d.publishResources(ctx, d.state.config); err != nil {
-			drametrics.IncNodePrepareError(DriverName, "publish_resources")
-			return kubeletplugin.PrepareResult{
-				Err: fmt.Errorf("failed to publish resources after preparing claim %s: %w", cs, err),
-			}
-		}
-	}
-
 	klog.V(1).Infof("Returning newly prepared devices for claim '%s': %v", cs, devs)
 	drametrics.ObserveRequest(DriverName, "prepare", time.Since(t0))
 	return kubeletplugin.PrepareResult{Devices: devs}
