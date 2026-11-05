@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,6 +40,9 @@ type PodManager struct {
 	cancelContext      context.CancelFunc
 	podInformer        cache.SharedIndexInformer
 	informerFactory    informers.SharedInformerFactory
+
+	// ready is the readiness last reported, nil before the first report.
+	ready atomic.Pointer[bool]
 }
 
 // NewPodManager creates a new PodManager instance.
@@ -126,11 +130,22 @@ func (pm *PodManager) addOrUpdate(ctx context.Context, obj any) error {
 		return fmt.Errorf("failed to cast object to Pod")
 	}
 
-	if err := pm.updatePodReadiness(ctx, pm.isPodReady(pod)); err != nil {
+	ready := pm.isPodReady(pod)
+	pm.ready.Store(&ready)
+	if err := pm.updatePodReadiness(ctx, ready); err != nil {
 		return fmt.Errorf("pod readiness callback failed: %w", err)
 	}
 
 	return nil
+}
+
+// lastReadiness returns the readiness last reported, and whether there was
+// one.
+func (pm *PodManager) lastReadiness() (ready, known bool) {
+	if p := pm.ready.Load(); p != nil {
+		return *p, true
+	}
+	return false, false
 }
 
 // isPodReady determines if a pod is ready based on its conditions.

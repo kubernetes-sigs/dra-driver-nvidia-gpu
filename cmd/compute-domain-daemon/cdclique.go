@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
@@ -106,6 +107,12 @@ func (m *ComputeDomainCliqueManager) Start(ctx context.Context) (rerr error) {
 		},
 		UpdateFunc: func(objOld, objNew any) {
 			m.config.workQueue.EnqueueWithKey(objNew, "cdclique", m.onAddOrUpdate)
+		},
+		// Garbage collection deletes the clique once all daemon pods that
+		// own it are gone, which can race with a replacement daemon that
+		// already found it. Recreate it, so that the daemon registers again.
+		DeleteFunc: func(any) {
+			m.config.workQueue.EnqueueRawWithKey(nil, "cdclique", m.recreateClique)
 		},
 	})
 	if err != nil {
@@ -203,8 +210,35 @@ func (m *ComputeDomainCliqueManager) ensureCliqueExists(ctx context.Context) err
 		return nil
 	}
 
-	// Create the CDClique
-	newClique := &nvapi.ComputeDomainClique{
+	createdClique, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.podNamespace).Create(ctx, m.newClique(), metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to create CDClique '%s': %w", m.cliqueName(), err)
+	}
+	m.mutationCache.Mutation(createdClique)
+
+	klog.Infof("Successfully created CDClique '%s'", m.cliqueName())
+	return nil
+}
+
+// recreateClique creates the CDClique after it was deleted. It skips the
+// cache, which keeps our last write of the deleted clique. The informer then
+// adds the new clique, and onAddOrUpdate registers this daemon in it.
+func (m *ComputeDomainCliqueManager) recreateClique(ctx context.Context, _ any) error {
+	createdClique, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.podNamespace).Create(ctx, m.newClique(), metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to recreate CDClique '%s': %w", m.cliqueName(), err)
+	}
+	m.mutationCache.Mutation(createdClique)
+
+	klog.Infof("Recreated deleted CDClique '%s'", m.cliqueName())
+	return nil
+}
+
+func (m *ComputeDomainCliqueManager) newClique() *nvapi.ComputeDomainClique {
+	clique := &nvapi.ComputeDomainClique{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      m.cliqueName(),
 			Namespace: m.config.podNamespace,
@@ -214,16 +248,8 @@ func (m *ComputeDomainCliqueManager) ensureCliqueExists(ctx context.Context) err
 			},
 		},
 	}
-	m.ensureOwnerReference(newClique)
-
-	createdClique, err := m.config.clientsets.Nvidia.ResourceV1beta1().ComputeDomainCliques(m.config.podNamespace).Create(ctx, newClique, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to create CDClique '%s': %w", m.cliqueName(), err)
-	}
-	m.mutationCache.Mutation(createdClique)
-
-	klog.Infof("Successfully created CDClique '%s'", m.cliqueName())
-	return nil
+	m.ensureOwnerReference(clique)
+	return clique
 }
 
 // onAddOrUpdate handles the addition or update of a ComputeDomainClique. Here, we
@@ -265,6 +291,15 @@ func (m *ComputeDomainCliqueManager) onAddOrUpdate(ctx context.Context, obj any)
 		return fmt.Errorf("CDClique update: failed to insert/update daemon info: %w", err)
 	}
 	m.maybePushDaemonsUpdate(clique)
+
+	// An entry inserted again, after the controller removed it or the
+	// clique was recreated, starts NotReady. Report the readiness of the
+	// pod again, as the pod may not change anymore.
+	if ready, known := m.podManager.lastReadiness(); known {
+		if err := m.updateDaemonStatus(ctx, ready); err != nil {
+			return fmt.Errorf("CDClique update: failed to report readiness: %w", err)
+		}
+	}
 
 	return nil
 }
