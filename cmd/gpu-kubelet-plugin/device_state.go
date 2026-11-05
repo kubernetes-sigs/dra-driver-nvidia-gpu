@@ -904,6 +904,19 @@ func (s *DeviceState) getPerGPUAllocatableDevicesFromCheckpoint(deviceCheckpoint
 				case VfioDeviceType:
 					vfioDevName := preparedDevice.Vfio.Device.DeviceName
 					vlt := preparedDevice.Vfio.Info
+					vst, err := NewVfioSpecTupleFromCanonicalName(vfioDevName)
+					if err != nil {
+						return nil, fmt.Errorf("failed to parse vfio device name %q: %w", vfioDevName, err)
+					}
+					allocatable, err := s.nvdevlib.DiscoverVfioDeviceByPciBusID(vst.Index, vlt.PciBusID)
+					if err != nil {
+						klog.Warningf("Failed to discover vfio device %q: %v. Skipping...", vfioDevName, err)
+						continue
+					}
+					err = perGPUAllocatable.AddAllocatableDevice(allocatable)
+					if err != nil {
+						return nil, fmt.Errorf("failed to add allocatable for vfio device %q (pciBusID: %q): %w", allocatable.CanonicalName(), vlt.PciBusID, err)
+					}
 					snapshot := preparedDevice.Vfio.AllocatableDevicesSnapshot
 					// If we had just upgraded from a version before v0.6.0, then this snapshot will not be present.
 					if snapshot != nil {
@@ -915,22 +928,6 @@ func (s *DeviceState) getPerGPUAllocatableDevicesFromCheckpoint(deviceCheckpoint
 							if err != nil {
 								return nil, fmt.Errorf("failed to add allocatable devices from snapshot for device %q: %w", vfioDevName, err)
 							}
-						}
-					} else {
-						// If the snapshot was not present, we rediscover the VFIO device so that it has
-						// the correct index.
-						vst, err := NewVfioSpecTupleFromCanonicalName(vfioDevName)
-						if err != nil {
-							return nil, fmt.Errorf("failed to parse vfio device name %q: %w", vfioDevName, err)
-						}
-						allocatable, err := s.nvdevlib.discoverVfioDeviceByPciBusID(vst.Index, vlt.PciBusID)
-						if err != nil {
-							klog.Warningf("Failed to discover vfio device %q: %v. Skipping...", vfioDevName, err)
-							continue
-						}
-						err = perGPUAllocatable.AddAllocatableDevice(allocatable)
-						if err != nil {
-							return nil, fmt.Errorf("failed to add allocatable for vfio device %q (pciBusID: %q): %w", allocatable.CanonicalName(), vlt.PciBusID, err)
 						}
 					}
 				}

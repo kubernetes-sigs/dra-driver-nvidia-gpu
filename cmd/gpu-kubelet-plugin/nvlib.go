@@ -555,7 +555,7 @@ func (l deviceLib) DiscoverGpuDeviceByUUID(index int, uuid string) (*Allocatable
 	return allocatable, nil
 }
 
-func (l deviceLib) discoverVfioDeviceByPciBusID(index int, pciBusID string) (*AllocatableDevice, error) {
+func (l deviceLib) DiscoverVfioDeviceByPciBusID(index int, pciBusID string) (*AllocatableDevice, error) {
 	device, err := l.nvpci.GetGPUByPciBusID(pciBusID)
 	if err != nil {
 		return nil, fmt.Errorf("error getting GPU by PCI bus ID %q: %w", pciBusID, err)
