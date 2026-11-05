@@ -1351,28 +1351,24 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 // TODO: Support MIGs as part of the PartitionableDevices integration with the PassthroughSupport feature gate.
 func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) error {
 	switch device.Type() {
-	case GpuDeviceType:
-		if !featuregates.Enabled(featuregates.PassthroughSupport) || !s.nvdevlib.IsVfioEnabled() || !device.Gpu.VfioEnabled {
-			return nil
-		}
-		vfioAllocatable, err := s.nvdevlib.discoverVfioDevice(device.Gpu)
-		if err != nil {
-			return fmt.Errorf("error discovering vfio device: %w", err)
-		}
-		err = s.perGPUAllocatable.AddAllocatableDevice(vfioAllocatable)
-		if err != nil {
-			return fmt.Errorf("error adding allocatable device: %w", err)
-		}
+	case GpuDeviceType, MigStaticDeviceType, MigDynamicDeviceType:
+		return nil
 	case VfioDeviceType:
-		gpu, _, err := s.nvdevlib.DiscoverGPUByPCIBusID(device.Vfio.PciBusID)
+		allocatables := make(AllocatableDevices)
+		gpu, migs, err := s.nvdevlib.DiscoverGPUByPCIBusID(device.Vfio.PciBusID)
 		if err != nil {
 			return fmt.Errorf("error discovering gpu by pci bus id: %w", err)
 		}
-		err = s.perGPUAllocatable.AddAllocatableDevice(gpu)
+		allocatables[gpu.CanonicalName()] = gpu
+		for _, mig := range migs {
+			allocatables[mig.CanonicalName()] = mig
+		}
+		device.Vfio.Parent = gpu.Gpu
+		allocatables[device.CanonicalName()] = device
+		err = s.perGPUAllocatable.AddGPUAllocatables(device.GetGPUPCIBusID(), allocatables)
 		if err != nil {
 			return fmt.Errorf("error adding allocatable device: %w", err)
 		}
-		device.Vfio.Parent = gpu.Gpu
 		// Always invalidate after rebinding, even if the minor is unchanged.
 		// getDeviceSpecsByUUIDAndMinor only refreshes entries with a mismatched
 		// minor, so a same-minor cache entry could hide a stale host device node.
@@ -1384,12 +1380,6 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 		if err := s.attachFabricManagerPartitions(gpu.Gpu); err != nil {
 			return fmt.Errorf("error attaching fabric manager partitions for gpu %q: %w", gpu.Gpu.CanonicalName(), err)
 		}
-	case MigStaticDeviceType:
-		// TODO: Implement once partitionable device is supported with PassthroughSupport feature gate.
-		return nil
-	case MigDynamicDeviceType:
-		// TODO: Implement once partitionable device is supported with PassthroughSupport feature gate.
-		return nil
 	}
 	return nil
 }

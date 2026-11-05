@@ -573,28 +573,6 @@ func (l deviceLib) discoverVfioDeviceByPciBusID(index int, pciBusID string) (*Al
 	return allocatable, nil
 }
 
-// TODO: Need go-nvlib util for this.
-func (l deviceLib) discoverVfioDevice(gpuInfo *GpuInfo) (*AllocatableDevice, error) {
-	gpus, err := l.nvpci.GetGPUs()
-	if err != nil {
-		return nil, fmt.Errorf("error getting GPU PCI devices: %w", err)
-	}
-	for idx, gpu := range gpus {
-		if gpu.Address != gpuInfo.PciBusID {
-			continue
-		}
-		vfioDeviceInfo, err := l.getVfioDeviceInfo(idx, gpu)
-		if err != nil {
-			return nil, fmt.Errorf("error getting VFIO device info: %w", err)
-		}
-		vfioDeviceInfo.Parent = gpuInfo
-		return &AllocatableDevice{
-			Vfio: vfioDeviceInfo,
-		}, nil
-	}
-	return nil, fmt.Errorf("error discovering VFIO device by PCI bus ID: %s", gpuInfo.PciBusID)
-}
-
 // Tear down any MIG devices that are present and don't belong to completed
 // claims. This can be improved for tearing down partial state (GI without CI,
 // for example).

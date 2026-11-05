@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sync"
 
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/klog/v2"
@@ -43,6 +44,7 @@ type PCIBusID = string
 
 type AllocatableDevices map[DeviceName]*AllocatableDevice
 type PerGPUAllocatableDevices struct {
+	sync.Mutex
 	allocatablesMap map[PCIBusID]AllocatableDevices
 }
 
@@ -251,6 +253,8 @@ func (d AllocatableDevices) UUIDs() []string {
 }
 
 func (d *PerGPUAllocatableDevices) GetGPUDeviceByPCIBusID(pciBusID string) *AllocatableDevice {
+	d.Lock()
+	defer d.Unlock()
 	if devices, ok := d.allocatablesMap[pciBusID]; ok {
 		for _, device := range devices {
 			if device.Type() != GpuDeviceType {
@@ -263,6 +267,8 @@ func (d *PerGPUAllocatableDevices) GetGPUDeviceByPCIBusID(pciBusID string) *Allo
 }
 
 func (d *PerGPUAllocatableDevices) AddGPUAllocatables(pciBusID string, allocatables AllocatableDevices) error {
+	d.Lock()
+	defer d.Unlock()
 	if allocatables == nil {
 		return fmt.Errorf("allocatables is nil")
 	}
@@ -270,11 +276,14 @@ func (d *PerGPUAllocatableDevices) AddGPUAllocatables(pciBusID string, allocatab
 		d.allocatablesMap[pciBusID] = make(AllocatableDevices)
 	}
 	klog.Infof("Adding allocatables for PCI bus ID: %s", pciBusID)
+	delete(d.allocatablesMap, pciBusID)
 	d.allocatablesMap[pciBusID] = allocatables
 	return nil
 }
 
 func (d *PerGPUAllocatableDevices) AddAllocatableDevice(allocatable *AllocatableDevice) error {
+	d.Lock()
+	defer d.Unlock()
 	if allocatable == nil {
 		return fmt.Errorf("allocatable is nil")
 	}
@@ -288,6 +297,8 @@ func (d *PerGPUAllocatableDevices) AddAllocatableDevice(allocatable *Allocatable
 }
 
 func (d *PerGPUAllocatableDevices) GetAllocatableDevice(deviceName DeviceName) *AllocatableDevice {
+	d.Lock()
+	defer d.Unlock()
 	for _, devices := range d.allocatablesMap {
 		if device, ok := devices[deviceName]; ok {
 			return device
@@ -297,6 +308,8 @@ func (d *PerGPUAllocatableDevices) GetAllocatableDevice(deviceName DeviceName) *
 }
 
 func (d *PerGPUAllocatableDevices) GetAllDevices(pciBusIDs ...string) AllocatableDevices {
+	d.Lock()
+	defer d.Unlock()
 	all := make(AllocatableDevices)
 	if len(pciBusIDs) == 0 {
 		for _, devices := range d.allocatablesMap {
