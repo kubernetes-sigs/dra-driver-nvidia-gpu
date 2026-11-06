@@ -17,9 +17,12 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"fmt"
 
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
@@ -37,22 +40,70 @@ func channelReservationsEnabled() bool {
 const legacySharedChannel = 0
 
 // admittedChannel returns the channel the controller assigned to the shared
-// channel device of a claim at admission, from the claim's device status.
+// channel device of a claim at admission, from the claim's device status, or
+// nil before the controller decided.
 func admittedChannel(claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult) (*imex.ChannelAllocation, error) {
-	for _, status := range claim.Status.Devices {
-		if status.Driver != result.Driver || status.Pool != result.Pool || status.Device != result.Device ||
-			ptr.Deref(status.ShareID, "") != string(ptr.Deref(result.ShareID, "")) {
-			continue
+	status := channelDeviceStatus(claim, result)
+	if status == nil {
+		return nil, nil
+	}
+	return imex.DecodeChannelAllocation(status.Data)
+}
+
+func channelDeviceStatus(claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult) *resourceapi.AllocatedDeviceStatus {
+	for i := range claim.Status.Devices {
+		status := &claim.Status.Devices[i]
+		if status.Driver == result.Driver && status.Pool == result.Pool && status.Device == result.Device &&
+			ptr.Deref(status.ShareID, "") == string(ptr.Deref(result.ShareID, "")) {
+			return status
 		}
-		allocation, err := imex.DecodeChannelAllocation(status.Data)
+	}
+	return nil
+}
+
+// assignedChannel returns the channel the controller assigned to the shared
+// channel device of a claim. A pod waits for the assignment through the
+// binding condition with per-ComputeDomain IMEX daemons. In a shared IMEX
+// domain it binds at once, so Prepare may run before the controller decided:
+// it then reads the latest claim, and fails to be retried until the
+// controller assigns a channel.
+func (s *DeviceState) assignedChannel(ctx context.Context, claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult) (*imex.ChannelAllocation, error) {
+	allocation, err := admittedChannel(claim, result)
+	if err != nil {
+		return nil, permanentError{err}
+	}
+	if allocation != nil {
+		return allocation, nil
+	}
+	if len(result.BindingConditions) == 0 && s.config.imexConfig.SharedIMEXDaemons() {
+		latest, err := s.config.clientsets.Resource.ResourceClaims(claim.Namespace).Get(ctx, claim.Name, metav1.GetOptions{})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error getting ResourceClaim: %w", err)
+		}
+		if latest.UID != claim.UID {
+			return nil, permanentError{fmt.Errorf("ResourceClaim was replaced")}
+		}
+		claim = latest
+		allocation, err = admittedChannel(claim, result)
+		if err != nil {
+			return nil, permanentError{err}
 		}
 		if allocation != nil {
 			return allocation, nil
 		}
 	}
-	return nil, fmt.Errorf("the controller assigned no channel, check that it runs with the %s feature gate", featuregates.ComputeDomainChannelReservations)
+	status := channelDeviceStatus(claim, result)
+	var conditions []metav1.Condition
+	if status != nil {
+		conditions = status.Conditions
+	}
+	if rejected := meta.FindStatusCondition(conditions, imex.ChannelRejectedCondition); rejected != nil && rejected.Status == metav1.ConditionTrue {
+		return nil, permanentError{fmt.Errorf("the controller rejected the channel: %s: %s", rejected.Reason, rejected.Message)}
+	}
+	if len(result.BindingConditions) > 0 || !s.config.imexConfig.SharedIMEXDaemons() || meta.IsStatusConditionTrue(conditions, imex.ChannelAdmittedCondition) {
+		return nil, permanentError{fmt.Errorf("the controller assigned no channel, check that it runs with the %s feature gate", featuregates.ComputeDomainChannelReservations)}
+	}
+	return nil, fmt.Errorf("waiting for the controller to assign a channel")
 }
 
 // isComputeDomainPreparedOnNode reports whether a claim of the ComputeDomain

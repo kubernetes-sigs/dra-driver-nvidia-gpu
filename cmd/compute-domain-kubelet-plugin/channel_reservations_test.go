@@ -23,7 +23,9 @@ import (
 
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
+	draclient "k8s.io/dynamic-resource-allocation/client"
 	"k8s.io/utils/ptr"
 
 	"github.com/stretchr/testify/assert"
@@ -113,7 +115,8 @@ func TestComputeDomainPublishedDevicesChannelReservations(t *testing.T) {
 
 		require.Equal(t, []string{imex.ChannelDeviceName, "channel-0"}, deviceNames(devices))
 		channel := findDevice(t, devices, imex.ChannelDeviceName)
-		assert.Equal(t, []string{imex.ChannelAdmittedCondition}, channel.BindingConditions, "the controller assigns the channel at admission")
+		assert.Empty(t, channel.BindingConditions, "pods bind at once, while the controller assigns the channel")
+		assert.Empty(t, channel.BindingFailureConditions)
 		assert.Equal(t, ptr.To(true), channel.AllowMultipleAllocations)
 		assert.Empty(t, channel.Capacity)
 		assert.Empty(t, channel.Taints, "ComputeDomains share nodes")
@@ -611,4 +614,76 @@ func TestApplyChannelConfigDeletedComputeDomain(t *testing.T) {
 
 	require.Error(t, err, "a released channel is not prepared for its former ComputeDomain")
 	assert.Contains(t, err.Error(), "ComputeDomain not found")
+}
+
+func TestAssignedChannelSharedDomain(t *testing.T) {
+	setChannelReservationsGate(t, true)
+	result := allocationResult("request", DriverName, imex.ChannelDeviceName, nil)
+	decided := func(t *testing.T, conditionType, reason string, channel ...int) *resourceapi.ResourceClaim {
+		claim := claimWithResults("claim-uid", result)
+		for _, c := range channel {
+			admitChannel(t, claim, result, c)
+		}
+		if conditionType != "" {
+			if len(claim.Status.Devices) == 0 {
+				claim.Status.Devices = append(claim.Status.Devices, resourceapi.AllocatedDeviceStatus{Driver: result.Driver, Pool: result.Pool, Device: result.Device})
+			}
+			claim.Status.Devices[0].Conditions = []metav1.Condition{{Type: conditionType, Status: metav1.ConditionTrue, Reason: reason, Message: "decided"}}
+		}
+		return claim
+	}
+	tests := map[string]struct {
+		// latest is the claim on the API server, nil when it is the one
+		// Prepare got.
+		latest        *resourceapi.ResourceClaim
+		wantChannel   int
+		wantErr       string
+		wantPermanent bool
+	}{
+		"assigned after Prepare got the claim": {
+			latest:      decided(t, imex.ChannelAdmittedCondition, "Admitted", 2),
+			wantChannel: 2,
+		},
+		"not assigned yet": {
+			wantErr: "waiting for the controller to assign a channel",
+		},
+		"rejected": {
+			latest:        decided(t, imex.ChannelRejectedCondition, "InvalidConfig"),
+			wantErr:       "the controller rejected the channel: InvalidConfig: decided",
+			wantPermanent: true,
+		},
+		"admitted by a controller without channel reservations": {
+			latest:        decided(t, imex.ChannelAdmittedCondition, "Admitted"),
+			wantErr:       "the controller assigned no channel",
+			wantPermanent: true,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			claim := claimWithResults("claim-uid", result)
+			latest := tc.latest
+			if latest == nil {
+				latest = claim
+			}
+			state := reservationTestState(t, hostManagedConfig(), checkpointWithClaims(nil))
+			state.config.clientsets.Resource = draclient.New(fake.NewSimpleClientset(latest))
+
+			allocation, err := state.assignedChannel(context.Background(), claim, &result)
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.Equal(t, tc.wantPermanent, isPermanentError(err), "only a pending assignment is retried")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantChannel, allocation.Channel)
+		})
+	}
+
+	t.Run("the claim Prepare got is used when assigned", func(t *testing.T) {
+		state := reservationTestState(t, hostManagedConfig(), checkpointWithClaims(nil))
+		allocation, err := state.assignedChannel(context.Background(), decided(t, imex.ChannelAdmittedCondition, "Admitted", 1), &result)
+		require.NoError(t, err)
+		assert.Equal(t, 1, allocation.Channel, "no API call without a client")
+	})
 }

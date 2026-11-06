@@ -65,7 +65,9 @@ With the Alpha `ComputeDomainChannelReservations` feature gate, each workload `R
 - Each kubelet plugin publishes one `channel` device that any number of channel claims on its node can share, through the `allowMultipleAllocations` field of Kubernetes DRA [consumable capacity](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#consumable-capacity).
   The device has no channel ID and no capacity, its own `type`, `imex-channel`, which the `compute-domain-channel.nvidia.com` DeviceClass selects, and names the NVLink clique of the node in its `cliqueID` attribute.
   Pods using the same template can therefore run on the same node.
-- Before a workload pod is bound to a node, the controller admits its claim through a DRA binding condition and assigns it a channel, which it writes into the claim's `status.devices[].data`.
+- The controller admits each claim and assigns it a channel, which it writes into the claim's `status.devices[].data`.
+  With `daemonLifecycle=perComputeDomain`, it decides before the pod is bound to a node, through a DRA binding condition.
+  With `daemonLifecycle=hostManaged`, the pod is bound at once, and the kubelet plugin waits for the channel before it prepares the claim.
   A channel only needs to be unique in an IMEX domain, so each NVLink clique has its own channels, 1 to `imex.maxChannels - 1`.
   Claims of one template share its channel in a clique, and a channel is freed with its last claim.
   The kubelet plugin injects the channel of the claim's status.
@@ -78,11 +80,12 @@ With the Alpha `ComputeDomainChannelReservations` feature gate, each workload `R
   Decisions are serialized per node, so the first claims of two ComputeDomains never both get a free node.
   Workloads of one ComputeDomain, from any of its templates, share a node.
 - With `daemonLifecycle=hostManaged`, several ComputeDomains can share a node, isolated by their channels.
+  A rejected claim, for example from a clique without a free channel, fails to prepare, and the reason shows up as an event of its pod.
 - ComputeDomains created before the gate was enabled keep working as without it: the kubelet plugin still publishes the `channel-0` device their claim templates request, one claim per node, and channel 0 is never assigned to others.
 - The first claim of a ComputeDomain on a node starts or checks the IMEX daemon, and later claims from any of its templates only get their channel injected.
 
-This requires Kubernetes 1.34 or later with `DRAConsumableCapacity`, and DRA binding conditions (`DRADeviceBindingConditions`, `DRAResourceClaimDeviceStatus`) on the kube-apiserver and kube-scheduler.
-With `daemonLifecycle=perComputeDomain`, also enable [`DRADeviceTaints`](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#device-taints-and-tolerations) on the kube-apiserver and kube-scheduler (default on v1.36 and later). Without it, the API server drops the owner taint, and the controller keeps ComputeDomains apart only by rejecting their claims.
+This requires Kubernetes 1.34 or later with `DRAConsumableCapacity`, and `DRAResourceClaimDeviceStatus` on the kube-apiserver.
+With `daemonLifecycle=perComputeDomain`, also enable DRA binding conditions (`DRADeviceBindingConditions`, `DRAResourceClaimDeviceStatus`) on the kube-apiserver and kube-scheduler, and [`DRADeviceTaints`](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/#device-taints-and-tolerations) on the kube-apiserver and kube-scheduler (default on v1.36 and later). Without it, the API server drops the owner taint, and the controller keeps ComputeDomains apart only by rejecting their claims.
 With the feature gate off, ComputeDomains keep working on every Kubernetes version the chart supports, and `spec.channels` is rejected by the controller.
 Apply the ComputeDomain CRD of the release before upgrading, as Helm does not upgrade CRDs.
 Older controllers and kubelet plugins do not understand `spec.channels`, so only use it once all components run this release.

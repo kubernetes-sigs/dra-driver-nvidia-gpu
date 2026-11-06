@@ -691,7 +691,7 @@ func (s *DeviceState) applyComputeDomainChannelConfig(ctx context.Context, confi
 // allocatedChannelID returns the IMEX channel of an allocated channel
 // device: the one the controller assigned at admission for the shared
 // channel device, or the device's own for a per-channel device.
-func (s *DeviceState) allocatedChannelID(claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult) (int, error) {
+func (s *DeviceState) allocatedChannelID(ctx context.Context, claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult) (int, error) {
 	device, ok := s.allocatable[result.Device]
 	if !ok || device.Channel == nil {
 		return 0, fmt.Errorf("%q is not an allocatable IMEX channel device", result.Device)
@@ -699,9 +699,9 @@ func (s *DeviceState) allocatedChannelID(claim *resourceapi.ResourceClaim, resul
 	if !device.Channel.Shared() {
 		return device.Channel.ID, nil
 	}
-	allocation, err := admittedChannel(claim, result)
+	allocation, err := s.assignedChannel(ctx, claim, result)
 	if err != nil {
-		return 0, permanentError{fmt.Errorf("no channel for %q: %w", result.Device, err)}
+		return 0, fmt.Errorf("no channel for %q: %w", result.Device, err)
 	}
 	if allocation.Channel >= len(s.nvdevlib.nvCapImexChanDevInfos) {
 		return 0, permanentError{fmt.Errorf("channel %d out of range (node has %d IMEX channels)", allocation.Channel, len(s.nvdevlib.nvCapImexChanDevInfos))}
@@ -721,7 +721,7 @@ func (s *DeviceState) allocatedChannelID(claim *resourceapi.ResourceClaim, resul
 // still validates that the operator's host nvidia-imex daemon is actually
 // ready before handing out a channel, via checkHostIMEXReady.
 func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Context, config *configapi.ComputeDomainChannelConfig, claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult) (*DeviceConfigState, error) {
-	channelID, err := s.allocatedChannelID(claim, result)
+	channelID, err := s.allocatedChannelID(ctx, claim, result)
 	if err != nil {
 		return nil, fmt.Errorf("applyComputeDomainChannelConfigHostManaged: %w", err)
 	}
@@ -773,7 +773,7 @@ func (s *DeviceState) applyComputeDomainChannelConfigDriverManaged(ctx context.C
 	// Without channel reservations only channel 0 is published, which is
 	// also used for AllocationModeAll. With them, the controller assigned
 	// the channel at admission.
-	channelID, err := s.allocatedChannelID(claim, result)
+	channelID, err := s.allocatedChannelID(ctx, claim, result)
 	if err != nil {
 		return nil, fmt.Errorf("applyComputeDomainChannelConfigDriverManaged: %w", err)
 	}
