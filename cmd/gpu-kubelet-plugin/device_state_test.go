@@ -36,8 +36,8 @@ func TestValidateNoOverlappingPreparedDevices(t *testing.T) {
 	perGPU := &PerGPUAllocatableDevices{
 		allocatablesMap: map[PCIBusID]AllocatableDevices{
 			"0000:00:00.0": {
-				"gpu-0":  &AllocatableDevice{Gpu: &GpuInfo{minor: 0}},
-				"vfio-0": &AllocatableDevice{Vfio: &VfioDeviceInfo{index: 0}},
+				"gpu-0":  &AllocatableDevice{Gpu: &GpuInfo{Minor: 0}},
+				"vfio-0": &AllocatableDevice{Vfio: &VfioDeviceInfo{Index: 0}},
 			},
 		},
 	}
@@ -233,8 +233,8 @@ func TestApplySharingConfigMpsDisallowedWithConsumableShares(t *testing.T) {
 	perGPU := &PerGPUAllocatableDevices{
 		allocatablesMap: map[PCIBusID]AllocatableDevices{
 			"0000:00:00.0": {
-				"gpu-0": &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0000", cudaComputeCapability: "8.0"}},
-				"gpu-1": &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0001", cudaComputeCapability: "8.0"}},
+				"gpu-0": &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0000", CudaComputeCapability: "8.0"}},
+				"gpu-1": &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0001", CudaComputeCapability: "8.0"}},
 			},
 		},
 	}
@@ -329,7 +329,7 @@ func TestSharingReferenceCountingHelpers(t *testing.T) {
 							Devices: PreparedDeviceList{
 								{
 									Gpu: &PreparedGpu{
-										Info: &GpuInfo{UUID: "GPU-1111"},
+										Info: &GpuLiveTuple{UUID: "GPU-1111"},
 										Device: &CheckpointedDevice{
 											DeviceName: "gpu-0",
 										},
@@ -364,7 +364,7 @@ func TestSharingReferenceCountingHelpers(t *testing.T) {
 							Devices: PreparedDeviceList{
 								{
 									Gpu: &PreparedGpu{
-										Info: &GpuInfo{UUID: "GPU-ADMIN"},
+										Info: &GpuLiveTuple{UUID: "GPU-ADMIN"},
 										Device: &CheckpointedDevice{
 											DeviceName: "gpu-admin",
 										},
@@ -372,7 +372,7 @@ func TestSharingReferenceCountingHelpers(t *testing.T) {
 								},
 								{
 									Gpu: &PreparedGpu{
-										Info: &GpuInfo{UUID: "GPU-NON-ADMIN"},
+										Info: &GpuLiveTuple{UUID: "GPU-NON-ADMIN"},
 										Device: &CheckpointedDevice{
 											DeviceName: "gpu-non-admin",
 										},
@@ -464,7 +464,7 @@ func TestDeactivateFabricPartitionRefCounting(t *testing.T) {
 							Devices: PreparedDeviceList{
 								{
 									Gpu: &PreparedGpu{
-										Info: &GpuInfo{UUID: "GPU-0000", gpuModuleID: 1},
+										Info: &GpuLiveTuple{UUID: "GPU-0000"},
 										Device: &CheckpointedDevice{
 											DeviceName: "gpu-0",
 										},
@@ -490,7 +490,7 @@ func TestDeactivateFabricPartitionRefCounting(t *testing.T) {
 							Devices: PreparedDeviceList{
 								{
 									Gpu: &PreparedGpu{
-										Info: &GpuInfo{UUID: "GPU-0000", gpuModuleID: 1},
+										Info: &GpuLiveTuple{UUID: "GPU-0000"},
 										Device: &CheckpointedDevice{
 											DeviceName: "gpu-0",
 										},
@@ -528,7 +528,7 @@ func TestDeactivateFabricPartitionRefCounting(t *testing.T) {
 		perGPUAllocatable: &PerGPUAllocatableDevices{
 			allocatablesMap: map[PCIBusID]AllocatableDevices{
 				"0000:00:00.0": {
-					"gpu-0": &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0000", gpuModuleID: 1}},
+					"gpu-0": &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0000", GpuModuleID: 1}},
 				},
 			},
 		},
@@ -556,8 +556,8 @@ func TestValidateAdminAccessRequest(t *testing.T) {
 		perGPUAllocatable: &PerGPUAllocatableDevices{
 			allocatablesMap: map[PCIBusID]AllocatableDevices{
 				"0000:00:00.0": {
-					"gpu-0":  &AllocatableDevice{Gpu: &GpuInfo{minor: 0}},
-					"vfio-0": &AllocatableDevice{Vfio: &VfioDeviceInfo{index: 0}},
+					"gpu-0":  &AllocatableDevice{Gpu: &GpuInfo{Minor: 0}},
+					"vfio-0": &AllocatableDevice{Vfio: &VfioDeviceInfo{Index: 0}},
 					"mig-0":  &AllocatableDevice{MigStatic: &MigDeviceInfo{}},
 				},
 			},
@@ -786,7 +786,7 @@ func TestGpuInfosFromPreparedClaim(t *testing.T) {
 			allocatablesMap: map[PCIBusID]AllocatableDevices{
 				"0000:00:00.0": {
 					"gpu-0":  &AllocatableDevice{Gpu: gpuInfo},
-					"vfio-0": &AllocatableDevice{Vfio: &VfioDeviceInfo{parent: vfioParent}},
+					"vfio-0": &AllocatableDevice{Vfio: &VfioDeviceInfo{Parent: vfioParent}},
 					"mig-0":  &AllocatableDevice{MigStatic: &MigDeviceInfo{}},
 				},
 			},
@@ -873,7 +873,7 @@ func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
 	enableDynamicMIGForTest(t)
 
 	const ownedMIG = "gpu-0-mig-1g10gb-19-0"
-	parent := &GpuInfo{UUID: "GPU-0", minor: 0, pciBusID: "0000:01:00.0"}
+	parent := &GpuInfo{UUID: "GPU-0", Minor: 0, PciBusID: "0000:01:00.0"}
 
 	// The parent lookup is the first NVML call MIG teardown makes, so its count
 	// tells which results got that far. The parent holds one MIG device, on a
@@ -883,14 +883,11 @@ func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
 			migDevice: &fakeNVMLMigDevice{giID: 3},
 			gi:        &fakeNVMLGpuInstance{info: nvml.GpuInstanceInfo{Id: 3, ProfileId: 9, Placement: nvml.GpuInstancePlacement{Start: 4, Size: 3}}},
 		}
-		nvmllib := &mockNVMLLibrary{
-			deviceGetHandleByUUIDFunc: func(string) (nvml.Device, nvml.Return) { return gpu, nvml.SUCCESS },
-		}
+		nvmllib := &mockNVMLLibrary{devices: map[string]nvml.Device{parent.UUID: gpu}}
 		state := &DeviceState{nvdevlib: &deviceLib{
 			nvmllib:           nvmllib,
 			gpuInfosByUUID:    map[string]*GpuInfo{parent.UUID: parent},
-			gpuUUIDbyPCIBusID: map[PCIBusID]string{parent.pciBusID: parent.UUID},
-			devhandleByUUID:   map[string]nvml.Device{},
+			gpuUUIDbyPCIBusID: map[PCIBusID]string{parent.PciBusID: parent.UUID},
 		}}
 		return state, nvmllib
 	}

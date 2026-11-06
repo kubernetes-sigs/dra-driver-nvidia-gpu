@@ -23,6 +23,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -55,3 +57,39 @@ var _ = BeforeSuite(func() {
 		"Detected GPU: node=%s product=%q driver=%s memory=%s\n",
 		gpu.NodeName, gpu.ProductName, gpu.DriverVersion, gpu.Memory.String())
 })
+
+func applyYAML(ctx context.Context, tmpl string, vars map[string]any) {
+	yaml, err := framework.Render(tmpl, vars)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(framework.ApplyYAML(ctx, yaml)).To(Succeed())
+}
+
+// podNode returns the node a pod landed on.
+func podNode(ctx context.Context, ns, name string) string {
+	pod, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred(), "get pod %s/%s", ns, name)
+	Expect(pod.Spec.NodeName).NotTo(BeEmpty(), "pod %s/%s not scheduled", ns, name)
+	return pod.Spec.NodeName
+}
+
+// deletePod deletes a pod and waits for it to be gone, which also releases its
+// generated ResourceClaim (owned by the pod).
+func deletePod(ctx context.Context, ns, name string) {
+	Expect(cs.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{})).To(Succeed())
+	Eventually(func() bool {
+		_, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+		return apierrors.IsNotFound(err)
+	}, 2*time.Minute, 5*time.Second).Should(BeTrue(), "pod %s/%s never deleted", ns, name)
+}
+
+// deleteNamespace deletes a namespace and waits for it to be fully gone.
+// Deletion blocks on vfio claim unpreparation (driver switch is slow), so a
+// leftover claim could otherwise race into the next spec.
+func deleteNamespace(ctx context.Context, name string) {
+	err := cs.CoreV1().Namespaces().Delete(ctx, name, metav1.DeleteOptions{})
+	Expect(err == nil || apierrors.IsNotFound(err)).To(BeTrue(), "delete namespace %q: %v", name, err)
+	Eventually(func() bool {
+		_, err := cs.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
+		return apierrors.IsNotFound(err)
+	}, 2*time.Minute, 5*time.Second).Should(BeTrue(), "namespace %q never deleted", name)
+}

@@ -203,38 +203,38 @@ func TestSetMax(t *testing.T) {
 	})
 }
 
-func TestDeviceLibGetGpuInfoByMinor(t *testing.T) {
+func TestDeviceLibGetGpuInfoByIndex(t *testing.T) {
 	tests := map[string]struct {
 		gpuInfosByUUID map[string]*GpuInfo
-		minor          GPUMinor
+		index          int
 		expectedUUID   string
 		expectedError  string
 	}{
-		"finds the GPU with the matching minor": {
+		"finds the GPU with the matching index": {
 			gpuInfosByUUID: map[string]*GpuInfo{
-				"GPU-1": {UUID: "GPU-1", minor: 1},
-				"GPU-2": {UUID: "GPU-2", minor: 2},
+				"GPU-1": {UUID: "GPU-1", Index: 1},
+				"GPU-2": {UUID: "GPU-2", Index: 2},
 			},
-			minor:        2,
+			index:        2,
 			expectedUUID: "GPU-2",
 		},
-		"finds a GPU with minor zero": {
+		"finds a GPU with index zero": {
 			gpuInfosByUUID: map[string]*GpuInfo{
-				"GPU-0": {UUID: "GPU-0", minor: 0},
+				"GPU-0": {UUID: "GPU-0", Index: 0},
 			},
-			minor:        0,
+			index:        0,
 			expectedUUID: "GPU-0",
 		},
-		"returns an error when the minor is not found": {
+		"returns an error when the index is not found": {
 			gpuInfosByUUID: map[string]*GpuInfo{
-				"GPU-1": {UUID: "GPU-1", minor: 1},
+				"GPU-1": {UUID: "GPU-1", Index: 1},
 			},
-			minor:         2,
-			expectedError: "gpu info not found for minor 2",
+			index:         2,
+			expectedError: "gpu info not found for index 2",
 		},
 		"returns an error when no GPUs are known": {
-			minor:         1,
-			expectedError: "gpu info not found for minor 1",
+			index:         1,
+			expectedError: "gpu info not found for index 1",
 		},
 	}
 
@@ -242,7 +242,7 @@ func TestDeviceLibGetGpuInfoByMinor(t *testing.T) {
 		t.Run(description, func(t *testing.T) {
 			l := deviceLib{gpuInfosByUUID: tc.gpuInfosByUUID}
 
-			gpuInfo, err := l.getGpuInfoByMinor(tc.minor)
+			gpuInfo, err := l.getGpuInfoByIndex(tc.index)
 			if tc.expectedError != "" {
 				require.EqualError(t, err, tc.expectedError)
 				require.Nil(t, gpuInfo)

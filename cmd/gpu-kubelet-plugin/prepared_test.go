@@ -32,7 +32,7 @@ import (
 func newPreparedGpu(deviceName, uuid string) PreparedDevice {
 	return PreparedDevice{
 		Gpu: &PreparedGpu{
-			Info:   &GpuInfo{UUID: uuid},
+			Info:   &GpuLiveTuple{UUID: uuid},
 			Device: &CheckpointedDevice{DeviceName: deviceName},
 		},
 	}
@@ -50,7 +50,7 @@ func newPreparedMigDevice(deviceName, migUUID string) PreparedDevice {
 func newPreparedVfioDevice(deviceName, uuid string) PreparedDevice {
 	return PreparedDevice{
 		Vfio: &PreparedVfioDevice{
-			Info:   &VfioDeviceInfo{UUID: uuid},
+			Info:   &VfioLiveTuple{UUID: uuid, PciBusID: "0000:00:00.0"},
 			Device: &CheckpointedDevice{DeviceName: deviceName},
 		},
 	}

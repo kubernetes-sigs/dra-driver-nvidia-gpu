@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Namespace }}
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+spec:
+  devices:
+    requests:
+    - name: device
+      exactly:
+        deviceClassName: {{ .DeviceClassName }}
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes["resource.kubernetes.io"].pciBusID == "{{ .PCIBusID }}"
+{{- if .Profile }}
+        - cel:
+            expression: device.attributes["gpu.nvidia.com"].profile == "{{ .Profile }}"
+{{- end }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchFields:
+          - key: metadata.name
+            operator: In
+            values: [{{ .NodeName | printf "%q" }}]
+  containers:
+  - name: ctr
+{{- if .Vfio }}
+    image: ubuntu:22.04
+    command: ["bash", "-c", "sleep 9999 & wait"]
+{{- else }}
+    image: nvcr.io/nvidia/cuda:12.2.0-base-ubuntu22.04
+    command: ["bash", "-c", "nvidia-smi -L || exit 1; sleep 9999 & wait"]
+{{- end }}
+    resources:
+      claims:
+      - name: device
+  resourceClaims:
+  - name: device
+    resourceClaimName: {{ .Name }}
+  tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule

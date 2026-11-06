@@ -74,14 +74,14 @@ func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib 
 
 // Configure binds the GPU to the vfio-pci driver.
 func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) error {
-	loaded, err := vm.checkKernelModuleLoaded(info.vfioModule)
+	loaded, err := vm.checkKernelModuleLoaded(info.VfioModule)
 	if err != nil {
-		return fmt.Errorf("error checking if module %q is loaded: %w", info.vfioModule, err)
+		return fmt.Errorf("error checking if module %q is loaded: %w", info.VfioModule, err)
 	}
 	if !loaded {
-		err := vm.loadKernelModule(info.vfioModule)
+		err := vm.loadKernelModule(info.VfioModule)
 		if err != nil {
-			return fmt.Errorf("failed to load module %q: %w", info.vfioModule, err)
+			return fmt.Errorf("failed to load module %q: %w", info.VfioModule, err)
 		}
 	}
 
@@ -90,7 +90,7 @@ func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) e
 		return fmt.Errorf("a driver switch is inflight for GPU %q, please check the kernel logs for more details", info.PciBusID)
 	}
 
-	vfioDriver, err := getVfioDriverName(info.vfioModule)
+	vfioDriver, err := getVfioDriverName(info.VfioModule)
 	if err != nil {
 		return fmt.Errorf("error getting vfio driver for GPU %q: %w", info.PciBusID, err)
 	}
@@ -161,14 +161,14 @@ func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) e
 // where the driver is installed. If you have containerized GPU clients that work
 // with their own view of the device nodes, we will not able to detect it.
 func (vm *VfioPciManager) WaitForGPUFree(ctx context.Context, info *VfioDeviceInfo) error {
-	if info.parent == nil {
+	if info.Parent == nil {
 		return nil
 	}
 	timeout := time.After(gpuFreeCheckTimeout)
 	ticker := time.NewTicker(gpuFreeCheckInterval)
 	defer ticker.Stop()
 
-	gpuDeviceNode := filepath.Join(vm.hostDriverRoot, "dev", fmt.Sprintf("nvidia%d", info.parent.minor))
+	gpuDeviceNode := filepath.Join(vm.hostDriverRoot, "dev", fmt.Sprintf("nvidia%d", info.Parent.Minor))
 	var err error
 	for {
 		select {
