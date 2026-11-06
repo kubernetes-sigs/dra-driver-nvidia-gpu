@@ -193,10 +193,25 @@ func (m *ComputeDomainDaemonSetManager) Start(ctx context.Context) (rerr error) 
 		UpdateFunc: func(any, any) { m.queue.AddAfter(nvapi.ComputeDomainDaemonSetName, cddsSyncDelay) },
 		DeleteFunc: func(any) { m.queue.AddAfter(nvapi.ComputeDomainDaemonSetName, cddsSyncDelay) },
 	}
-	all := []cache.SharedIndexInformer{m.cddsInformer, m.cliqueInf, m.daemonSetInf, m.podInf, m.rctInf, m.nodeInf}
-	synced := make([]cache.InformerSynced, 0, len(all))
-	for _, informer := range all {
-		if _, err := informer.AddEventHandler(enqueue); err != nil {
+	// Every node reports its status periodically. Only node changes that
+	// can change a sync are queued, as each sync covers all nodes.
+	enqueueNode := enqueue
+	enqueueNode.UpdateFunc = func(oldObj, newObj any) {
+		if nodeChanged(oldObj, newObj) {
+			m.queue.AddAfter(nvapi.ComputeDomainDaemonSetName, cddsSyncDelay)
+		}
+	}
+	handlers := map[cache.SharedIndexInformer]cache.ResourceEventHandler{
+		m.cddsInformer: enqueue,
+		m.cliqueInf:    enqueue,
+		m.daemonSetInf: enqueue,
+		m.podInf:       enqueue,
+		m.rctInf:       enqueue,
+		m.nodeInf:      enqueueNode,
+	}
+	synced := make([]cache.InformerSynced, 0, len(handlers))
+	for informer, handler := range handlers {
+		if _, err := informer.AddEventHandler(handler); err != nil {
 			return fmt.Errorf("error adding event handler: %w", err)
 		}
 		synced = append(synced, informer.HasSynced)
@@ -310,14 +325,17 @@ func (m *ComputeDomainDaemonSetManager) sync(ctx context.Context) (time.Duration
 	if err != nil {
 		return 0, err
 	}
+	// One listing of each serves the whole sync, which runs over every node
+	// and daemon.
 	pods := m.pods(cdds.UID)
-	state, err := m.ensureDaemonSet(ctx, cdds, rct.Name, pods)
+	nodes := m.nodes()
+	state, err := m.ensureDaemonSet(ctx, cdds, rct.Name, pods, nodes)
 	if err != nil {
 		return 0, err
 	}
 	ds := state.ds
 
-	if err := m.realignDaemons(ctx, pods); err != nil {
+	if err := m.realignDaemons(ctx, pods, nodes); err != nil {
 		return 0, err
 	}
 	if err := m.removeStaleDaemons(ctx, cdds, pods); err != nil {
@@ -325,10 +343,10 @@ func (m *ComputeDomainDaemonSetManager) sync(ctx context.Context) (time.Duration
 	}
 
 	hash := ds.Spec.Template.Annotations[staticDaemonTemplateHashKey]
-	cliques, unclustered := groupByClique(m.nodes(), pods, cdds.Spec.NodeSelector)
+	cliques, unclustered := groupByClique(nodes, pods, cdds.Spec.NodeSelector)
 	var plan rolloutPlan
 	if cdds.Spec.UpdateStrategy.Type == nvapi.ComputeDomainDaemonSetUpdateStrategyRollingUpdate {
-		if plan, err = m.rollout(ctx, cdds, cliques, unclustered, hash); err != nil {
+		if plan, err = m.rollout(ctx, cdds, cliques, unclustered, hash, nodes); err != nil {
 			return 0, err
 		}
 	}
@@ -652,7 +670,7 @@ type staticDaemonSetState struct {
 // ensureDaemonSet creates the static IMEX DaemonSet, or updates its pod
 // template when the spec changed or the DaemonSet was edited. A newer driver
 // template alone is not applied, so driver upgrades leave the daemons alone.
-func (m *ComputeDomainDaemonSetManager) ensureDaemonSet(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, rctName string, pods []*corev1.Pod) (*staticDaemonSetState, error) {
+func (m *ComputeDomainDaemonSetManager) ensureDaemonSet(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, rctName string, pods []*corev1.Pod, nodes []*corev1.Node) (*staticDaemonSetState, error) {
 	var existing *appsv1.DaemonSet
 	if obj, exists, err := m.daemonSetInf.GetStore().GetByKey(m.config.driverNamespace + "/" + staticDaemonSetName(cdds.UID)); err == nil && exists {
 		existing, _ = obj.(*appsv1.DaemonSet)
@@ -686,7 +704,7 @@ func (m *ComputeDomainDaemonSetManager) ensureDaemonSet(ctx context.Context, cdd
 
 	// The DaemonSet controller removes daemons from nodes its pod template no
 	// longer selects right away, whatever the update strategy.
-	if blocked := m.nodesLosingDaemons(&desired.Spec.Template.Spec, pods); len(blocked) > 0 {
+	if blocked := m.nodesLosingDaemons(&desired.Spec.Template.Spec, pods, nodes); len(blocked) > 0 {
 		return &staticDaemonSetState{ds: existing, blockedNodes: blocked}, nil
 	}
 
@@ -720,18 +738,18 @@ func (m *ComputeDomainDaemonSetManager) ensureDaemonSet(ctx context.Context, cdd
 
 // nodesLosingDaemons returns the nodes whose daemon a pod spec would remove
 // while claims there are allocated an IMEX channel.
-func (m *ComputeDomainDaemonSetManager) nodesLosingDaemons(spec *corev1.PodSpec, pods []*corev1.Pod) []string {
+func (m *ComputeDomainDaemonSetManager) nodesLosingDaemons(spec *corev1.PodSpec, pods []*corev1.Pod, nodes []*corev1.Node) []string {
 	inUse := m.channelClaimNodes()
 	if len(inUse) == 0 {
 		return nil
 	}
-	nodes := make(map[string]*corev1.Node)
-	for _, node := range m.nodes() {
-		nodes[node.Name] = node
+	byName := make(map[string]*corev1.Node, len(nodes))
+	for _, node := range nodes {
+		byName[node.Name] = node
 	}
 	var blocked []string
 	for _, pod := range pods {
-		node, ok := nodes[pod.Spec.NodeName]
+		node, ok := byName[pod.Spec.NodeName]
 		if ok && inUse[node.Name] && !podPlacedOn(spec, node) {
 			blocked = append(blocked, node.Name)
 		}
@@ -768,19 +786,40 @@ func nodeReadiness(nodes []*corev1.Node) map[string]bool {
 		if node.Spec.Unschedulable {
 			continue
 		}
-		for _, c := range node.Status.Conditions {
-			if c.Type == corev1.NodeReady {
-				ready[node.Name] = c.Status == corev1.ConditionTrue
-			}
+		if status := nodeReadyStatus(node); status != "" {
+			ready[node.Name] = status == corev1.ConditionTrue
 		}
 	}
 	return ready
 }
 
+// nodeReadyStatus returns the status of the Ready condition of a node, or
+// empty without one.
+func nodeReadyStatus(node *corev1.Node) corev1.ConditionStatus {
+	for _, c := range node.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			return c.Status
+		}
+	}
+	return ""
+}
+
+// nodeChanged reports whether a node update changes what a sync reads from
+// the node: its labels, whether it is cordoned, and whether it is Ready.
+func nodeChanged(oldObj, newObj any) bool {
+	oldNode, okOld := oldObj.(*corev1.Node)
+	newNode, okNew := newObj.(*corev1.Node)
+	if !okOld || !okNew {
+		return true
+	}
+	return !maps.Equal(oldNode.Labels, newNode.Labels) ||
+		oldNode.Spec.Unschedulable != newNode.Spec.Unschedulable ||
+		nodeReadyStatus(oldNode) != nodeReadyStatus(newNode)
+}
+
 // rollout restarts the next batch of outdated cliques.
-func (m *ComputeDomainDaemonSetManager) rollout(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, cliques []*staticClique, unclustered []*corev1.Pod, hash string) (rolloutPlan, error) {
+func (m *ComputeDomainDaemonSetManager) rollout(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, cliques []*staticClique, unclustered []*corev1.Pod, hash string, nodes []*corev1.Node) (rolloutPlan, error) {
 	now := m.now()
-	nodes := m.nodes()
 	ru := cdds.Spec.UpdateStrategy.RollingUpdate
 	var topologyOf map[string]string
 	if ru != nil && ru.TopologyKey != "" {
@@ -837,9 +876,9 @@ func (m *ComputeDomainDaemonSetManager) restartingCliques(cliques []*staticCliqu
 // partition, so that their new pod joins the IMEX domain of the new one. The
 // partition change disrupted both IMEX domains already, so this does not wait
 // for the update strategy.
-func (m *ComputeDomainDaemonSetManager) realignDaemons(ctx context.Context, pods []*corev1.Pod) error {
-	partitionOf := make(map[string]string)
-	for _, node := range m.nodes() {
+func (m *ComputeDomainDaemonSetManager) realignDaemons(ctx context.Context, pods []*corev1.Pod, nodes []*corev1.Node) error {
+	partitionOf := make(map[string]string, len(nodes))
+	for _, node := range nodes {
 		partitionOf[node.Name] = nodePartition(node)
 	}
 	for _, pod := range pods {
@@ -859,13 +898,23 @@ func (m *ComputeDomainDaemonSetManager) realignDaemons(ctx context.Context, pods
 	return nil
 }
 
+// podsByNode indexes daemon pods by their node, as every clique entry is
+// matched against them.
+func podsByNode(pods []*corev1.Pod) map[string][]*corev1.Pod {
+	byNode := make(map[string][]*corev1.Pod, len(pods))
+	for _, pod := range pods {
+		byNode[pod.Spec.NodeName] = append(byNode[pod.Spec.NodeName], pod)
+	}
+	return byNode
+}
+
 // daemonInPartition reports whether a pod still serves the daemon of a node in
 // a partition. A daemon that has not joined a partition yet counts, as it
 // may still join that one.
-func daemonInPartition(pods []*corev1.Pod, node, partition string) bool {
-	return slices.ContainsFunc(pods, func(pod *corev1.Pod) bool {
+func daemonInPartition(byNode map[string][]*corev1.Pod, node, partition string) bool {
+	return slices.ContainsFunc(byNode[node], func(pod *corev1.Pod) bool {
 		joined, ok := daemonPartition(pod)
-		return pod.Spec.NodeName == node && (!ok || joined == partition)
+		return !ok || joined == partition
 	})
 }
 
@@ -874,7 +923,8 @@ func daemonInPartition(pods []*corev1.Pod, node, partition string) bool {
 // partition. A miss in the informer is confirmed against the API server
 // first.
 func (m *ComputeDomainDaemonSetManager) removeStaleDaemons(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, pods []*corev1.Pod) error {
-	var live []*corev1.Pod
+	cached := podsByNode(pods)
+	var live map[string][]*corev1.Pod
 	for _, obj := range m.cliqueInf.GetStore().List() {
 		clique, ok := obj.(*nvapi.ComputeDomainClique)
 		if !ok || clique.Labels[computeDomainDaemonSetLabelKey] != string(cdds.UID) {
@@ -883,7 +933,7 @@ func (m *ComputeDomainDaemonSetManager) removeStaleDaemons(ctx context.Context, 
 		partition := clique.Labels[computeDomainCliqueLabelKey]
 		var keep []*nvapi.ComputeDomainDaemonInfo
 		for _, daemon := range clique.Daemons {
-			if daemonInPartition(pods, daemon.NodeName, partition) {
+			if daemonInPartition(cached, daemon.NodeName, partition) {
 				keep = append(keep, daemon)
 				continue
 			}
@@ -894,10 +944,11 @@ func (m *ComputeDomainDaemonSetManager) removeStaleDaemons(ctx context.Context, 
 				if err != nil {
 					return fmt.Errorf("error listing static IMEX daemon pods: %w", err)
 				}
-				live = make([]*corev1.Pod, 0, len(list.Items))
+				listed := make([]*corev1.Pod, 0, len(list.Items))
 				for i := range list.Items {
-					live = append(live, &list.Items[i])
+					listed = append(listed, &list.Items[i])
 				}
+				live = podsByNode(listed)
 			}
 			if daemonInPartition(live, daemon.NodeName, partition) {
 				keep = append(keep, daemon)

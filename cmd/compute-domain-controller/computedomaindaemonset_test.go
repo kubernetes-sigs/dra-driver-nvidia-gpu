@@ -478,18 +478,32 @@ func TestComputeDomainDaemonSetRemovesStaleDaemons(t *testing.T) {
 	assert.Equal(t, "c0-n0", got.Daemons[0].NodeName)
 }
 
-// BenchmarkComputeDomainDaemonSetSync syncs 1,800 daemons in 100 cliques of
-// NVL72 racks, mid rolling update.
+// BenchmarkComputeDomainDaemonSetSync syncs 5,040 daemons registered in 280
+// cliques of NVL72 racks, mid rolling update.
 func BenchmarkComputeDomainDaemonSetSync(b *testing.B) {
-	nodes, pods := testCliques(100, 18, "previous")
+	nodes, pods := testCliques(280, 18, "previous")
 	cdds := testComputeDomainDaemonSet()
 	cdds.Spec.UpdateStrategy = nvapi.ComputeDomainDaemonSetUpdateStrategy{
 		Type:          nvapi.ComputeDomainDaemonSetUpdateStrategyRollingUpdate,
 		RollingUpdate: &nvapi.ComputeDomainDaemonSetRollingUpdate{Paused: true},
 	}
 	objects := []runtime.Object{cdds}
+	cliques := make(map[string]*nvapi.ComputeDomainClique)
 	for i := range nodes {
+		partition := nodePartition(nodes[i])
+		pods[i].Labels[computeDomainCliqueLabelKey] = partition
 		objects = append(objects, nodes[i], pods[i])
+		clique := cliques[partition]
+		if clique == nil {
+			clique = &nvapi.ComputeDomainClique{ObjectMeta: metav1.ObjectMeta{
+				Name:      "cdds-uid." + partition,
+				Namespace: "driver",
+				Labels:    map[string]string{computeDomainDaemonSetLabelKey: "cdds-uid", computeDomainCliqueLabelKey: partition},
+			}}
+			cliques[partition] = clique
+			objects = append(objects, clique)
+		}
+		clique.Daemons = append(clique.Daemons, &nvapi.ComputeDomainDaemonInfo{NodeName: nodes[i].Name, CliqueID: partition, Index: len(clique.Daemons)})
 	}
 	f := newCDDSFixture(b, objects...)
 	ctx := context.Background()
@@ -502,6 +516,44 @@ func BenchmarkComputeDomainDaemonSetSync(b *testing.B) {
 		if _, err := f.m.sync(ctx); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func TestNodeChanged(t *testing.T) {
+	tests := map[string]struct {
+		mutate func(*corev1.Node)
+		want   bool
+	}{
+		"heartbeat": {
+			mutate: func(n *corev1.Node) {
+				n.Status.Conditions[0].LastHeartbeatTime = metav1.NewTime(rolloutNow)
+				n.ResourceVersion = "2"
+			},
+		},
+		"clique label": {
+			mutate: func(n *corev1.Node) { n.Labels[gpuCliqueNodeLabelKey] = "c1" },
+			want:   true,
+		},
+		"other label": {
+			mutate: func(n *corev1.Node) { n.Labels["pool"] = "a" },
+			want:   true,
+		},
+		"cordoned": {
+			mutate: func(n *corev1.Node) { n.Spec.Unschedulable = true },
+			want:   true,
+		},
+		"not ready": {
+			mutate: func(n *corev1.Node) { n.Status.Conditions[0].Status = corev1.ConditionFalse },
+			want:   true,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			old := cliqueNode("n0", "c0", true)
+			updated := old.DeepCopy()
+			tc.mutate(updated)
+			assert.Equal(t, tc.want, nodeChanged(old, updated))
+		})
 	}
 }
 
