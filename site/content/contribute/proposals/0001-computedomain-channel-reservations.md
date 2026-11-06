@@ -16,9 +16,10 @@ description: Assign an IMEX channel per NVLink clique to each ComputeDomain Reso
 
 A ComputeDomain lists its workload ResourceClaimTemplates in `spec.channels`.
 Kubelet plugins publish one `channel` device that all channel claims of
-a node share. Before a pod is bound, the ComputeDomain controller admits its
-claim through a DRA binding condition and assigns it a channel, which it
-writes into the claim's device status. A channel only needs to be unique in
+a node share. The ComputeDomain controller admits each claim and assigns it
+a channel, which it writes into the claim's device status. With
+per-ComputeDomain IMEX daemons it decides before the pod is bound, through a
+DRA binding condition. A channel only needs to be unique in
 its IMEX domain, the NVLink clique, so each clique has its own 2047 channels.
 The kubelet plugin injects the channel of the claim's status. So:
 
@@ -164,11 +165,14 @@ device with `allowMultipleAllocations` and no capacity, so any number of
 claims share it. It carries no channel ID, as the device only brings claims
 to the kubelet plugin. Of the per-channel devices, only `channel-0` stays
 published, unchanged, for the templates of ComputeDomains created before the
-gate. The
-device has the `ChannelAdmitted` binding condition and the `ChannelRejected`
-binding failure condition, and:
+gate. The device has:
 
 - `type: imex-channel`, so that DeviceClasses tell it from `channel-0`.
+- The `ChannelAdmitted` binding condition and the `ChannelRejected` binding
+  failure condition (per-ComputeDomain IMEX daemons). ComputeDomains share
+  the nodes of a shared IMEX domain, so rescheduling cannot help a rejected
+  claim there, and binding conditions would only hold up pods: the scheduler
+  checks them every 5 seconds.
 - `cliqueID`: the NVLink clique of the node, republished when the periodic
   clique refresh finds a new partition.
 - A `compute-domain.nvidia.com/computeDomain=<uid>:NoSchedule` taint
@@ -191,7 +195,8 @@ is written into the claim's device status in the same update as the
 `ChannelAdmitted` condition, so it costs no extra API call. After a restart
 the controller restores the assignments from the admitted claims before it
 admits new ones. A clique without a free channel rejects the claim with
-`NoFreeChannel`, and the scheduler tries another placement. Channel 0 is
+`NoFreeChannel`, and the scheduler tries another placement, or, in a
+shared IMEX domain, the claim fails to prepare. Channel 0 is
 never assigned, as ComputeDomains created before the gate use it. Their
 templates are kept, and request the `channel-0` device without admission.
 Claims of `channel` without a template name, which the controller never
@@ -200,7 +205,11 @@ when their request or config differ from the current one.
 
 **Prepare.** The plugin takes the channel from the claim's device status for
 the `channel` device, or from the device name for per-channel devices
-allocated before the upgrade. It rejects permanently a missing channel, a
+allocated before the upgrade. A claim without binding conditions in a
+shared IMEX domain may be prepared before the controller has assigned its
+channel: the plugin then reads the latest claim and retries until the
+channel is assigned. It rejects permanently a rejected claim, a missing
+channel, a
 channel the node does not have, and a channel prepared for another
 ComputeDomain on the node, except for the shared legacy channel 0 under
 host-managed IMEX. A channel assigned for another clique, after a
@@ -211,8 +220,12 @@ and readiness wait, or host IMEX readiness check). Later claims, from any of
 its templates, only get their channel injected. The checkpoint records each
 claim's channel in the existing channel info, so its schema is unchanged.
 
-**Admission.** The scheduler holds each pod until the controller decides on
-its allocated channel, and retries elsewhere on rejection. In every IMEX
+**Admission.** With per-ComputeDomain IMEX daemons, the scheduler holds each
+pod until the controller decides on its allocated channel, and retries
+elsewhere on rejection. In a shared IMEX domain, pods bind at once, and the
+controller decides while the kubelet plugin waits. A channel without a
+binding condition counts as used there only once assigned, so that the
+claims cache still shows every channel in use after a restart. In every IMEX
 daemon lifecycle, the controller rejects claims that cannot be attributed to an existing
 ComputeDomain in their namespace, or whose ComputeDomain is being deleted,
 and assigns the channel of admitted ones. Configs are decoded strictly like
@@ -324,8 +337,10 @@ unschedulable, so drain and recreate the ComputeDomains created with it.
 Kubernetes 1.34 or later with `DRAConsumableCapacity` (default from 1.36) on
 the API server, controller manager, scheduler and kubelet, and DRA binding
 conditions (`DRADeviceBindingConditions`, `DRAResourceClaimDeviceStatus`) on
-the API server and scheduler. With `imex.daemonLifecycle=perComputeDomain`, also
-`DRADeviceTaints` (default from 1.36) on the API server and scheduler. Nodes
+the API server and scheduler with `imex.daemonLifecycle=perComputeDomain`, or
+`DRAResourceClaimDeviceStatus` on the API server otherwise. With
+`imex.daemonLifecycle=perComputeDomain`, also `DRADeviceTaints` (default from
+1.36) on the API server and scheduler. Nodes
 must have at least as many IMEX channels
 as `imex.maxChannels`.
 
@@ -357,9 +372,11 @@ and plugin restarts, and an upgrade with the gate off.
 
 ## Risks
 
-- Every channel claim waits for the controller before its pod is bound. If
-  the controller is unavailable, pods wait out the scheduler's binding
-  timeout and are retried. Running workloads are unaffected.
+- Every channel claim waits for the controller, before its pod is bound with
+  per-ComputeDomain IMEX daemons, or in Prepare otherwise. If the controller
+  is unavailable, pods wait out the scheduler's binding timeout and are
+  retried, or stay in `ContainerCreating` while the kubelet retries Prepare.
+  Running workloads are unaffected.
 - A node repartitioned after its claims were admitted keeps their channels,
   which may not be unique in its new clique. Its IMEX daemon restarts
   anyway, and new claims get channels of the new clique.
@@ -389,8 +406,9 @@ and plugin restarts, and an upgrade with the gate off.
 
 Pods of other ComputeDomains may be tried on a node with per-ComputeDomain
 IMEX daemons while its new owner propagates to the ResourceSlice, about a second
-after the first admission. With shared IMEX daemons, pod binding now waits for the
-controller as well.
+after the first admission. With shared IMEX daemons, Prepare now waits for
+the controller as well, and a rejected claim leaves its pod in
+`ContainerCreating` rather than rescheduling it.
 
 ## Future work
 

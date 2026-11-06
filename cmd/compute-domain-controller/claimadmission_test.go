@@ -545,9 +545,21 @@ func TestPendingChannelResults(t *testing.T) {
 	assert.Empty(t, pendingChannelResults(claim), "decided channels are not admitted again")
 	assert.True(t, channelInUse(claim, &result))
 
-	withoutConditions := allocatedChannelClaim(t, "b", "ns", "cd-a", "node-1", "job")
-	withoutConditions.Status.Allocation.Devices.Results[0].BindingConditions = nil
-	assert.Empty(t, pendingChannelResults(withoutConditions), "only channels published with the binding condition are admitted")
+	shared := allocatedChannelClaim(t, "b", "ns", "cd-a", "node-1", "job")
+	shared.Status.Allocation.Devices.Results[0].BindingConditions = nil
+	shared.Status.Allocation.Devices.Results[0].BindingFailureConditions = nil
+	assert.Len(t, pendingChannelResults(shared), 1, "a shared IMEX domain publishes no binding conditions, but its claims need a channel")
+	sharedResult := shared.Status.Allocation.Devices.Results[0]
+	assert.False(t, channelInUse(shared, &sharedResult), "the kubelet plugin waits for the channel")
+	setChannelAdmissionCondition(shared, &sharedResult, admitDecision())
+	assert.Empty(t, pendingChannelResults(shared))
+	assert.True(t, channelInUse(shared, &sharedResult))
+
+	legacy := legacyChannelClaim(t, "d", "ns", "cd-a", "node-1", "channel-0")
+	legacy.Status.Allocation.Devices.Results[0].BindingConditions = nil
+	legacyResult := legacy.Status.Allocation.Devices.Results[0]
+	assert.Empty(t, pendingChannelResults(legacy), "channel 0 carries its channel in its name")
+	assert.True(t, channelInUse(legacy, &legacyResult))
 
 	daemon := legacyChannelClaim(t, "c", "ns", "cd-a", "node-1", "daemon-0")
 	assert.Empty(t, channelResults(daemon), "daemon devices are no channels")

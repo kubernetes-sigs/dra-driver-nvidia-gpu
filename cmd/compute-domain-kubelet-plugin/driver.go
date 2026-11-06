@@ -78,10 +78,16 @@ func computeDomainPublishedDevices(allocatable AllocatableDevices, config *Confi
 // plugin, and the controller bounds the channels.
 func shareChannelDevice(dev *resourceapi.Device, config *Config, state channelDeviceState) {
 	dev.AllowMultipleAllocations = ptr.To(true)
-	// The controller assigns the channel of each claim before its pod
-	// binds, unique in the clique of the node.
-	dev.BindingConditions = []string{imex.ChannelAdmittedCondition}
-	dev.BindingFailureConditions = []string{imex.ChannelRejectedCondition}
+	// The controller assigns the channel of each claim, unique in the
+	// clique of the node. With per-ComputeDomain IMEX daemons it may also
+	// reject a claim of another ComputeDomain on the node, and the pod
+	// waits for the decision before it binds, so that the scheduler can
+	// try another node. ComputeDomains share the IMEX daemons of a shared
+	// domain, so its pods bind at once and Prepare waits for the channel.
+	if !config.imexConfig.SharedIMEXDaemons() {
+		dev.BindingConditions = []string{imex.ChannelAdmittedCondition}
+		dev.BindingFailureConditions = []string{imex.ChannelRejectedCondition}
+	}
 	if state.cliqueID != "" {
 		dev.Attributes[imex.ChannelCliqueAttribute] = resourceapi.DeviceAttribute{StringValue: ptr.To(state.cliqueID)}
 	}

@@ -62,13 +62,14 @@ const (
 	legacyChannelDevicePrefix = "channel-"
 )
 
-// ClaimAdmissionManager admits or rejects allocated channels through their
-// binding conditions, before the scheduler binds the pod. Deciding in one
-// place avoids races between the first claims of different ComputeDomains.
+// ClaimAdmissionManager admits or rejects allocated channels, and assigns the
+// channel of the shared channel device. Deciding in one place avoids races
+// between the first claims of different ComputeDomains.
 //
-// Only per-ComputeDomain IMEX daemons need it: a node runs the IMEX daemon of
-// one ComputeDomain, so claims are only admitted on nodes no other
-// ComputeDomain uses. A ComputeDomain uses a node while it has admitted
+// Only per-ComputeDomain IMEX daemons need the binding conditions, so that a
+// rejected claim is allocated on another node before its pod binds: a node
+// runs the IMEX daemon of one ComputeDomain, so claims are only admitted on
+// nodes no other ComputeDomain uses. A ComputeDomain uses a node while it has admitted
 // channels there, or while its IMEX daemon runs there, which the kubelet
 // plugin's node label shows until the last of its claims is unprepared.
 //
@@ -76,6 +77,12 @@ const (
 // and admissions the cache does not show yet are tracked here, so two
 // ComputeDomains never both get a free node. After a restart the cache holds
 // every admission, as each was written before the pod could bind.
+//
+// A host-managed IMEX domain publishes no binding conditions, as
+// ComputeDomains share nodes there. Its pods bind at once, while the
+// controller assigns their channels, and the kubelet plugin waits for the
+// channel before it prepares a claim. A channel is only used once assigned,
+// so that the cache still holds every channel in use after a restart.
 //
 // It runs regardless of the ComputeDomainChannelReservations gate: with the
 // gate off it admits all channels, so that kubelet plugins enabling the gate
@@ -468,11 +475,18 @@ func channelResults(claim *resourceapi.ResourceClaim) []resourceapi.DeviceReques
 	return results
 }
 
+// needsAdmission reports whether an allocated channel waits for a decision:
+// its pod through the binding condition, or, without one, the kubelet plugin
+// for the channel the controller assigns to the shared channel device.
+func needsAdmission(result *resourceapi.DeviceRequestAllocationResult) bool {
+	return slices.Contains(result.BindingConditions, imex.ChannelAdmittedCondition) || result.Device == imex.ChannelDeviceName
+}
+
 // pendingChannelResults returns allocated channels awaiting a decision.
 func pendingChannelResults(claim *resourceapi.ResourceClaim) []resourceapi.DeviceRequestAllocationResult {
 	var pending []resourceapi.DeviceRequestAllocationResult
 	for _, result := range channelResults(claim) {
-		if !slices.Contains(result.BindingConditions, imex.ChannelAdmittedCondition) {
+		if !needsAdmission(&result) {
 			continue
 		}
 		status := deviceStatus(claim, &result)
@@ -486,9 +500,9 @@ func pendingChannelResults(claim *resourceapi.ResourceClaim) []resourceapi.Devic
 }
 
 // channelInUse reports whether an allocated channel counts as in use: it was
-// admitted, or allocated without waiting for admission.
+// admitted, or allocated without needing admission.
 func channelInUse(claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult) bool {
-	if !slices.Contains(result.BindingConditions, imex.ChannelAdmittedCondition) {
+	if !needsAdmission(result) {
 		return true
 	}
 	status := deviceStatus(claim, result)
