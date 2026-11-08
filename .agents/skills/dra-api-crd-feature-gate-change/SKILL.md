@@ -114,10 +114,12 @@ Never “repair” a compatibility failure by ignoring checksum or corruption er
 Use targeted tests while iterating, then verify in proportion to the contract:
 
 - API/defaulting/validation: package tests plus affected plugin and webhook tests.
-- Generated API/CRD: `make generate`, inspect all generated diffs, then `make check-generate`.
+- Generated API/CRD: during active edits, run `make generate` and inspect all generated diffs. Run `make check-generate` only from a clean committed snapshot or disposable clean checkout containing the intended source and generated changes.
 - Feature gates: run `go test` on the `pkg/featuregates` and `pkg/flags` packages, plus every consuming component's tests.
 - Helm: `make helm-lint` and targeted render/failure cases.
-- General Go change: `make test`; use `make check` for the full lint and generation gate when practical.
+- General Go change: `make test`; run `make check` for the full lint and generation gate under the same clean-tree conditions as `make check-generate`.
 - ResourceSlice, checkpoint, or hardware lifecycle: the matching Go e2e, mock-NVML, BATS, or real-GPU/ComputeDomain scenario. Read `tests/bats/README.md` before running the invasive live-cluster suite.
+
+Both `make check-generate` and `make check` regenerate files and compare the whole tree against `HEAD` with `git diff --exit-code HEAD`. Expected uncommitted source, generated, or unrelated changes therefore cause a diff failure even when generation is correct. Preserve unrelated work and do not report that expected dirty-tree diff as a code-generation failure.
 
 Review the final diff for handwritten source, generated outputs, deployment wiring, docs, examples, and tests. Report the compatibility matrix, generated artifacts, validation commands, and any upgrade or rollback case that was not exercised.
