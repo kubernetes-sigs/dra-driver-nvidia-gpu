@@ -54,6 +54,7 @@ type CDIHandler struct {
 	nvdevice          nvdevice.Interface
 	nvcdiClaim        nvcdi.Interface
 	vfiocdi           *vfioCDIHandler
+	vgpucdi           *vgpuCDIHandler
 	driverRoot        string
 	devRoot           string
 	targetDriverRoot  string
@@ -224,6 +225,17 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 				dspec = dspecsvfio[0]
 			}
 
+			if dev.Type() == VgpuDeviceType {
+				if cdi.vgpucdi == nil {
+					return fmt.Errorf("vgpu CDI handler not available for device %s", dname)
+				}
+				dspecsvgpu, err := cdi.vgpucdi.GetDeviceSpecs(dev.Vgpu.Concrete)
+				if err != nil {
+					return fmt.Errorf("failed to get CDI container edits for vgpu device: %w", err)
+				}
+				dspec = dspecsvgpu[0]
+			}
+
 			if dev.Type() == PreparedMigDeviceType {
 				// Here, get the 'parent dev node' part of the spec. THe spec
 				// fragment for other dev nodes specific to this MIG device is
@@ -268,9 +280,18 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 					}
 				}
 
-				// Only non-vfio devices require the group config state to be applied to
-				// the device cdi spec.
-				if !isVfioDeviceConfigType {
+				// vGPU partitions have no opaque config; their group carries the
+				// base container edits for VM consumers. Same rule as VFIO:
+				// replace the nvidia userspace-library common edits.
+				isVgpuDevice := dev.Type() == VgpuDeviceType
+				if isVgpuDevice {
+					commonEdits = group.ConfigState.containerEdits
+				}
+
+				// Only non-vfio and non-vgpu devices require the group config
+				// state to be applied to the device cdi spec (for vfio/vgpu the
+				// group's edits replaced the common edits instead, above).
+				if !isVfioDeviceConfigType && !isVgpuDevice {
 					deviceEdits := &cdiapi.ContainerEdits{
 						ContainerEdits: &dspec.ContainerEdits,
 					}

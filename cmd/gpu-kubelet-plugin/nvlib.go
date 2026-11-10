@@ -63,6 +63,10 @@ type deviceLib struct {
 	// vgpuPolicy selects which vGPU profiles this driver advertises, per
 	// GPU model. An empty policy advertises no vGPU partitions at all.
 	vgpuPolicy *vgpuprofiles.Policy
+
+	// vgpuMdev is the mediated-device backend used by the vGPU lifecycle
+	// (go-nvlib/pkg/nvmdev in production; faked in unit tests).
+	vgpuMdev vgpuMdevStore
 }
 
 func newDeviceLib(driver *root.Driver, hostRoot string, policy *vgpuprofiles.Policy) (*deviceLib, error) {
@@ -115,6 +119,7 @@ func newDeviceLib(driver *root.Driver, hostRoot string, policy *vgpuprofiles.Pol
 		gpuUUIDbyPCIBusID: make(map[PCIBusID]string),
 		devhandleByUUID:   make(map[string]nvml.Device),
 		vgpuPolicy:        policy,
+		vgpuMdev:          newNvmdevMdevStore(nvpci),
 	}
 
 	// Current design: when DynamicMIG is enabled, use one long-lived NVML
