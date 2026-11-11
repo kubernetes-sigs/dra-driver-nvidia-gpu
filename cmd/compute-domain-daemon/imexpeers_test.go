@@ -17,10 +17,16 @@ limitations under the License.
 package main
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const imexCtlLegend = `Connectivity Table Legend:
@@ -195,18 +201,12 @@ Domain State: UP
 		t.Run(tc.name, func(t *testing.T) {
 			err := evaluateIMEXPeers(tc.output)
 			if len(tc.wantErr) == 0 {
-				if err != nil {
-					t.Fatalf("expected no error, got: %v", err)
-				}
+				require.NoError(t, err)
 				return
 			}
-			if err == nil {
-				t.Fatalf("expected an error containing %q, got nil", tc.wantErr)
-			}
+			require.Error(t, err)
 			for _, want := range tc.wantErr {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("error %q does not contain %q", err.Error(), want)
-				}
+				assert.ErrorContains(t, err, want)
 			}
 		})
 	}
@@ -214,24 +214,12 @@ Domain State: UP
 
 func TestParseIMEXDomainStatus(t *testing.T) {
 	status, err := parseIMEXDomainStatus(imexCtlVersionSplit)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if status.local != 0 {
-		t.Errorf("local = %d, want 0", status.local)
-	}
-	if len(status.nodes) != 4 {
-		t.Errorf("parsed %d nodes, want 4", len(status.nodes))
-	}
-	if got := status.nodes[2].version; got != "580.173.02" {
-		t.Errorf("node 2 version = %q, want 580.173.02", got)
-	}
-	if got := status.links[2][0]; got != "!V!" {
-		t.Errorf("link 2->0 = %q, want !V!", got)
-	}
-	if got := status.links[3][3]; got != "C" {
-		t.Errorf("link 3->3 = %q, want C", got)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 0, status.local)
+	assert.Len(t, status.nodes, 4)
+	assert.Equal(t, "580.173.02", status.nodes[2].version)
+	assert.Equal(t, "!V!", status.links[2][0])
+	assert.Equal(t, "C", status.links[3][3])
 }
 
 // installFakeIMEXCtl puts an nvidia-imex-ctl on PATH that answers `-q` with
@@ -239,9 +227,7 @@ func TestParseIMEXDomainStatus(t *testing.T) {
 func installFakeIMEXCtl(t *testing.T, domainOutput string) {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "domain.txt"), []byte(domainOutput), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "domain.txt"), []byte(domainOutput), 0o644))
 	script := `#!/bin/sh
 for arg in "$@"; do
 	case "$arg" in
@@ -252,9 +238,7 @@ for arg in "$@"; do
 done
 exit 2
 `
-	if err := os.WriteFile(filepath.Join(dir, imexCtlBinaryName), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, imexCtlBinaryName), []byte(script), 0o755))
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
@@ -293,27 +277,48 @@ func TestCheckIMEXPeers(t *testing.T) {
 
 			err := check(t.Context(), func() {}, flags)
 			if tc.wantErr == "" {
-				if err != nil {
-					t.Fatalf("expected no error, got: %v", err)
-				}
+				require.NoError(t, err)
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("expected an error containing %q, got: %v", tc.wantErr, err)
-			}
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestIMEXPeerQueryTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		elapsed time.Duration
+		want    time.Duration
+	}{
+		{name: "fast local check gets the full peer query timeout", elapsed: 100 * time.Millisecond, want: imexDomainQueryTimeout},
+		{name: "slow local check shortens the peer query", elapsed: 6 * time.Second, want: imexCheckBudget - 6*time.Second},
+		{name: "no budget left skips the peer query", elapsed: imexCheckBudget, want: 0},
+		{name: "local check over budget skips the peer query", elapsed: 9 * time.Second, want: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, imexPeerQueryTimeout(tc.elapsed))
 		})
 	}
 }
 
 // The readiness probe passes --imex-peers to the check subcommand; make sure
-// the flag is wired up. newApp() can only be run once per process because it
-// applies the global logging configuration.
+// the flag is wired up. newApp() applies the global logging configuration,
+// which can only happen once per process, so the CLI runs in a child process
+// (this keeps the test working with -count > 1).
 func TestCheckCommandIMEXPeersFlag(t *testing.T) {
-	installFakeIMEXCtl(t, imexCtlVersionSplit)
-	t.Setenv("CLIQUE_ID", "test-clique")
-
-	err := newApp().Run([]string{"compute-domain-daemon", "check", "--imex-peers"})
-	if err == nil || !strings.Contains(err.Error(), "disabled communication with 2 peer(s)") {
-		t.Fatalf("expected the peer check to fail, got: %v", err)
+	if os.Getenv("IMEX_PEERS_FLAG_TEST_CHILD") == "1" {
+		err := newApp().Run([]string{"compute-domain-daemon", "check", "--imex-peers"})
+		fmt.Fprintf(os.Stderr, "check result: %v\n", err)
+		os.Exit(0)
 	}
+
+	installFakeIMEXCtl(t, imexCtlVersionSplit)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCheckCommandIMEXPeersFlag$")
+	cmd.Env = append(os.Environ(), "IMEX_PEERS_FLAG_TEST_CHILD=1", "CLIQUE_ID=test-clique")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Contains(t, string(out), "disabled communication with 2 peer(s)")
 }

@@ -36,6 +36,22 @@ import (
 // slow domain query is treated as inconclusive rather than as a probe failure.
 const imexDomainQueryTimeout = 5 * time.Second
 
+// imexCheckBudget is how long the whole readiness check (local query plus
+// peer query) may take. It stays below the readiness probe's timeoutSeconds
+// (10s) so that a slow peer query is skipped or cut short instead of the
+// kubelet failing the probe.
+const imexCheckBudget = 8 * time.Second
+
+// imexPeerQueryTimeout returns how long the peer query may run after the local
+// check took elapsed, or 0 if there is no time left for it.
+func imexPeerQueryTimeout(elapsed time.Duration) time.Duration {
+	remaining := imexCheckBudget - elapsed
+	if remaining <= 0 {
+		return 0
+	}
+	return min(remaining, imexDomainQueryTimeout)
+}
+
 // imexDisabledLinkStates maps the connectivity table states in which IMEX has
 // stopped talking to a peer to a human readable reason. These do not recover
 // on their own: the daemons keep rejecting each other until the mismatch is
@@ -200,8 +216,14 @@ func (s *imexDomainStatus) disabledPeers() ([]imexDisabledPeer, error) {
 // or its output cannot be interpreted, this is logged and the check passes, so
 // that readiness never gets stricter than the local daemon check because of
 // an nvidia-imex-ctl version that prints something unexpected.
-func checkIMEXPeers(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, imexDomainQueryTimeout)
+//
+// timeout bounds the domain query; a non-positive timeout skips it.
+func checkIMEXPeers(ctx context.Context, timeout time.Duration) error {
+	if timeout <= 0 {
+		klog.V(1).Infof("skip IMEX peer check: no time left in the readiness check budget")
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, imexCtlBinaryName, "-c", imexDaemonConfigPath, "-N")

@@ -30,6 +30,7 @@ import (
 	"sync"
 	"syscall"
 	"text/template"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -465,6 +466,7 @@ func check(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	// return". This probes if the local IMEX daemon is ready (not the entire
 	// domain). Reference:
 	// https://docs.nvidia.com/multi-node-nvlink-systems/imex-guide/cmdservice.html
+	start := time.Now()
 	cmd := exec.CommandContext(ctx, imexCtlBinaryName, "-c", imexDaemonConfigPath, "-q")
 
 	// Spawn child, collect standard streams.
@@ -483,7 +485,7 @@ func check(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	// all keep reporting READY. This is only done for readiness (not startup
 	// or liveness): restarting the daemon does not resolve such a mismatch.
 	if flags.checkIMEXPeers {
-		return checkIMEXPeers(ctx)
+		return checkIMEXPeers(ctx, imexPeerQueryTimeout(time.Since(start)))
 	}
 
 	return nil
