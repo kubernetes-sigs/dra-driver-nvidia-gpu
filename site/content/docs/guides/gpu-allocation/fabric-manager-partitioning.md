@@ -65,8 +65,8 @@ combined GPUs form one partition.
 Before enabling the feature:
 
 - Meet the general driver [prerequisites](../../prerequisites.md).
-- Use a supported HGX or single-node NVL system with an NVSwitch-managed
-  fabric and a supported partition topology.
+- Use a supported HGX or single-node NVL system with an NVSwitch-managed fabric
+  and a supported partition topology.
 - Run NVIDIA Fabric Manager on each participating node with `FABRIC_MODE=1`, and
   `FM_CMD_UNIX_SOCKET_PATH=/run/nvidia-fabricmanager/socket`.
 - Ensure the target GPUs are visible to NVML when the GPU kubelet plugin
@@ -78,6 +78,18 @@ The driver cannot verify that the platform is in the supported-product list or
 identify how Fabric Manager was started.
 Verify the platform support and the environment variables configuration before enabling
 the feature.
+
+The NVIDIA vGPU host stack and Fabric Manager partitioning cannot be used
+together. When the GPU kubelet plugin detects the `nvidia_vgpu_vfio` kernel
+module during startup, it treats `FabricManagerPartitioning` as disabled on
+that node even if the feature gate is enabled. It does not publish partition
+attributes or connect to Fabric Manager.
+
+Drain the node and unprepare all Fabric Manager claims before loading the vGPU
+module. If the module is loaded while the plugin is running, the plugin rejects
+new partition activation and suppresses partition deactivation. Restart the
+GPU kubelet plugin after changing the host driver mode so that it republishes
+the correct ResourceSlices.
 
 Migrate claims before enabling this feature.
 On a participating Fabric Manager node, the gate affects every full-GPU claim
@@ -154,16 +166,15 @@ attributes:
     string: gpu
 ```
 
-`gpuModuleID` is the module identifier reported by NVML. It can differ from
-Fabric Manager's physical GPU ID, for example on HGX A100 systems. The driver
-matches GPUs to FM partition members by UUID or PCI address; it does not assume
-that these two numeric identifiers are equal. When FM omits UUID and PCI
-identity across the entire topology, the driver uses the documented H100-and-later
-mapping where FM physical IDs equal NVML module IDs. An all-zero PCI address
-with an empty UUID is treated as unavailable. Numeric matching never overrides
-conflicting identity information. The driver builds UUID and PCI lookup indexes
-at startup and rejects malformed or inconsistent FM identities before serving
-claims.
+`gpuModuleID` is the module identifier reported by NVML. The driver matches
+GPUs to FM partition members by UUID or PCI address; it does not assume that
+the NVML module ID and Fabric Manager physical GPU ID are equal. When FM omits
+UUID and PCI identity across the entire topology, the driver uses the
+documented H100-and-later mapping where FM physical IDs equal NVML module IDs.
+An all-zero PCI address with an empty UUID is treated as unavailable. Numeric
+matching never overrides conflicting identity information. The driver builds
+UUID and PCI lookup indexes at startup and rejects malformed or inconsistent
+FM identities before serving claims.
 See the [FM API data structures](https://docs.nvidia.com/datacenter/tesla/fabric-manager-user-guide/index.html#data-structures).
 `partitionN` is the ID of the reported N-GPU partition containing that device.
 The driver publishes a `partitionN` attribute only when Fabric Manager reports

@@ -440,9 +440,15 @@ func (c *testFMClient) IsFabricPartitionActive(id int) (bool, error) {
 }
 
 func TestDeactivateFabricPartitionRefCounting(t *testing.T) {
+	setFabricManagerPartitioningForTest(t, true)
+	oldConsumableShares := featuregates.Enabled(featuregates.ConsumableShares)
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+			string(featuregates.ConsumableShares): oldConsumableShares,
+		}))
+	})
 	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
-		string(featuregates.FabricManagerPartitioning): true,
-		string(featuregates.ConsumableShares):          true,
+		string(featuregates.ConsumableShares): true,
 	}))
 
 	checkpoint := &Checkpoint{
