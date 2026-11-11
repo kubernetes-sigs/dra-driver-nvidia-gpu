@@ -68,6 +68,7 @@ type Flags struct {
 	httpEndpoint           string
 	metricsPath            string
 	klogVerbosity          int
+	checkIMEXPeers         bool
 }
 
 type IMEXConfigTemplateData struct {
@@ -208,6 +209,13 @@ func newApp() *cli.App {
 			{
 				Name:  "check",
 				Usage: "Check if the node is IMEX capable and if the IMEX daemon is ready",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name:        "imex-peers",
+						Usage:       "Also fail if the IMEX daemon has disabled communication with any peer in its domain (e.g. due to a driver version mismatch).",
+						Destination: &flags.checkIMEXPeers,
+					},
+				},
 				Action: func(c *cli.Context) error {
 					return wrapper(c.Context, check)
 				},
@@ -468,6 +476,14 @@ func check(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 
 	if string(outerr) != "READY\n" {
 		return fmt.Errorf("IMEX daemon not ready: %s", string(outerr))
+	}
+
+	// The local daemon being READY does not mean that it can talk to its
+	// peers: on e.g. a driver version mismatch, daemons block each other but
+	// all keep reporting READY. This is only done for readiness (not startup
+	// or liveness): restarting the daemon does not resolve such a mismatch.
+	if flags.checkIMEXPeers {
+		return checkIMEXPeers(ctx)
 	}
 
 	return nil
