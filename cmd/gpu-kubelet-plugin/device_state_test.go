@@ -18,18 +18,23 @@ package main
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/fabricmanager"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 )
 
 func TestValidateNoOverlappingPreparedDevices(t *testing.T) {
@@ -951,4 +956,91 @@ func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
 		require.NoError(t, err)
 		require.Zero(t, nvmllib.deviceGetHandleByUUIDCalls, "a device held by a completed claim must not reach MIG teardown")
 	})
+}
+
+func TestUnprepareStopsCheckpointedMpsDaemonWithGateDisabled(t *testing.T) {
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+		string(featuregates.MPSSupport):          false,
+		string(featuregates.TimeSlicingSettings): false,
+		string(featuregates.PassthroughSupport):  false,
+		string(featuregates.DynamicMIG):          false,
+	}))
+
+	const claimUID = "claim-uid"
+	group := &PreparedDeviceGroup{
+		Devices: PreparedDeviceList{
+			{Gpu: &PreparedGpu{
+				Info:   &GpuInfo{UUID: "GPU-0000"},
+				Device: &CheckpointedDevice{DeviceName: "gpu-0"},
+			}},
+		},
+	}
+
+	clientset := k8sfake.NewSimpleClientset()
+	smi := newFakeSMI(t, 0)
+	cfg := &Config{
+		flags: &Flags{
+			nodeName:                    "node-a",
+			namespace:                   "dra-driver",
+			kubeletPluginsDirectoryPath: t.TempDir(),
+		},
+		clientsets: pkgflags.ClientSets{Core: clientset},
+	}
+	nvdevlib := &deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath}
+	state := &DeviceState{
+		config:     cfg,
+		nvdevlib:   nvdevlib,
+		mpsManager: NewMpsManager(cfg, nvdevlib, "/", MpsControlDaemonTemplatePath),
+	}
+
+	// What an MPS prepare left behind before MPSSupport was turned off: the
+	// checkpointed daemon ID, its control files directory and its deployment.
+	daemon := state.mpsManager.NewMpsControlDaemon(claimUID, group)
+	group.ConfigState.MpsControlDaemonID = daemon.GetID()
+	require.NoError(t, os.MkdirAll(daemon.shmDir, 0o755))
+	_, err := clientset.AppsV1().Deployments(daemon.namespace).Create(
+		context.Background(),
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: daemon.name, Namespace: daemon.namespace}},
+		metav1.CreateOptions{},
+	)
+	require.NoError(t, err)
+
+	_, err = state.unprepareDevices(context.Background(), claimUID, PreparedDevices{group}, nil)
+	require.NoError(t, err)
+
+	_, err = clientset.AppsV1().Deployments(daemon.namespace).Get(context.Background(), daemon.name, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err), "MPS control daemon deployment should be deleted, got err=%v", err)
+	require.NoDirExists(t, daemon.rootDir)
+	require.Len(t, smi.invocations(t), 1)
+	require.Contains(t, smi.invocations(t)[0], "-i GPU-0000 -c DEFAULT")
+}
+
+func TestUnprepareWithoutMpsDaemonSkipsMpsTeardownWithGateDisabled(t *testing.T) {
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+		string(featuregates.MPSSupport):          false,
+		string(featuregates.TimeSlicingSettings): false,
+		string(featuregates.PassthroughSupport):  false,
+		string(featuregates.DynamicMIG):          false,
+	}))
+
+	group := &PreparedDeviceGroup{
+		Devices: PreparedDeviceList{
+			{Gpu: &PreparedGpu{
+				Info:   &GpuInfo{UUID: "GPU-0000"},
+				Device: &CheckpointedDevice{DeviceName: "gpu-0"},
+			}},
+		},
+	}
+	smi := newFakeSMI(t, 0)
+	cfg := &Config{flags: &Flags{kubeletPluginsDirectoryPath: t.TempDir()}}
+	nvdevlib := &deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath}
+	state := &DeviceState{
+		config:     cfg,
+		nvdevlib:   nvdevlib,
+		mpsManager: NewMpsManager(cfg, nvdevlib, "/", MpsControlDaemonTemplatePath),
+	}
+
+	_, err := state.unprepareDevices(context.Background(), "claim-uid", PreparedDevices{group}, nil)
+	require.NoError(t, err)
+	require.Empty(t, smi.invocations(t))
 }
