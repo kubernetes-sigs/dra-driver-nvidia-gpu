@@ -1204,7 +1204,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 				defaultInterval := configapi.DefaultTimeSlice
 				tsc := &configapi.TimeSlicingConfig{Interval: &defaultInterval}
 				if err := s.tsManager.SetTimeSlice(gpuUUIDsToReset, tsc); err != nil {
-					if err == nvml.ERROR_NOT_SUPPORTED {
+					if errors.Is(err, nvml.ERROR_NOT_SUPPORTED) {
 						klog.Warningf("Unprepare: skip resetting time-slice policy for devices: %v", err)
 					} else {
 						return false, fmt.Errorf("error setting timeslice for devices: %w", err)

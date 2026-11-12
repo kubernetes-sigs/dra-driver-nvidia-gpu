@@ -25,6 +25,7 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/component-base/featuregate"
 	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
@@ -950,5 +951,56 @@ func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
 
 		require.NoError(t, err)
 		require.Zero(t, nvmllib.deviceGetHandleByUUIDCalls, "a device held by a completed claim must not reach MIG teardown")
+	})
+}
+
+func TestUnprepareDevicesTimeSliceReset(t *testing.T) {
+	gates := map[string]bool{
+		string(featuregates.TimeSlicingSettings): true,
+		string(featuregates.MPSSupport):          false,
+		string(featuregates.PassthroughSupport):  false,
+	}
+	original := map[string]bool{}
+	for gate := range gates {
+		original[gate] = featuregates.Enabled(featuregate.Feature(gate))
+	}
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(gates))
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(original))
+	})
+
+	newState := func(smi fakeSMI) *DeviceState {
+		l := &deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath}
+		return &DeviceState{nvdevlib: l, tsManager: NewTimeSlicingManager(l)}
+	}
+	devices := PreparedDevices{
+		&PreparedDeviceGroup{Devices: PreparedDeviceList{newPreparedGpu("gpu-0", "GPU-0000")}},
+	}
+
+	t.Run("resets the GPU to the default time slice", func(t *testing.T) {
+		smi := newFakeSMI(t, 0)
+
+		_, err := newState(smi).unprepareDevices(context.Background(), "claim-uid", devices, &Checkpoint{})
+		require.NoError(t, err)
+
+		invocations := smi.invocations(t)
+		require.Len(t, invocations, 2)
+		require.Contains(t, invocations[1], "compute-policy -i GPU-0000 --set-timeslice 0")
+	})
+
+	t.Run("an unsupported time-slice reset does not fail unprepare", func(t *testing.T) {
+		// nvidia-smi exits with 3 when the operation is not available on the
+		// target device.
+		smi := newFakeSMI(t, 3)
+
+		_, err := newState(smi).unprepareDevices(context.Background(), "claim-uid", devices, &Checkpoint{})
+		require.NoError(t, err)
+	})
+
+	t.Run("other nvidia-smi failures still fail unprepare", func(t *testing.T) {
+		smi := newFakeSMI(t, 4)
+
+		_, err := newState(smi).unprepareDevices(context.Background(), "claim-uid", devices, &Checkpoint{})
+		require.Error(t, err)
 	})
 }

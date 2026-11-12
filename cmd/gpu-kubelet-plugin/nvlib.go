@@ -18,6 +18,7 @@ package main
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -891,6 +892,22 @@ func walkMigDevices(d nvml.Device, f func(i int, d nvml.Device) error) error {
 	return nil
 }
 
+// nvidiaSMIExitNotSupported is the nvidia-smi exit code for "the requested
+// operation is not available on target device".
+const nvidiaSMIExitNotSupported = 3
+
+// nvidiaSMIError wraps an error from running nvidia-smi. When nvidia-smi
+// reports that the operation is not supported on the device, the returned
+// error also wraps nvml.ERROR_NOT_SUPPORTED so that callers can detect it
+// with errors.Is.
+func nvidiaSMIError(err error) error {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == nvidiaSMIExitNotSupported {
+		return fmt.Errorf("error running nvidia-smi: %w: %w", err, nvml.ERROR_NOT_SUPPORTED)
+	}
+	return fmt.Errorf("error running nvidia-smi: %w", err)
+}
+
 func (l deviceLib) setTimeSlice(uuids []string, timeSlice int) error {
 	for _, uuid := range uuids {
 		cmd := exec.Command(
@@ -905,7 +922,7 @@ func (l deviceLib) setTimeSlice(uuids []string, timeSlice int) error {
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			klog.Errorf("\n%v", string(output))
-			return fmt.Errorf("error running nvidia-smi: %w", err)
+			return nvidiaSMIError(err)
 		}
 	}
 	return nil
@@ -924,7 +941,7 @@ func (l deviceLib) setComputeMode(uuids []string, mode string) error {
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			klog.Errorf("\n%v", string(output))
-			return fmt.Errorf("error running nvidia-smi: %w", err)
+			return nvidiaSMIError(err)
 		}
 	}
 	return nil
