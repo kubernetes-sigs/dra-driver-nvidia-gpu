@@ -30,6 +30,7 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	resourceapi "k8s.io/api/resource/v1beta1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -114,6 +115,33 @@ func TestResourceClaimValidatingWebhook(t *testing.T) {
 			),
 			expectedAllowed: false,
 			expectedMessage: "2 configs failed to validate: object at spec.devices.config[0].opaque.parameters is invalid: unknown time-slice interval: Invalid Interval, supported time-slice intervals: Default, Short, Medium, Long; object at spec.devices.config[1].opaque.parameters is invalid: active thread percentage must not be negative",
+		},
+		"GpuConfigs that fail only at prepare time are rejected in ResourceClaim": {
+			featureGates: map[string]bool{
+				string(featuregates.TimeSlicingSettings): true,
+				string(featuregates.MPSSupport):          true,
+			},
+			admissionReview: admissionReviewWithObject(
+				resourceClaimWithGpuConfigs(
+					resourceClaimResourceV1Beta1,
+					&configapi.GpuConfig{
+						Sharing: &configapi.GpuSharing{
+							Strategy:  configapi.TimeSlicingStrategy,
+							MpsConfig: &configapi.MpsConfig{},
+						},
+					},
+					&configapi.GpuConfig{
+						Sharing: &configapi.GpuSharing{
+							Strategy: configapi.MpsStrategy,
+							MpsConfig: &configapi.MpsConfig{
+								DefaultPinnedDeviceMemoryLimit: ptr.To(resource.MustParse("512Ki")),
+							},
+						},
+					},
+				),
+			),
+			expectedAllowed: false,
+			expectedMessage: "2 configs failed to validate: object at spec.devices.config[0].opaque.parameters is invalid: cannot use MpsConfig with the 'TimeSlicing' strategy; object at spec.devices.config[1].opaque.parameters is invalid: invalid limit: default pinned device memory limit must be at least 1Mi: 512Ki",
 		},
 		"valid ComputeDomainDaemonConfig in ResourceClaim": {
 			admissionReview: admissionReviewWithObject(

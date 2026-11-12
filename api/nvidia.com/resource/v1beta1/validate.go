@@ -18,6 +18,7 @@ package v1beta1
 
 import (
 	"fmt"
+	"strconv"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
@@ -82,6 +83,27 @@ func (c *MpsConfig) Validate() error {
 			return fmt.Errorf("active thread percentage must not be greater than 100")
 		}
 	}
+	// The pinned memory limits are converted to whole megabytes when the MPS
+	// control daemon is started (see MpsPerDevicePinnedMemoryLimit.Normalize),
+	// and a limit below 1Mi is rejected there. Reject it here as well, so that
+	// such a config is refused at admission instead of failing every attempt
+	// to prepare the claim.
+	if c.DefaultPinnedDeviceMemoryLimit != nil {
+		if _, valid := (limit)(*c.DefaultPinnedDeviceMemoryLimit).Megabyte(); !valid {
+			return fmt.Errorf("%w: default pinned device memory limit must be at least 1Mi: %s", ErrInvalidLimit, c.DefaultPinnedDeviceMemoryLimit.String())
+		}
+	}
+	for key, value := range c.DefaultPerDevicePinnedMemoryLimit {
+		// A key is either a device UUID or a device index. Whether a UUID or
+		// an index matches an allocated device is only known once the claim
+		// is allocated, but a negative index can never match one.
+		if index, err := strconv.Atoi(key); err == nil && index < 0 {
+			return fmt.Errorf("%w: device index %d must not be negative", ErrInvalidDeviceSelector, index)
+		}
+		if _, valid := (limit)(value).Megabyte(); !valid {
+			return fmt.Errorf("%w: pinned device memory limit for device %s must be at least 1Mi: %s", ErrInvalidLimit, key, value.String())
+		}
+	}
 	return nil
 }
 
@@ -92,8 +114,18 @@ func (s *GpuSharing) Validate() error {
 	}
 	switch {
 	case featuregates.Enabled(featuregates.TimeSlicingSettings) && s.IsTimeSlicing():
+		// GetTimeSlicingConfig refuses an MpsConfig next to the TimeSlicing
+		// strategy when the claim is prepared; refuse it at admission too.
+		if s.MpsConfig != nil {
+			return fmt.Errorf("cannot use MpsConfig with the '%v' strategy", TimeSlicingStrategy)
+		}
 		return s.TimeSlicingConfig.Validate()
 	case featuregates.Enabled(featuregates.MPSSupport) && s.IsMps():
+		// GetMpsConfig refuses a TimeSlicingConfig next to the MPS strategy
+		// when the claim is prepared; refuse it at admission too.
+		if s.TimeSlicingConfig != nil {
+			return fmt.Errorf("cannot use TimeSlicingConfig with the '%v' strategy", MpsStrategy)
+		}
 		return s.MpsConfig.Validate()
 	}
 	return fmt.Errorf("invalid GPU sharing settings: %v", s)
