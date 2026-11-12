@@ -188,10 +188,10 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		tsManager = NewTimeSlicingManager(nvdevlib)
 	}
 
-	var mpsManager *MpsManager
-	if featuregates.Enabled(featuregates.MPSSupport) {
-		mpsManager = NewMpsManager(config, nvdevlib, hostDriverRoot, MpsControlDaemonTemplatePath)
-	}
+	// The MPS manager is built regardless of the MPSSupport gate: a claim
+	// prepared with MPS before the gate was turned off still has a control
+	// daemon to tear down on unprepare.
+	mpsManager := NewMpsManager(config, nvdevlib, hostDriverRoot, MpsControlDaemonTemplatePath)
 
 	var vfioPciManager *VfioPciManager
 	if featuregates.Enabled(featuregates.PassthroughSupport) && nvdevlib.IsVfioEnabled() {
@@ -1182,7 +1182,10 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 		}
 
 		// Stop any MPS control daemons started for each group of prepared devices.
-		if featuregates.Enabled(featuregates.MPSSupport) {
+		// A daemon recorded in the checkpoint is stopped even when MPSSupport has
+		// since been disabled, so its deployment, shm mount and the GPUs'
+		// EXCLUSIVE_PROCESS compute mode are not left behind.
+		if featuregates.Enabled(featuregates.MPSSupport) || group.ConfigState.MpsControlDaemonID != "" {
 			mpsControlDaemon := s.mpsManager.NewMpsControlDaemon(claimUID, group)
 			if err := mpsControlDaemon.Stop(ctx); err != nil {
 				return false, fmt.Errorf("error stopping MPS control daemon: %w", err)
