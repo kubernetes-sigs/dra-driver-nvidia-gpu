@@ -54,6 +54,7 @@ const (
 )
 
 type Flags struct {
+	kubeClientConfig       pkgflags.KubeClientConfig
 	cliqueID               string
 	computeDomainUUID      string
 	computeDomainName      string
@@ -176,6 +177,7 @@ func newApp() *cli.App {
 	}
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)
 	cliFlags = append(cliFlags, loggingConfig.Flags()...)
+	cliFlags = append(cliFlags, flags.kubeClientConfig.Flags()...)
 
 	// Create the app
 	app := &cli.App{
@@ -241,8 +243,7 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	}
 
 	// Create clientsets for Kubernetes API access
-	kubeConfig := &pkgflags.KubeClientConfig{}
-	clientsets, err := kubeConfig.NewClientSets()
+	clientsets, err := flags.kubeClientConfig.NewClientSets()
 	if err != nil {
 		return fmt.Errorf("failed to create client sets: %w", err)
 	}
