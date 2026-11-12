@@ -115,6 +115,30 @@ func TestResourceClaimValidatingWebhook(t *testing.T) {
 			expectedAllowed: false,
 			expectedMessage: "2 configs failed to validate: object at spec.devices.config[0].opaque.parameters is invalid: unknown time-slice interval: Invalid Interval, supported time-slice intervals: Default, Short, Medium, Long; object at spec.devices.config[1].opaque.parameters is invalid: active thread percentage must not be negative",
 		},
+		"GpuConfig with the config of another sharing strategy in ResourceClaim": {
+			featureGates: map[string]bool{
+				string(featuregates.TimeSlicingSettings): true,
+				string(featuregates.MPSSupport):          true,
+			},
+			admissionReview: admissionReviewWithObject(
+				resourceClaimWithGpuConfigs(
+					resourceClaimResourceV1Beta1,
+					&configapi.GpuConfig{
+						Sharing: &configapi.GpuSharing{
+							Strategy: configapi.TimeSlicingStrategy,
+							TimeSlicingConfig: &configapi.TimeSlicingConfig{
+								Interval: ptr.To(configapi.DefaultTimeSlice),
+							},
+							MpsConfig: &configapi.MpsConfig{
+								DefaultActiveThreadPercentage: ptr.To(50),
+							},
+						},
+					},
+				),
+			),
+			expectedAllowed: false,
+			expectedMessage: "1 configs failed to validate: object at spec.devices.config[0].opaque.parameters is invalid: cannot use MpsConfig with the 'TimeSlicing' strategy",
+		},
 		"valid ComputeDomainDaemonConfig in ResourceClaim": {
 			admissionReview: admissionReviewWithObject(
 				resourceClaimWithComputeDomainDaemonConfig(

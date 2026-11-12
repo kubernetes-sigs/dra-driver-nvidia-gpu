@@ -117,3 +117,72 @@ func TestTimeSlicingConfigValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestGpuConfigValidateRejectsConfigOfOtherStrategy(t *testing.T) {
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+		string(featuregates.TimeSlicingSettings): true,
+		string(featuregates.MPSSupport):          true,
+	}))
+
+	testCases := []struct {
+		description string
+		sharing     *configapi.GpuSharing
+		expectError string
+	}{
+		{
+			description: "time-slicing with time-slicing config",
+			sharing: &configapi.GpuSharing{
+				Strategy:          configapi.TimeSlicingStrategy,
+				TimeSlicingConfig: &configapi.TimeSlicingConfig{Interval: ptr(configapi.LongTimeSlice)},
+			},
+		},
+		{
+			description: "time-slicing with mps config",
+			sharing: &configapi.GpuSharing{
+				Strategy:          configapi.TimeSlicingStrategy,
+				TimeSlicingConfig: &configapi.TimeSlicingConfig{Interval: ptr(configapi.LongTimeSlice)},
+				MpsConfig:         &configapi.MpsConfig{},
+			},
+			expectError: "cannot use MpsConfig with the 'TimeSlicing' strategy",
+		},
+		{
+			description: "mps with mps config",
+			sharing: &configapi.GpuSharing{
+				Strategy:  configapi.MpsStrategy,
+				MpsConfig: &configapi.MpsConfig{},
+			},
+		},
+		{
+			description: "mps with time-slicing config",
+			sharing: &configapi.GpuSharing{
+				Strategy:          configapi.MpsStrategy,
+				MpsConfig:         &configapi.MpsConfig{},
+				TimeSlicingConfig: &configapi.TimeSlicingConfig{Interval: ptr(configapi.LongTimeSlice)},
+			},
+			expectError: "cannot use TimeSlicingConfig with the 'MPS' strategy",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			config := &configapi.GpuConfig{Sharing: tc.sharing}
+			require.NoError(t, config.Normalize())
+			err := config.Validate()
+			if tc.expectError == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.EqualError(t, err, tc.expectError)
+
+			// Validate must reject what the kubelet plugin rejects when it
+			// reads the config for the selected strategy.
+			if config.Sharing.IsTimeSlicing() {
+				_, getErr := config.Sharing.GetTimeSlicingConfig()
+				require.EqualError(t, getErr, tc.expectError)
+			} else {
+				_, getErr := config.Sharing.GetMpsConfig()
+				require.EqualError(t, getErr, tc.expectError)
+			}
+		})
+	}
+}

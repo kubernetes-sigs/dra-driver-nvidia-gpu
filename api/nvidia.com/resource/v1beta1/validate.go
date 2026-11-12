@@ -92,8 +92,18 @@ func (s *GpuSharing) Validate() error {
 	}
 	switch {
 	case featuregates.Enabled(featuregates.TimeSlicingSettings) && s.IsTimeSlicing():
+		// The kubelet plugin rejects this combination in GetTimeSlicingConfig
+		// when preparing the claim, so reject it at admission time already.
+		if s.MpsConfig != nil {
+			return fmt.Errorf("cannot use MpsConfig with the '%v' strategy", TimeSlicingStrategy)
+		}
 		return s.TimeSlicingConfig.Validate()
 	case featuregates.Enabled(featuregates.MPSSupport) && s.IsMps():
+		// The kubelet plugin rejects this combination in GetMpsConfig when
+		// preparing the claim, so reject it at admission time already.
+		if s.TimeSlicingConfig != nil {
+			return fmt.Errorf("cannot use TimeSlicingConfig with the '%v' strategy", MpsStrategy)
+		}
 		return s.MpsConfig.Validate()
 	}
 	return fmt.Errorf("invalid GPU sharing settings: %v", s)
