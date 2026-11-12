@@ -1203,11 +1203,15 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 			if len(gpuUUIDsToReset) > 0 {
 				defaultInterval := configapi.DefaultTimeSlice
 				tsc := &configapi.TimeSlicingConfig{Interval: &defaultInterval}
-				if err := s.tsManager.SetTimeSlice(gpuUUIDsToReset, tsc); err != nil {
-					if err == nvml.ERROR_NOT_SUPPORTED {
-						klog.Warningf("Unprepare: skip resetting time-slice policy for devices: %v", err)
-					} else {
-						return false, fmt.Errorf("error setting timeslice for devices: %w", err)
+				// Reset each GPU on its own so that a GPU which does not
+				// support time-slicing does not stop the reset of the others.
+				for _, gpuUUID := range gpuUUIDsToReset {
+					if err := s.tsManager.SetTimeSlice([]string{gpuUUID}, tsc); err != nil {
+						if errors.Is(err, nvml.ERROR_NOT_SUPPORTED) {
+							klog.Warningf("Unprepare: skip resetting time-slice policy for GPU %s: %v", gpuUUID, err)
+							continue
+						}
+						return false, fmt.Errorf("error setting timeslice for GPU %s: %w", gpuUUID, err)
 					}
 				}
 			}
