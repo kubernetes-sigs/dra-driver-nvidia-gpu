@@ -18,6 +18,9 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -995,6 +998,42 @@ func TestUnprepareDevicesTimeSliceReset(t *testing.T) {
 
 		_, err := newState(smi).unprepareDevices(context.Background(), "claim-uid", devices, &Checkpoint{})
 		require.NoError(t, err)
+	})
+
+	t.Run("an unsupported GPU does not stop the reset of the other GPUs", func(t *testing.T) {
+		// The stub exits with 3 only for the time-slice call on GPU-0000.
+		smi := newFakeSMI(t, 0)
+		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s|%%s\\n' \"$LD_PRELOAD\" \"$*\" >> %q\ncase \"$*\" in *\"-i GPU-0000 --set-timeslice\"*) exit 3;; esac\nexit 0\n", smi.logPath)
+		require.NoError(t, os.WriteFile(smi.path, []byte(script), 0o755))
+		group := PreparedDevices{
+			&PreparedDeviceGroup{Devices: PreparedDeviceList{
+				newPreparedGpu("gpu-0", "GPU-0000"),
+				newPreparedGpu("gpu-1", "GPU-0001"),
+			}},
+		}
+
+		_, err := newState(smi).unprepareDevices(context.Background(), "claim-uid", group, &Checkpoint{})
+		require.NoError(t, err)
+
+		invocations := strings.Join(smi.invocations(t), "\n")
+		require.Contains(t, invocations, "compute-policy -i GPU-0000 --set-timeslice 0")
+		require.Contains(t, invocations, "compute-policy -i GPU-0001 --set-timeslice 0")
+	})
+
+	t.Run("a failure on a later GPU still fails unprepare", func(t *testing.T) {
+		// GPU-0000 is unsupported; GPU-0001 fails with a different error.
+		smi := newFakeSMI(t, 0)
+		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s|%%s\\n' \"$LD_PRELOAD\" \"$*\" >> %q\ncase \"$*\" in *\"-i GPU-0000 --set-timeslice\"*) exit 3;; *\"-i GPU-0001 --set-timeslice\"*) exit 4;; esac\nexit 0\n", smi.logPath)
+		require.NoError(t, os.WriteFile(smi.path, []byte(script), 0o755))
+		group := PreparedDevices{
+			&PreparedDeviceGroup{Devices: PreparedDeviceList{
+				newPreparedGpu("gpu-0", "GPU-0000"),
+				newPreparedGpu("gpu-1", "GPU-0001"),
+			}},
+		}
+
+		_, err := newState(smi).unprepareDevices(context.Background(), "claim-uid", group, &Checkpoint{})
+		require.Error(t, err)
 	})
 
 	t.Run("other nvidia-smi failures still fail unprepare", func(t *testing.T) {
