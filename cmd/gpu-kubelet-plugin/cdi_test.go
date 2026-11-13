@@ -17,6 +17,8 @@ limitations under the License.
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -24,8 +26,11 @@ import (
 	nvcdspec "github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi/spec"
 	resourceapi "k8s.io/api/resource/v1"
 	utilcache "k8s.io/apimachinery/pkg/util/cache"
+	"k8s.io/utils/ptr"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
+
+	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/common"
 )
 
 type fakeNVCDI struct {
@@ -363,4 +368,65 @@ func TestInvalidateDeviceSpec(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "/dev/nvidia1", specs[0].ContainerEdits.DeviceNodes[0].Path)
 	require.Equal(t, 2, fake.deviceSpecCalls)
+}
+
+// useProcDevicesPath points the nvcaps helpers at path for the duration of the
+// test. "/proc/devices" selects the real-driver behaviour regardless of any
+// ALT_PROC_DEVICES_PATH in the test environment.
+func useProcDevicesPath(t *testing.T, path string) {
+	t.Helper()
+	common.ConfigureProcDevicesPath(path)
+	t.Cleanup(common.ResetProcDevicesPath)
+}
+
+func TestNVCapsRoot(t *testing.T) {
+	tests := map[string]struct {
+		procDevicesPath string
+		driverRoot      string
+		expected        string
+	}{
+		"real driver reads procfs": {
+			procDevicesPath: "/proc/devices",
+			driverRoot:      "/driver-root",
+			expected:        "/proc/driver/nvidia/capabilities",
+		},
+		"mock NVML reads under the driver root": {
+			procDevicesPath: "/alt-proc-devices",
+			driverRoot:      "/driver-root",
+			expected:        "/driver-root/proc/driver/nvidia/capabilities",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			useProcDevicesPath(t, tc.procDevicesPath)
+			handler := &CDIHandler{driverRoot: tc.driverRoot}
+			require.Equal(t, tc.expected, handler.nvCapsRoot())
+		})
+	}
+}
+
+// Regression test: under mock NVML, MIG capability files exist only under the
+// driver root, so preparing a MIG device must not read /proc/driver/nvidia.
+func TestGetDevNodesForMigDeviceReadsCapsUnderDriverRootWithMockNVML(t *testing.T) {
+	procDevices := filepath.Join(t.TempDir(), "proc-devices")
+	require.NoError(t, os.WriteFile(procDevices,
+		[]byte("Character devices:\n195 nvidia-frontend\n236 nvidia-caps\n\nBlock devices:\n  8 sd\n"), 0o644))
+	useProcDevicesPath(t, procDevices)
+
+	driverRoot := t.TempDir()
+	giDir := filepath.Join(driverRoot, "proc/driver/nvidia/capabilities/gpu2/mig/gi5")
+	require.NoError(t, os.MkdirAll(filepath.Join(giDir, "ci0"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(giDir, "access"),
+		[]byte("DeviceFileMinor: 35\nDeviceFileMode: 292\nDeviceFileModify: 1\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(giDir, "ci0", "access"),
+		[]byte("DeviceFileMinor: 36\nDeviceFileMode: 292\nDeviceFileModify: 1\n"), 0o644))
+
+	handler := &CDIHandler{driverRoot: driverRoot}
+	nodes, err := handler.GetDevNodesForMigDevice(&MigLiveTuple{ParentMinor: 2, GIID: 5, CIID: 0})
+	require.NoError(t, err)
+	require.Equal(t, []*cdispec.DeviceNode{
+		{Path: "/dev/nvidia-caps/nvidia-cap35", Type: "c", FileMode: ptr.To(os.FileMode(292)), Major: 236, Minor: 35},
+		{Path: "/dev/nvidia-caps/nvidia-cap36", Type: "c", FileMode: ptr.To(os.FileMode(292)), Major: 236, Minor: 36},
+	}, nodes)
 }
