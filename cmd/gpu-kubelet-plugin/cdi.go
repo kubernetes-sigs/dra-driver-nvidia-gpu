@@ -454,8 +454,9 @@ func (cdi *CDIHandler) GetClaimDeviceName(claimUID string, device *AllocatableDe
 // the host. That is what is achieved below with the structure created in
 // cdiDevNodeFromNVCapDevInfo().
 func (cdi *CDIHandler) GetDevNodesForMigDevice(mlt *MigLiveTuple) ([]*cdispec.DeviceNode, error) {
-	gipath := fmt.Sprintf("%s/gpu%d/mig/gi%d/access", procNvCapsPath, mlt.ParentMinor, mlt.GIID)
-	cipath := fmt.Sprintf("%s/gpu%d/mig/gi%d/ci%d/access", procNvCapsPath, mlt.ParentMinor, mlt.GIID, mlt.CIID)
+	capsRoot := cdi.nvCapsRoot()
+	gipath := fmt.Sprintf("%s/gpu%d/mig/gi%d/access", capsRoot, mlt.ParentMinor, mlt.GIID)
+	cipath := fmt.Sprintf("%s/gpu%d/mig/gi%d/ci%d/access", capsRoot, mlt.ParentMinor, mlt.GIID, mlt.CIID)
 
 	giCapsInfo, err := common.ParseNVCapDeviceInfo(gipath)
 	if err != nil {
@@ -469,6 +470,17 @@ func (cdi *CDIHandler) GetDevNodesForMigDevice(mlt *MigLiveTuple) ([]*cdispec.De
 
 	devnodes := []*cdispec.DeviceNode{giCapsInfo.CDICharDevNode(), ciCapsInfo.CDICharDevNode()}
 	return devnodes, nil
+}
+
+// nvCapsRoot returns the directory holding the NVIDIA capability files. Under
+// mock NVML, signalled by ALT_PROC_DEVICES_PATH, no kernel module serves
+// /proc/driver/nvidia, and runc refuses mounts targeting /proc, so the mock
+// stages the same tree under the driver root instead.
+func (cdi *CDIHandler) nvCapsRoot() string {
+	if common.UsingAltProcDevices() {
+		return filepath.Join(cdi.driverRoot, procNvCapsPath)
+	}
+	return procNvCapsPath
 }
 
 // Write CDI spec to the filesystem.
