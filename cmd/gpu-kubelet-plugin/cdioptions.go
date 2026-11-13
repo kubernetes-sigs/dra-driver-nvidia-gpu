@@ -87,3 +87,10 @@ func WithVfioCDIHandler(vfioCDIHandler *vfioCDIHandler) cdiOption {
 		c.vfiocdi = vfioCDIHandler
 	}
 }
+
+// WithVgpuCDIHandler provides a cdiOption to set the vgpu CDI handler used by the 'cdi' interface.
+func WithVgpuCDIHandler(vgpuCDIHandler *vgpuCDIHandler) cdiOption {
+	return func(c *CDIHandler) {
+		c.vgpucdi = vgpuCDIHandler
+	}
+}

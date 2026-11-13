@@ -38,6 +38,11 @@ type PreparedDevice struct {
 	// via the 'dynamic MIG' flow or if it is a pre-created (static) MIG device.
 	Mig  *PreparedMigDevice  `json:"mig"`
 	Vfio *PreparedVfioDevice `json:"vfio,omitempty"`
+	// Represents a prepared vGPU partition device (concrete mdev or
+	// programmed VF). `omitempty`: new field; must never become part of the
+	// checksummed wire format for older binaries (checkpoint compat, see
+	// issue 1080).
+	Vgpu *PreparedVgpuDevice `json:"vgpu,omitempty"`
 }
 
 type PreparedGpu struct {
@@ -59,6 +64,15 @@ type PreparedVfioDevice struct {
 	Device *CheckpointedDevice `json:"device"`
 }
 
+// PreparedVgpuDevice is the checkpoint representation of a prepared vGPU
+// partition. Deliberately flat (no backpointer into VgpuPartitionInfo /
+// GpuInfo, which hold unexported state): the concrete identity is everything
+// Unprepare and orphan-cleanup need.
+type PreparedVgpuDevice struct {
+	Concrete *VgpuConcrete       `json:"concrete"`
+	Device   *CheckpointedDevice `json:"device"`
+}
+
 type PreparedDeviceGroup struct {
 	Devices     PreparedDeviceList `json:"devices"`
 	ConfigState DeviceConfigState  `json:"configState"`
@@ -74,6 +88,9 @@ func (d PreparedDevice) Type() string {
 	if d.Vfio != nil {
 		return VfioDeviceType
 	}
+	if d.Vgpu != nil {
+		return VgpuDeviceType
+	}
 	return UnknownDeviceType
 }
 
@@ -85,6 +102,8 @@ func (d *PreparedDevice) CanonicalName() string {
 		return d.Mig.Device.DeviceName
 	case VfioDeviceType:
 		return d.Vfio.Device.DeviceName
+	case VgpuDeviceType:
+		return d.Vgpu.Device.DeviceName
 	}
 	panic("unexpected type for AllocatableDevice")
 }
@@ -104,6 +123,16 @@ func (l PreparedDeviceList) MigDevices() PreparedDeviceList {
 	var devices PreparedDeviceList
 	for _, device := range l {
 		if device.Type() == PreparedMigDeviceType {
+			devices = append(devices, device)
+		}
+	}
+	return devices
+}
+
+func (l PreparedDeviceList) VgpuDevices() PreparedDeviceList {
+	var devices PreparedDeviceList
+	for _, device := range l {
+		if device.Type() == VgpuDeviceType {
 			devices = append(devices, device)
 		}
 	}
@@ -146,6 +175,8 @@ func (g *PreparedDeviceGroup) GetDevices() []kubeletplugin.Device {
 			devices = append(devices, kubeletplugin.Device(*device.Mig.Device))
 		case VfioDeviceType:
 			devices = append(devices, kubeletplugin.Device(*device.Vfio.Device))
+		case VgpuDeviceType:
+			devices = append(devices, kubeletplugin.Device(*device.Vgpu.Device))
 		}
 	}
 	return devices

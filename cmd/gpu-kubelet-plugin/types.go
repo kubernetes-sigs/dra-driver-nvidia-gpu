@@ -35,7 +35,10 @@ const (
 	// Abstract allocatable MIG device is manged by us (DynamicMIG).
 	MigDynamicDeviceType = "migdyn"
 	VfioDeviceType       = "vfio"
-	UnknownDeviceType    = "unknown"
+	// Abstract NVIDIA vGPU partition of a physical GPU,
+	// managed by us (VGPUSupport).
+	VgpuDeviceType    = "vgpu"
+	UnknownDeviceType = "unknown"
 )
 
 type UUIDProvider interface {
