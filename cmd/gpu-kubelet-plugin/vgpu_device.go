@@ -17,8 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -543,35 +541,29 @@ func readTrimmed(path string) (string, error) {
 }
 
 // prepareVgpuDevice creates the concrete vGPU device for an allocated
-// partition and records it in the ownership-marker registry. Return values
-// are checkpointed by the caller.
-func (s *DeviceState) prepareVgpuDevice(claimUID string, partition *VgpuPartitionInfo) (*VgpuConcrete, error) {
-	concrete, err := s.nvdevlib.createVgpuDevice(partition, nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.writeVgpuConcreteMarker(claimUID, concrete); err != nil {
-		// The device exists but would be untraceable across restarts; roll
-		// it back rather than leak it.
-		if derr := s.nvdevlib.deleteVgpuDevice(concrete); derr != nil {
-			klog.Warningf("failed to roll back vGPU device %s after marker write failure: %v", concrete.id(), derr)
-		}
-		return nil, fmt.Errorf("error recording vGPU device %q: %w", concrete.id(), err)
-	}
-	return concrete, nil
+// partition. Return values are checkpointed by the caller.
+//
+// TODO: the concrete device exists on the host before the caller commits it
+// to the checkpoint. A crash or a failed Prepare in that window leaves an
+// orphaned mdev instance (or a VF with a programmed vGPU type) that nothing
+// currently reclaims: the checkpoint never learned about it, and it survives
+// until the node reboots. Record the concrete identity in the checkpoint as
+// soon as it is created -- i.e. while the claim is still in PrepareStarted --
+// so Prepare-retry rollback and a startup sweep can both free it from a
+// single source of truth. Note that persisting during PrepareStarted breaks
+// the current invariant that PreparedDevices is only meaningful for claims in
+// PrepareCompleted;
+func (s *DeviceState) prepareVgpuDevice(partition *VgpuPartitionInfo) (*VgpuConcrete, error) {
+	return s.nvdevlib.createVgpuDevice(partition, nil)
 }
 
 // unprepareVgpuDevices destroys the concrete vGPU devices created for a
-// claim. Retried Unprepare is safe: deletions are idempotent and markers
-// are only removed after the host operation succeeded.
+// claim. Retried Unprepare is safe: deletions are idempotent.
 func (s *DeviceState) unprepareVgpuDevices(devices PreparedDeviceList) error {
 	for _, device := range devices {
 		concrete := device.Vgpu.Concrete
 		if err := s.nvdevlib.deleteVgpuDevice(concrete); err != nil {
 			return fmt.Errorf("error deleting vGPU device %s: %w", concrete.id(), err)
-		}
-		if err := s.removeVgpuConcreteMarker(concrete); err != nil {
-			return fmt.Errorf("error removing vGPU marker for %s: %w", concrete.id(), err)
 		}
 	}
 	return nil
@@ -594,143 +586,4 @@ func vgpuMetadataAttributes(partition *VgpuPartitionInfo, concrete *VgpuConcrete
 		attrs["pciBusID"] = resourceapi.DeviceAttribute{StringValue: &concrete.VFPCIBusID}
 	}
 	return attrs
-}
-
-// --- ownership markers ----------------------------------------------------
-//
-// The concrete vGPU device (mdev UUID / programmed VF) exists before the
-// checkpoint transitions to PrepareCompleted. A crash or failed Prepare in
-// between leaves an orphan that the empty checkpoint cannot name. Marker
-// files under the plugin directory record concrete devices the moment they
-// exist, keyed by claim UID, so that a restarted plugin (or a Prepare retry
-// for the same claim) can destroy devices it created but never committed to
-// the checkpoint. Unknown mdevs created out-of-band by an administrator are
-// untouched: they simply have no marker file.
-
-type vgpuConcreteMarker struct {
-	ClaimUID string        `json:"claimUID"`
-	Concrete *VgpuConcrete `json:"concrete"`
-}
-
-func (s *DeviceState) vgpuMarkerDir() string {
-	return filepath.Join(s.config.DriverPluginPath(), "vgpu-concrete")
-}
-
-func (s *DeviceState) writeVgpuConcreteMarker(claimUID string, concrete *VgpuConcrete) error {
-	if err := os.MkdirAll(s.vgpuMarkerDir(), 0750); err != nil {
-		return err
-	}
-	marker := vgpuConcreteMarker{ClaimUID: claimUID, Concrete: concrete}
-	data, err := json.Marshal(&marker)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(s.vgpuMarkerDir(), concrete.id()), data, 0600)
-}
-
-func (s *DeviceState) removeVgpuConcreteMarker(concrete *VgpuConcrete) error {
-	err := os.Remove(filepath.Join(s.vgpuMarkerDir(), concrete.id()))
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
-func (s *DeviceState) readVgpuConcreteMarkers() ([]*vgpuConcreteMarker, error) {
-	entries, err := os.ReadDir(s.vgpuMarkerDir())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var markers []*vgpuConcreteMarker
-	for _, e := range entries {
-		data, err := os.ReadFile(filepath.Join(s.vgpuMarkerDir(), e.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("error reading vGPU marker %q: %w", e.Name(), err)
-		}
-		var m vgpuConcreteMarker
-		if err := json.Unmarshal(data, &m); err != nil {
-			klog.Warningf("Ignoring unreadable vGPU marker %q: %v", e.Name(), err)
-			continue
-		}
-		markers = append(markers, &m)
-	}
-	return markers, nil
-}
-
-// cleanupVgpuMarkersForClaim deletes concrete vGPU devices recorded for the
-// given claim by a previous, failed Prepare attempt. Only devices created by
-// a previous attempt of THIS claim are freed; nothing else on the host is
-// touched.
-func (s *DeviceState) cleanupVgpuMarkersForClaim(claimUID string) error {
-	markers, err := s.readVgpuConcreteMarkers()
-	if err != nil {
-		return err
-	}
-	for _, m := range markers {
-		if m.ClaimUID != claimUID {
-			continue
-		}
-		if err := s.nvdevlib.deleteVgpuDevice(m.Concrete); err != nil {
-			return fmt.Errorf("error deleting leftover vGPU device %s of claim %s: %w", m.Concrete.id(), claimUID, err)
-		}
-		if err := s.removeVgpuConcreteMarker(m.Concrete); err != nil {
-			return fmt.Errorf("error removing vGPU marker for %s: %w", m.Concrete.id(), err)
-		}
-	}
-	return nil
-}
-
-// DestroyOrphanVgpuDevices destroys concrete vGPU devices that this driver
-// created (proven by a marker file) but that are not referenced by any
-// checkpointed claim in PrepareCompleted state. It runs once at startup,
-// mirroring the MIG orphan cleanup. Out-of-band (admin-created) mdevs have
-// no marker and are deliberately never touched.
-func (s *DeviceState) DestroyOrphanVgpuDevices(ctx context.Context) {
-	logpfx := "Destroy orphan vGPU devices"
-	markers, err := s.readVgpuConcreteMarkers()
-	if err != nil {
-		klog.Errorf("%s: unable to read markers: %s", logpfx, err)
-		return
-	}
-	if len(markers) == 0 {
-		return
-	}
-
-	cp, err := s.getCheckpoint(ctx)
-	if err != nil {
-		klog.Errorf("%s: unable to get checkpoint: %s", logpfx, err)
-		return
-	}
-
-	// Collect concrete device IDs owned by completed claims.
-	alive := make(map[string]bool)
-	for _, claim := range cp.V2.PreparedClaims {
-		if claim.CheckpointState != ClaimCheckpointStatePrepareCompleted {
-			continue
-		}
-		for _, group := range claim.PreparedDevices {
-			for _, dev := range group.Devices {
-				if dev.Vgpu != nil && dev.Vgpu.Concrete != nil {
-					alive[dev.Vgpu.Concrete.id()] = true
-				}
-			}
-		}
-	}
-
-	for _, m := range markers {
-		if alive[m.Concrete.id()] {
-			continue
-		}
-		klog.Infof("%s: destroying %s (marker claim %s)", logpfx, m.Concrete.id(), m.ClaimUID)
-		if err := s.nvdevlib.deleteVgpuDevice(m.Concrete); err != nil {
-			klog.Errorf("%s: failed to delete %s (leaving marker for retry): %s", logpfx, m.Concrete.id(), err)
-			continue
-		}
-		if err := s.removeVgpuConcreteMarker(m.Concrete); err != nil {
-			klog.Errorf("%s: failed to remove marker for %s: %s", logpfx, m.Concrete.id(), err)
-		}
-	}
 }

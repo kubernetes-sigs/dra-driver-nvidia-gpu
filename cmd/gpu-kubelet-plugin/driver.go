@@ -86,11 +86,11 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 			return nil, fmt.Errorf("failed to determine ResourceSlice model: %w", err)
 		}
 
-		// Destroy concrete vGPU devices created by this driver (marker-file
-		// ownership) that no checkpointed claim references: leftovers of
-		// crashed/failed Prepares. Analogous to DestroyUnknownMIGDevices for
-		// the Dynamic MIG path; the checkpoint is the source of truth.
-		state.DestroyOrphanVgpuDevices(ctx)
+		// TODO: orphan vGPU devices (created for a claim but never committed
+		// to the checkpoint because Prepare was interrupted) are not currently
+		// destroyed on startup. Implement a checkpoint-based sweep here
+		// (analogous to DestroyUnknownMIGDevices for the Dynamic MIG path)
+		// once the concrete vGPU identity is persisted during PrepareStarted.
 	}
 
 	if featuregates.Enabled(featuregates.DynamicMIG) {
