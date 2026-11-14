@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -39,6 +40,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/common"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 	nvfake "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/clientset/versioned/fake"
 	nvinformers "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/informers/externalversions"
@@ -892,6 +894,98 @@ func TestApplyComputeDomainDaemonConfigHostManagedRejected(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, isPermanentError(err), "daemon claims must be a permanent error under host-managed IMEX")
+}
+
+func TestApplyComputeDomainDaemonConfigWritesNothingWhenAPrerequisiteFails(t *testing.T) {
+	cases := map[string]struct {
+		cdExists bool
+		cliqueID string
+		want     string
+	}{
+		"ComputeDomain not found": {
+			want: "compute domain not found",
+		},
+		"fabric-imex-mgmt nvcap is missing": {
+			cdExists: true,
+			cliqueID: "clique-a",
+			want:     "error parsing nvcap device info",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			state := daemonConfigTestState(t, tc.cdExists, tc.cliqueID, false)
+
+			err := applyTestDaemonConfig(t, state)
+
+			require.NoDirExists(t, filepath.Join(state.computeDomainManager.configFilesRoot, "cd-uid"))
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+func TestApplyComputeDomainDaemonConfigPreparesSettings(t *testing.T) {
+	for name, cliqueID := range map[string]string{"without IMEX": "", "with IMEX": "clique-a"} {
+		t.Run(name, func(t *testing.T) {
+			state := daemonConfigTestState(t, true, cliqueID, true)
+			// A file in place of the config root makes Prepare fail, which shows
+			// that it ran and that its error is returned.
+			root := filepath.Join(t.TempDir(), "not-a-dir")
+			require.NoError(t, os.WriteFile(root, nil, 0o644))
+			state.computeDomainManager.configFilesRoot = root
+
+			err := applyTestDaemonConfig(t, state)
+
+			require.ErrorContains(t, err, "error preparing ComputeDomain daemon settings")
+		})
+	}
+}
+
+// daemonConfigTestState returns a driver-managed DeviceState with one daemon
+// device. It reads /proc/devices and the nvcap from temp files, not this host.
+func daemonConfigTestState(t *testing.T, cdExists bool, cliqueID string, withNVCap bool) *DeviceState {
+	t.Helper()
+
+	driverRoot := t.TempDir()
+	procDevices := filepath.Join(t.TempDir(), "devices")
+	common.ConfigureProcDevicesPath(procDevices)
+	t.Cleanup(common.ResetProcDevicesPath)
+	if withNVCap {
+		require.NoError(t, os.WriteFile(procDevices, []byte("Character devices:\n511 nvidia-caps\n\nBlock devices:\n  8 sd\n"), 0o644))
+		nvcap := filepath.Join(driverRoot, "proc/driver/nvidia/capabilities/fabric-imex-mgmt")
+		require.NoError(t, os.MkdirAll(filepath.Dir(nvcap), 0o755))
+		require.NoError(t, os.WriteFile(nvcap, []byte("DeviceFileMinor: 1\nDeviceFileMode: 256\nDeviceFileModify: 1\n"), 0o644))
+	}
+
+	factory := nvinformers.NewSharedInformerFactory(nvfake.NewSimpleClientset(), 0)
+	informer := factory.Resource().V1beta1().ComputeDomains().Informer()
+	require.NoError(t, informer.AddIndexers(cache.Indexers{"computeDomainUID": uidIndexer[*configapi.ComputeDomain]}))
+	if cdExists {
+		require.NoError(t, informer.GetIndexer().Add(&configapi.ComputeDomain{
+			ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "cd-uid"},
+		}))
+	}
+
+	config := &Config{flags: &Flags{containerDriverRoot: driverRoot}}
+	return &DeviceState{
+		config:               config,
+		cdi:                  &CDIHandler{devRoot: "/"},
+		computeDomainManager: &ComputeDomainManager{config: config, informer: informer, cliqueID: cliqueID, configFilesRoot: t.TempDir()},
+		allocatable: AllocatableDevices{
+			"daemon-0": &AllocatableDevice{Daemon: &ComputeDomainDaemonInfo{ID: 0}},
+		},
+	}
+}
+
+func applyTestDaemonConfig(t *testing.T, state *DeviceState) error {
+	result := allocationResult("request", DriverName, "daemon-0", nil)
+	_, err := state.applyComputeDomainDaemonConfig(
+		t.Context(),
+		daemonConfig("cd-uid"),
+		claimWithResults("claim-uid", result),
+		[]*resourceapi.DeviceRequestAllocationResult{&result},
+	)
+	return err
 }
 
 func TestApplyComputeDomainChannelConfigHostManagedNoCliqueSkipsInjection(t *testing.T) {
