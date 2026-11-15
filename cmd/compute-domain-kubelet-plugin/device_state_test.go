@@ -376,6 +376,50 @@ func TestPrepareLeavesNoCheckpointForARejectedClaim(t *testing.T) {
 	}
 }
 
+// Overlap is retryable, so checking it first would retry a claim that can
+// never succeed for the whole prepare deadline.
+func TestPrepareRejectsAnInvalidClaimBeforeCheckingOverlap(t *testing.T) {
+	cases := map[string]struct {
+		domainID  string
+		want      string
+		permanent bool
+	}{
+		"invalid config fails permanently": {
+			domainID:  "../x",
+			want:      "error validating config",
+			permanent: true,
+		},
+		"valid config keeps overlap retryable": {
+			domainID: "d3b07384-d9a7-4e2b-8f1a-2c1e6b5a9f00",
+			want:     "already allocated to different claim",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			owner := preparedClaim(ClaimCheckpointStatePrepareCompleted, allocationResult("request", DriverName, "channel-0", nil))
+			state := testDeviceState()
+			state.config = &Config{flags: &Flags{nodeName: "test-node"}}
+			state.checkpointManager = &fakeCheckpointManager{checkpoint: checkpointWithClaims(map[string]PreparedClaim{"owner-uid": owner})}
+			claim := &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "incoming", Namespace: "default", UID: types.UID("incoming-uid")},
+				Status: claimStatus(
+					[]resourceapi.DeviceRequestAllocationResult{allocationResult("request", DriverName, "channel-0", nil)},
+					opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"request"}, channelConfig(tc.domainID)),
+				),
+			}
+
+			_, err := state.Prepare(t.Context(), claim)
+
+			require.ErrorContains(t, err, tc.want)
+			require.Equal(t, tc.permanent, isPermanentError(err), "got %v", err)
+			manager := requireFakeCheckpointManager(t, state)
+			require.Zero(t, manager.creates)
+			require.Equal(t, PreparedClaimsByUID{"owner-uid": owner}, manager.checkpoint.V2.PreparedClaims)
+		})
+	}
+}
+
 // Prepare must finish the preflight before applying anything: with a good and a
 // bad config it fails validation and writes nothing.
 func TestPrepareRejectsAMixedClaimBeforeApplying(t *testing.T) {

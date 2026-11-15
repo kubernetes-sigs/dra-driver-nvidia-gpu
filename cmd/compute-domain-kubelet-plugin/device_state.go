@@ -208,6 +208,15 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		return nil, permanentError{fmt.Errorf("stale prepare for claim %s: claim prepare was already aborted", ResourceClaimToString(claim))}
 	}
 
+	// The preflight reads only the claim and state fixed for this process, so a
+	// claim it rejects can never succeed. Fail it permanently before the
+	// retryable overlap check, and before checkpointing an entry that Unprepare
+	// may be unable to clear.
+	plan, err := s.buildPreparePlan(claim)
+	if err != nil {
+		return nil, fmt.Errorf("prepare preflight failed: %w", err)
+	}
+
 	// In certain scenarios, the same device can be prepared/allocated more than once for different claims
 	// due to races between data processing in different goroutines in the scheduler, or when pods are
 	// force-deleted while the kubelet still considers the devices allocated.
@@ -216,14 +225,6 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	// More details: https://github.com/kubernetes/kubernetes/pull/136269
 	if err := s.validateNoOverlappingPreparedDevices(checkpoint, claim); err != nil {
 		return nil, fmt.Errorf("unable to prepare claim %v: %w", claimUID, err)
-	}
-
-	// The preflight reads only the claim and state fixed for this process, so a
-	// claim it rejects can never succeed. Fail it permanently before
-	// checkpointing an entry that Unprepare may be unable to clear.
-	plan, err := s.buildPreparePlan(claim)
-	if err != nil {
-		return nil, fmt.Errorf("prepare preflight failed: %w", err)
 	}
 
 	err = s.updateCheckpoint(func(checkpoint *Checkpoint) {
