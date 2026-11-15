@@ -1,0 +1,39 @@
+apiVersion: resource.k8s.io/${TEST_K8S_RESOURCE_API_VERSION}
+kind: ResourceClaim
+metadata:
+  name: batssuite-rc-missing-cd
+  labels:
+    env: batssuite
+spec:
+  devices:
+    requests:
+    - name: chan
+      # This part of the ResourceClaim spec changed in
+      # resource.k8s.io/v1 compared to previous API versions.
+      ${TEST_DEVCLASSNAME_CD_CHANNEL}
+    config:
+    - opaque:
+        driver: compute-domain.nvidia.com
+        parameters:
+          apiVersion: resource.nvidia.com/v1beta1
+          domainID: does-not-exist
+          kind: ComputeDomainChannelConfig
+      requests:
+      - chan
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  generateName: batssuite-pod-mcd-
+  labels:
+    env: batssuite
+spec:
+  containers:
+  - name: app
+    image: busybox
+    resources:
+      claims:
+      - name: batssuite-claim-mcd
+  resourceClaims:
+  - name: batssuite-claim-mcd
+    resourceClaimName: batssuite-rc-missing-cd
