@@ -17,7 +17,7 @@ Upgrade the Helm release and reuse the values from the existing installation:
 
 ```bash
 helm upgrade -i nvidia-dra-driver-gpu oci://registry.k8s.io/dra-driver-nvidia/charts/dra-driver-nvidia-gpu \
-    --version {{< param "driver_version" >}} \
+    --version 0.5.1 \
     --namespace nvidia-dra-driver-gpu \
     --reuse-values
 ```
@@ -86,7 +86,7 @@ For the full release summary, see the [v0.4.1 release notes](https://github.com/
 
 ```bash
 helm upgrade -i nvidia-dra-driver-gpu oci://registry.k8s.io/dra-driver-nvidia/charts/dra-driver-nvidia-gpu \
-    --version {{< param "driver_version" >}} \
+    --version 0.4.1 \
     --namespace nvidia-dra-driver-gpu \
     --set gpuResourcesEnabledOverride=true
 ```
