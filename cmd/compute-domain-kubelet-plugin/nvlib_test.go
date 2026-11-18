@@ -17,7 +17,12 @@ limitations under the License.
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+
+	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,4 +41,52 @@ func TestCheckHostIMEXReadyMissingBinary(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nvidia-imex-ctl not found")
+}
+
+// No devices report an MNNVL clique in these node-local tests.
+type noCliqueDevices struct {
+	nvdev.Interface
+}
+
+func (noCliqueDevices) VisitDevices(func(int, nvdev.Device) error) error { return nil }
+
+type nodeLocalNVML struct {
+	nvml.Interface
+}
+
+func (nodeLocalNVML) InitWithFlags(uint32) nvml.Return { return nvml.SUCCESS }
+func (nodeLocalNVML) Shutdown() nvml.Return            { return nvml.SUCCESS }
+
+func TestGetCliqueIDNodeLocalRequiresFabric(t *testing.T) {
+	for name, tc := range map[string]struct {
+		enabled   bool
+		fabric    bool
+		broken    bool
+		wantError string
+	}{
+		"gate disabled":   {},
+		"no fabric":       {enabled: true, wantError: "requires a Fabric Manager-managed NVLink fabric"},
+		"NVSwitch fabric": {enabled: true, fabric: true},
+		"detection error": {enabled: true, broken: true, wantError: "failed to check if node has local fabric"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			setNodeLocalFabricIPCForTest(t, tc.enabled)
+			hostRoot := t.TempDir()
+			devicesDir := filepath.Join(hostRoot, "proc", "driver", "nvidia-nvswitch", "devices")
+			if tc.fabric {
+				require.NoError(t, os.MkdirAll(filepath.Join(devicesDir, "0000:01:00.0"), 0755))
+			}
+			if tc.broken {
+				require.NoError(t, os.WriteFile(filepath.Join(hostRoot, "proc"), nil, 0600))
+			}
+			l := deviceLib{Interface: noCliqueDevices{}, nvmllib: nodeLocalNVML{}, devRoot: hostRoot}
+			cliqueID, err := l.getCliqueID()
+			assert.Empty(t, cliqueID)
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
