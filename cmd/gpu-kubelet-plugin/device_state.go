@@ -1261,7 +1261,7 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 		if err != nil {
 			return fmt.Errorf("error discovering gpu by pci bus id: %w", err)
 		}
-		err = s.perGPUAllocatable.AddAllocatableDevice(gpu)
+		err = s.addRediscoveredGPU(gpu)
 		if err != nil {
 			return fmt.Errorf("error adding allocatable device: %w", err)
 		}
@@ -1285,6 +1285,17 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 		return nil
 	}
 	return nil
+}
+
+// addRediscoveredGPU advertises a GPU again after it was rebound from vfio-pci
+// to the nvidia driver. Like startup discovery, it never advertises a GPU in
+// MIG mode as a full GPU.
+func (s *DeviceState) addRediscoveredGPU(gpu *AllocatableDevice) error {
+	if gpu.Gpu.migEnabled {
+		klog.Warningf("Physical GPU %s has MIG mode enabled; not advertising it as a full GPU", gpu.Gpu.CanonicalName())
+		return nil
+	}
+	return s.perGPUAllocatable.AddAllocatableDevice(gpu)
 }
 
 // validateClaimCDIDeviceNodes verifies that nvcdi can discover the common and
