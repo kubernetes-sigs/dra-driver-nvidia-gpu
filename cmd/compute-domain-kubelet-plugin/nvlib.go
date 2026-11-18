@@ -212,10 +212,27 @@ func (l deviceLib) getCliqueID() (string, error) {
 	}
 	defer l.alwaysShutdown()
 
+	var cliqueID string
+	var err error
 	if featuregates.Enabled(featuregates.CrashOnNVLinkFabricErrors) {
-		return l.getCliqueIDStrict()
+		cliqueID, err = l.getCliqueIDStrict()
+	} else {
+		cliqueID, err = l.getCliqueIDLegacy()
 	}
-	return l.getCliqueIDLegacy()
+	if err != nil {
+		return "", err
+	}
+
+	if cliqueID == "" && featuregates.Enabled(featuregates.NodeLocalFabricIPC) {
+		hasFabric, err := l.checkIsSingleNodeNVLinkSystem()
+		if err != nil {
+			return "", err
+		}
+		if !hasFabric {
+			return "", fmt.Errorf("NodeLocalFabricIPC requires a Fabric Manager-managed NVLink fabric")
+		}
+	}
+	return cliqueID, nil
 }
 
 // getCliqueIDLegacy uses IsFabricAttached() and falls back gracefully on errors.
