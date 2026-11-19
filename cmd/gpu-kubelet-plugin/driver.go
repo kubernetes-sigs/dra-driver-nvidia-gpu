@@ -85,12 +85,6 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to determine ResourceSlice model: %w", err)
 		}
-
-		// TODO: orphan vGPU devices (created for a claim but never committed
-		// to the checkpoint because Prepare was interrupted) are not currently
-		// destroyed on startup. Implement a checkpoint-based sweep here
-		// (analogous to DestroyUnknownMIGDevices for the Dynamic MIG path)
-		// once the concrete vGPU identity is persisted during PrepareStarted.
 	}
 
 	if featuregates.Enabled(featuregates.DynamicMIG) {
@@ -144,6 +138,12 @@ func NewDriver(ctx context.Context, config *Config) (*driver, error) {
 		state:                  state,
 		pulock:                 flock.NewFlock(puLockPath),
 		useSplitResourceSlices: useSplitSlices,
+	}
+	if featuregates.Enabled(featuregates.VGPUSupport) {
+		err = state.destroyUnknownVgpuDevices(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("cleaning up vGPUs at startup: %w", err)
+		}
 	}
 
 	// Register NVML events before kubeletplugin.Start exposes Prepare/Unprepare.

@@ -331,12 +331,11 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		return nil, fmt.Errorf("unable to prepare claim %v: %w", claimUID, err)
 	}
 
-	// TODO: a previously failed Prepare attempt for this claim may have
-	// created concrete vGPU devices without ever committing them to the
-	// checkpoint. Nothing frees them on this retry: the allocation results
-	// name the abstract partition, not the mdev UUID / VF that was actually
-	// programmed, so the leftover cannot be identified. Need some mechanism
-	// to persist concrete identity during PrepareStarted.
+	if featuregates.Enabled(featuregates.VGPUSupport) {
+		if err := s.cleanupUnreferencedVgpuDevices(cp); err != nil {
+			return nil, fmt.Errorf("cleaning up vGPUs before Prepare: %w", err)
+		}
+	}
 
 	// Relevant for DynamicMIG: a previous preparation attempt for the same
 	// claim might have resulted in complete or partial GI/CI creation. Roll
@@ -664,9 +663,11 @@ func (s *DeviceState) unpreparePartiallyPreparedClaim(ctx context.Context, cuid 
 		}
 	}
 
-	// TODO: a partially-prepared claim may have created concrete vGPU devices
-	// that were never committed to the checkpoint; nothing in this path frees
-	// them. Need some mechanism to persist concrete identity during PrepareStarted.
+	if featuregates.Enabled(featuregates.VGPUSupport) {
+		if err := s.cleanupUnreferencedVgpuDevices(checkpoint); err != nil {
+			return fmt.Errorf("cleaning up vGPUs for partially prepared claim: %w", err)
+		}
+	}
 
 	// If FM partitioning is enabled, then deactivate the partition
 	// for the devices in the claim. At this point, the gpuInfo objects

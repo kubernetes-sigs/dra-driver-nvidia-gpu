@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -543,16 +544,8 @@ func readTrimmed(path string) (string, error) {
 // prepareVgpuDevice creates the concrete vGPU device for an allocated
 // partition. Return values are checkpointed by the caller.
 //
-// TODO: the concrete device exists on the host before the caller commits it
-// to the checkpoint. A crash or a failed Prepare in that window leaves an
-// orphaned mdev instance (or a VF with a programmed vGPU type) that nothing
-// currently reclaims: the checkpoint never learned about it, and it survives
-// until the node reboots. Record the concrete identity in the checkpoint as
-// soon as it is created -- i.e. while the claim is still in PrepareStarted --
-// so Prepare-retry rollback and a startup sweep can both free it from a
-// single source of truth. Note that persisting during PrepareStarted breaks
-// the current invariant that PreparedDevices is only meaningful for claims in
-// PrepareCompleted;
+// If Prepare fails before committing the concrete identity, the next cleanup
+// sweep reclaims it because no completed claim references it.
 func (s *DeviceState) prepareVgpuDevice(partition *VgpuPartitionInfo) (*VgpuConcrete, error) {
 	return s.nvdevlib.createVgpuDevice(partition, nil)
 }
@@ -586,4 +579,135 @@ func vgpuMetadataAttributes(partition *VgpuPartitionInfo, concrete *VgpuConcrete
 		attrs["pciBusID"] = resourceapi.DeviceAttribute{StringValue: &concrete.VFPCIBusID}
 	}
 	return attrs
+}
+
+// destroyUnknownVgpuDevices runs before this plugin accepts kubelet requests.
+func (s *DeviceState) destroyUnknownVgpuDevices(ctx context.Context) error {
+	cp, err := s.getCheckpoint(ctx)
+	if err != nil {
+		return fmt.Errorf("reading checkpoint for vGPU cleanup: %w", err)
+	}
+	return s.cleanupUnreferencedVgpuDevices(cp)
+}
+
+// cleanupUnreferencedVgpuDevices relies on exclusive management of the GPUs:
+// any concrete vGPU not referenced by a completed claim is an interrupted
+// Prepare's leftover. Call only while Prepare/Unprepare is serialized and before
+// creating any devices for the current attempt; its new devices are not yet
+// checkpointed and would otherwise also be deleted.
+func (s *DeviceState) cleanupUnreferencedVgpuDevices(cp *Checkpoint) error {
+	keepMdevs := make(map[string]bool)
+	keepVFs := make(map[string]bool)
+	for _, claim := range cp.V2.PreparedClaims {
+		if claim.CheckpointState != ClaimCheckpointStatePrepareCompleted {
+			continue
+		}
+		for _, group := range claim.PreparedDevices {
+			for _, device := range group.Devices.VgpuDevices() {
+				concrete := device.Vgpu.Concrete
+				if concrete == nil {
+					return fmt.Errorf("completed vGPU device %q has no concrete identity", device.CanonicalName())
+				}
+				if (concrete.Framework != vgpuFrameworkMdev || concrete.MdevUUID == "") &&
+					(concrete.Framework != vgpuFrameworkVf || concrete.VFPCIBusID == "") {
+					return fmt.Errorf("completed vGPU device %q has invalid concrete identity", device.CanonicalName())
+				}
+				keepMdevs[concrete.MdevUUID] = true
+				keepVFs[concrete.VFPCIBusID] = true
+			}
+		}
+	}
+
+	// Sweep all GPUs in the plugin's inventory, regardless of MIG mode or
+	// profile availability. An orphan may have exhausted their vGPU capacity.
+	managedGPUs := make(map[string]bool)
+	for pciBusID := range s.perGPUAllocatable.allocatablesMap {
+		managedGPUs[pciBusID] = true
+	}
+
+	devices, err := s.nvdevlib.listVgpuDevices(managedGPUs)
+	if err != nil {
+		return fmt.Errorf("enumerating vGPUs for cleanup: %w", err)
+	}
+	for _, device := range devices {
+		if (device.Framework == vgpuFrameworkMdev && keepMdevs[device.MdevUUID]) ||
+			(device.Framework == vgpuFrameworkVf && keepVFs[device.VFPCIBusID]) {
+			continue
+		}
+		klog.V(2).Infof("Deleting unreferenced vGPU %s on GPU %s", device.id(), device.ParentPCIBusID)
+		if err := s.nvdevlib.deleteVgpuDevice(device); err != nil {
+			return fmt.Errorf("deleting unreferenced vGPU %s on GPU %s: %w", device.id(), device.ParentPCIBusID, err)
+		}
+	}
+	return nil
+}
+
+// listVgpuDevices uses host state rather than the profile policy or currently
+// creatable types, both of which can exclude devices left by a failed Prepare.
+func (l deviceLib) listVgpuDevices(managedGPUs map[string]bool) ([]*VgpuConcrete, error) {
+	if len(managedGPUs) == 0 {
+		return nil, nil
+	}
+	sysfsRoot := l.sysfsRoot
+	if sysfsRoot == "" {
+		sysfsRoot = "/"
+	}
+	mdevRoot := filepath.Join(sysfsRoot, vgpuMdevDevicesRoot)
+	entries, err := os.ReadDir(mdevRoot)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("listing mediated devices: %w", err)
+	}
+
+	var devices []*VgpuConcrete
+	for _, entry := range entries {
+		devicePath, err := filepath.EvalSymlinks(filepath.Join(mdevRoot, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("resolving mediated device %s: %w", entry.Name(), err)
+		}
+		parentPath := filepath.Dir(devicePath)
+		parent := filepath.Base(parentPath)
+		if !managedGPUs[parent] {
+			// On SR-IOV mdev hosts the immediate parent is a VF, not the PF.
+			pfPath, err := filepath.EvalSymlinks(filepath.Join(parentPath, "physfn"))
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("resolving parent of mediated device %s: %w", entry.Name(), err)
+			}
+			parent = filepath.Base(pfPath)
+		}
+		if managedGPUs[parent] {
+			devices = append(devices, &VgpuConcrete{
+				Framework: vgpuFrameworkMdev, MdevUUID: entry.Name(), ParentPCIBusID: parent,
+			})
+		}
+	}
+
+	for parent := range managedGPUs {
+		vfs, err := l.listVFs(sysfsPciDeviceDir(sysfsRoot, parent))
+		if err != nil {
+			return nil, fmt.Errorf("listing VFs of GPU %s: %w", parent, err)
+		}
+		for _, vf := range vfs {
+			value, err := readTrimmed(filepath.Join(vgpuVFNVidiaDir(sysfsRoot, vf), vgpuCurrentTypeFile))
+			if os.IsNotExist(err) {
+				continue // mdev hosts do not expose vendor-VFIO attributes
+			}
+			if err != nil {
+				return nil, fmt.Errorf("reading vGPU type on VF %s: %w", vf, err)
+			}
+			if value == "" || value == "0" {
+				continue
+			}
+			profileID, err := strconv.ParseUint(value, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("invalid vGPU type %q on VF %s: %w", value, vf, err)
+			}
+			devices = append(devices, &VgpuConcrete{
+				Framework: vgpuFrameworkVf, VFPCIBusID: vf, ParentPCIBusID: parent, ProfileID: uint32(profileID),
+			})
+		}
+	}
+	return devices, nil
 }
