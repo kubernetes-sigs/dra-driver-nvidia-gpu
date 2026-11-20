@@ -1,0 +1,11 @@
+{{- if .Values.resources.gpus.enabled }}
+---
+apiVersion: {{ include "dra-driver-nvidia-gpu.resourceApiVersion" . }}
+kind: DeviceClass
+metadata:
+  name: vgpu.gpu.nvidia.com
+spec:
+  selectors:
+  - cel:
+      expression: "device.driver == 'gpu.nvidia.com' && device.attributes['gpu.nvidia.com'].type == 'vgpu'"
+{{- end }}

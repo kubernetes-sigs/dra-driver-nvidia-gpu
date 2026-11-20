@@ -103,6 +103,14 @@ const (
 	// via --consumable-shares. Note: MPS sharing is not supported when consumable
 	// shares is enabled.
 	ConsumableShares featuregate.Feature = "ConsumableShares"
+
+	// VGPUSupport enables advertising NVIDIA vGPU partition devices
+	// (type=vgpu) as partitionable devices in ResourceSlices:
+	// a per-GPU CounterSet plus abstract per-profile slot partitions.
+	// Requires cluster-side DRAPartitionableDevices and
+	// DRADeviceCompatibilityGroups; the driver publishes KEP-5963
+	// compatibility groups unconditionally on this path.
+	VGPUSupport featuregate.Feature = "VGPUSupport"
 )
 
 // Feature gate Version fields use driver SemVer major.minor.
@@ -205,6 +213,13 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 			Version:    version.MajorMinor(0, 5),
 		},
 	},
+	VGPUSupport: {
+		{
+			Default:    false,
+			PreRelease: featuregate.Alpha,
+			Version:    version.MajorMinor(0, 6),
+		},
+	},
 }
 
 var (
@@ -267,8 +282,20 @@ func ValidateFeatureGates() error {
 		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", PassthroughSupport, NVMLDeviceHealthCheck)
 	}
 
-	if Enabled(DeviceMetadata) && !Enabled(PassthroughSupport) {
-		return fmt.Errorf("feature gate %s requires %s to also be enabled", DeviceMetadata, PassthroughSupport)
+	if Enabled(DeviceMetadata) && !Enabled(PassthroughSupport) && !Enabled(VGPUSupport) {
+		return fmt.Errorf("feature gate %s requires %s or %s to also be enabled", DeviceMetadata, PassthroughSupport, VGPUSupport)
+	}
+
+	// vGPU partitions are advertised through the same KEP-4815 publish path
+	// as Dynamic MIG, but a unified per-GPU CounterSet covering MIG and vGPU
+	// partitions at the same time is not implemented yet. Passthrough devices are not
+	// representable in that publish path yet either.
+	if Enabled(VGPUSupport) && Enabled(DynamicMIG) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, DynamicMIG)
+	}
+
+	if Enabled(VGPUSupport) && Enabled(PassthroughSupport) {
+		return fmt.Errorf("feature gate %s is currently mutually exclusive with %s", VGPUSupport, PassthroughSupport)
 	}
 
 	return nil
