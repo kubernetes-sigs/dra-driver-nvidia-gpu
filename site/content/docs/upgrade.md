@@ -47,15 +47,26 @@ Confirm that every driver pod reports `Running` and `Ready`, and that the expect
 
 For the full release summary, see the [v0.5.0 release notes](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/releases/tag/v0.5.0).
 
-Use the release name and namespace from your existing installation in both commands.
+Use the release name and namespace from your existing installation in these Helm commands.
 If you already manage your Helm values in a file, substitute its path for `values-v0.4.1.yaml` in the upgrade command.
-Otherwise, export the user-supplied values from the existing release:
+Make sure the file includes all overrides from the deployed release, including values passed with `--set`.
+
+If you need to export the values from Helm, use `helm history` to find the deployed revision.
+
+```bash
+helm history nvidia-dra-driver-gpu --namespace nvidia-dra-driver-gpu
+```
+
+Replace `DEPLOYED_REVISION` with the revision whose status is `deployed` to export its user-supplied values even if a newer upgrade failed.
 
 ```bash
 helm get values nvidia-dra-driver-gpu \
     --namespace nvidia-dra-driver-gpu \
+    --revision DEPLOYED_REVISION \
     --output yaml > values-v0.4.1.yaml
 ```
+
+Confirm that the export succeeds before continuing.
 
 Keep any existing `nameOverride` in the values file to preserve resource names.
 Pass the file with `-f` so Helm uses the v0.5.0 chart defaults together with your overrides:
