@@ -333,11 +333,11 @@ func TestActivateDeactivate(t *testing.T) {
 	}
 	defer m.Close()
 
-	if err := m.ActivatePartition(2); err != nil {
+	if err := m.ActivatePartition(2, nil); err != nil {
 		t.Fatalf("ActivatePartition(2): %v", err)
 	}
-	if err := m.ActivatePartition(8); err != nil {
-		t.Fatalf("ActivatePartition(8): %v", err)
+	if err := m.ActivatePartition(3, nil); err != nil {
+		t.Fatalf("ActivatePartition(3): %v", err)
 	}
 
 	assertActivated := func(id int, want bool) {
@@ -352,13 +352,13 @@ func TestActivateDeactivate(t *testing.T) {
 	}
 
 	assertActivated(2, true)
-	assertActivated(8, true)
+	assertActivated(3, true)
 	assertActivated(1, false)
-	if !reflect.DeepEqual(client.activated, []int{2, 8}) {
-		t.Errorf("client.activated = %v, want [2 8]", client.activated)
+	if !reflect.DeepEqual(client.activated, []int{2, 3}) {
+		t.Errorf("client.activated = %v, want [2 3]", client.activated)
 	}
 
-	if err := m.ActivatePartition(999); err == nil {
+	if err := m.ActivatePartition(999, nil); err == nil {
 		t.Errorf("expected error activating unknown partition")
 	}
 
@@ -366,7 +366,7 @@ func TestActivateDeactivate(t *testing.T) {
 		t.Fatalf("DeactivatePartition(2): %v", err)
 	}
 	assertActivated(2, false)
-	assertActivated(8, true)
+	assertActivated(3, true)
 }
 
 // TestActivatedResolvedFromFM verifies isPartitionActivated reflects whatever
@@ -423,7 +423,7 @@ func TestActivatePartitionFMError(t *testing.T) {
 	}
 	defer m.Close()
 
-	if err := m.ActivatePartition(2); err == nil {
+	if err := m.ActivatePartition(2, nil); err == nil {
 		t.Errorf("expected activation error, got nil")
 	}
 	if active, err := m.isPartitionActivated(2); err != nil || active {
@@ -447,5 +447,62 @@ func TestStubClient(t *testing.T) {
 	}
 	if err := c.Shutdown(); err != nil {
 		t.Errorf("stub Shutdown: %v", err)
+	}
+}
+
+func TestActivatePartitionPreparation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		activeID   int
+		unknown    bool
+		missing    bool
+		listErr    error
+		prepareErr error
+		fmErr      error
+		wantCalls  []string
+		wantError  bool
+	}{
+		{name: "ordered preparation", wantCalls: []string{"list", "prepare", "activate"}},
+		{name: "active partition", activeID: 2, wantCalls: []string{"list"}},
+		{name: "disjoint active partition", activeID: 3, wantCalls: []string{"list", "prepare", "activate"}},
+		{name: "overlapping partition", activeID: 8, wantCalls: []string{"list"}, wantError: true},
+		{name: "unknown partition", unknown: true, wantError: true},
+		{name: "partition disappeared", missing: true, wantCalls: []string{"list"}, wantError: true},
+		{name: "query failure", listErr: errors.New("query failed"), wantCalls: []string{"list"}, wantError: true},
+		{name: "preparation failure", prepareErr: errors.New("prepare failed"), wantCalls: []string{"list", "prepare"}, wantError: true},
+		{name: "activation failure", fmErr: errors.New("activation failed"), wantCalls: []string{"list", "prepare", "activate"}, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &fakeClient{partitions: designDocPartitions()}
+			m, err := Open(client)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			client.setActive(tc.activeID, true)
+			if tc.missing {
+				client.partitions = nil
+			}
+			client.listErr = tc.listErr
+			client.activateErr = tc.fmErr
+			client.calls = nil
+			id := 2
+			if tc.unknown {
+				id = 999
+			}
+			err = m.ActivatePartition(id, func() error {
+				client.calls = append(client.calls, "prepare")
+				return tc.prepareErr
+			})
+			if (err != nil) != tc.wantError {
+				t.Fatalf("ActivatePartition error = %v, want error %t", err, tc.wantError)
+			}
+			if !reflect.DeepEqual(client.calls, tc.wantCalls) {
+				t.Fatalf("calls = %v, want %v", client.calls, tc.wantCalls)
+			}
+			if tc.prepareErr != nil && !errors.Is(err, tc.prepareErr) {
+				t.Fatalf("preparation error not preserved: %v", err)
+			}
+		})
 	}
 }
