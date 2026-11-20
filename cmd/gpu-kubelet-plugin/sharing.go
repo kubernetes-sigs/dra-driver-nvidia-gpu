@@ -55,6 +55,8 @@ const (
 	MpsControlDaemonTemplatePath = "/templates/mps-control-daemon.tmpl.yaml"
 	MpsControlDaemonNameFmt      = "mps-control-daemon-%v" // Fill with ClaimUID
 	MpsDefaultShmMountPath       = "/dev/shm"
+	MpsDefaultPipeMountPath      = "/tmp/nvidia-mps"
+	MpsDefaultLogMountPath       = "/var/log/nvidia-mps"
 
 	// driverRootMountDir is the directory where the driver root is mounted inside the kubelet plugin container.
 	driverRootMountDir = "/driver-root"
@@ -119,6 +121,8 @@ type MpsControlDaemonTemplateData struct {
 	ServiceAccountName              string
 	FeatureGates                    map[string]bool
 	MpsShmMountPath                 string
+	MpsPipeMountPath                string
+	MpsLogMountPath                 string
 }
 
 // setMpsShmMountPath returns the container path at which the MPS shm should be mounted in the MPS control daemon pod.
@@ -130,6 +134,17 @@ func setMpsShmMountPath(checker fileChecker) string {
 		return chrootShmPath
 	}
 	return MpsDefaultShmMountPath
+}
+
+// setMpsPipeAndLogMountPaths returns the container paths at which the MPS pipe and log directories
+// should be mounted in the MPS control daemon pod. With a chroot they must be inside the driver root.
+// Otherwise they are mounted outside of it: the driver root may be read-only and lack tmp/ and var/
+// (e.g. Talos Linux, where the driver root is /usr/local), so runc could not create the mountpoints.
+func setMpsPipeAndLogMountPaths(checker fileChecker) (string, string) {
+	if checker.Stat(filepath.Join(driverRootMountDir, "dev", "shm")) == nil {
+		return filepath.Join(driverRootMountDir, MpsDefaultPipeMountPath), filepath.Join(driverRootMountDir, MpsDefaultLogMountPath)
+	}
+	return MpsDefaultPipeMountPath, MpsDefaultLogMountPath
 }
 
 func NewTimeSlicingManager(deviceLib *deviceLib) *TimeSlicingManager {
@@ -251,6 +266,7 @@ func (m *MpsControlDaemon) Start(ctx context.Context, config *configapi.MpsConfi
 		FeatureGates:                    featuregates.ToMap(),
 		MpsShmMountPath:                 setMpsShmMountPath(osFileChecker{}),
 	}
+	templateData.MpsPipeMountPath, templateData.MpsLogMountPath = setMpsPipeAndLogMountPaths(osFileChecker{})
 
 	if config != nil && config.DefaultActiveThreadPercentage != nil {
 		templateData.DefaultActiveThreadPercentage = fmt.Sprintf("%d", *config.DefaultActiveThreadPercentage)
