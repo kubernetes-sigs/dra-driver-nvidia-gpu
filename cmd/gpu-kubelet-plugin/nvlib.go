@@ -1552,10 +1552,16 @@ func setMax(m map[resourceapi.QualifiedName]resourceapi.DeviceCapacity, k resour
 //
 // Note: we `chroot` into the device root to properly run nvidia-smi.
 func (l deviceLib) disableGPUPersistenceMode(pciAddress string) error {
+	return l.disableGPUPersistenceModeInRoot(pciAddress, l.devRoot, "nvidia-smi")
+}
+
+// disableGPUPersistenceModeInRoot runs `nvidia-smi -pm 0` chrooted into
+// chrootDir; see disableGPUPersistenceMode.
+func (l deviceLib) disableGPUPersistenceModeInRoot(pciAddress, chrootDir, nvidiaSMI string) error {
 	cmd := exec.Command(
 		"chroot",
-		l.devRoot,
-		"nvidia-smi",
+		chrootDir,
+		nvidiaSMI,
 		"-i",
 		pciAddress,
 		"-pm",
