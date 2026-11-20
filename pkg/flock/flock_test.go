@@ -141,15 +141,21 @@ func TestAcquireOpenError(t *testing.T) {
 	}
 }
 
-// Documents current behavior: the lock is attempted before the context is
-// checked, so a free lock is acquired even if the context is already done.
+// Acquire must not take a free lock if the context is already done.
 func TestAcquireFreeLockWithCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	release, err := NewFlock(lockPath(t)).Acquire(ctx)
-	if err != nil {
-		t.Fatalf("Acquire() on free lock with canceled context failed: %v", err)
+	path := lockPath(t)
+	release, err := NewFlock(path).Acquire(ctx)
+	if err == nil {
+		release()
+		t.Fatal("Acquire() with canceled context succeeded, want error")
 	}
-	release()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Acquire() error = %v, want it to wrap context.Canceled", err)
+	}
+
+	// The failed attempt must not leave the lock held.
+	mustAcquire(t, path)()
 }
