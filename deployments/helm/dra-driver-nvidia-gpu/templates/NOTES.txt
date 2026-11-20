@@ -1,0 +1,13 @@
+{{- $imex := .Values.resources.computeDomains.imex | default dict }}
+{{- $mode := dig "mode" "" $imex | default "" | toString }}
+{{- $isolation := dig "isolation" "" $imex | default "" | toString }}
+{{- if $mode }}
+WARNING: resources.computeDomains.imex.mode is deprecated. Use
+resources.computeDomains.imex.daemonLifecycle instead. imex.mode={{ $mode }}
+resolves to imex.daemonLifecycle={{ include "dra-driver-nvidia-gpu.imexDaemonLifecycle" . }}.
+{{- end }}
+{{- if $isolation }}
+WARNING: resources.computeDomains.imex.isolation is deprecated and ignored.
+IMEX channels follow featureGates.ComputeDomainChannelReservations and the
+ComputeDomain spec.
+{{- end }}
