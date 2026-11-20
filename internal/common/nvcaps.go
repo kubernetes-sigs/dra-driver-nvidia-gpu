@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,10 +39,19 @@ var (
 	usingAltProcDevices bool
 )
 
+// procDriverPath is the /proc/driver directory that NVIDIA capability files are
+// read from, set at init time from the ALT_PROC_DRIVER_PATH env var. Mock NVML
+// nodes have no kernel module serving /proc/driver/nvidia, and runc refuses
+// mounts targeting /proc, so the capability tree is staged somewhere else.
+var procDriverPath = "/proc/driver"
+
 func init() {
 	if v := os.Getenv("ALT_PROC_DEVICES_PATH"); v != "" {
 		procDevicesPath = v
 		usingAltProcDevices = true
+	}
+	if v := os.Getenv("ALT_PROC_DRIVER_PATH"); v != "" {
+		procDriverPath = v
 	}
 }
 
@@ -71,6 +81,30 @@ func ResetProcDevicesPath() {
 	if v := os.Getenv("ALT_PROC_DEVICES_PATH"); v != "" {
 		procDevicesPath = v
 		usingAltProcDevices = true
+	}
+}
+
+// MigCapsPaths returns the GI and CI access capability files of a MIG device,
+// under /proc/driver/nvidia/capabilities unless ALT_PROC_DRIVER_PATH overrides
+// /proc/driver.
+func MigCapsPaths(parentMinor, giID, ciID int) (giPath, ciPath string) {
+	giDir := filepath.Join(procDriverPath, "nvidia", "capabilities",
+		fmt.Sprintf("gpu%d", parentMinor), "mig", fmt.Sprintf("gi%d", giID))
+	return filepath.Join(giDir, "access"), filepath.Join(giDir, fmt.Sprintf("ci%d", ciID), "access")
+}
+
+// ConfigureProcDriverPath overrides the /proc/driver path at runtime.
+// Use in tests to set different paths without relying on environment variables.
+func ConfigureProcDriverPath(path string) {
+	procDriverPath = path
+}
+
+// ResetProcDriverPath restores the default /proc/driver path.
+// Use in test cleanup to avoid leaking state between tests.
+func ResetProcDriverPath() {
+	procDriverPath = "/proc/driver"
+	if v := os.Getenv("ALT_PROC_DRIVER_PATH"); v != "" {
+		procDriverPath = v
 	}
 }
 

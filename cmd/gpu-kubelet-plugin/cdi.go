@@ -47,7 +47,6 @@ const (
 	cdiVendor      = "k8s." + DriverName
 	cdiClaimClass  = "claim"
 	defaultCDIRoot = "/var/run/cdi"
-	procNvCapsPath = "/proc/driver/nvidia/capabilities"
 )
 
 var nvidiaGPUDeviceNodePattern = regexp.MustCompile(`^/dev/nvidia(0|[1-9]\d?)$`)
@@ -460,8 +459,7 @@ func (cdi *CDIHandler) GetClaimDeviceName(claimUID string, device *AllocatableDe
 // the host. That is what is achieved below with the structure created in
 // cdiDevNodeFromNVCapDevInfo().
 func (cdi *CDIHandler) GetDevNodesForMigDevice(mlt *MigLiveTuple) ([]*cdispec.DeviceNode, error) {
-	gipath := fmt.Sprintf("%s/gpu%d/mig/gi%d/access", procNvCapsPath, mlt.ParentMinor, mlt.GIID)
-	cipath := fmt.Sprintf("%s/gpu%d/mig/gi%d/ci%d/access", procNvCapsPath, mlt.ParentMinor, mlt.GIID, mlt.CIID)
+	gipath, cipath := common.MigCapsPaths(mlt.ParentMinor, mlt.GIID, mlt.CIID)
 
 	giCapsInfo, err := common.ParseNVCapDeviceInfo(gipath)
 	if err != nil {
