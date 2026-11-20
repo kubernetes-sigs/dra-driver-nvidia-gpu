@@ -17,6 +17,8 @@ limitations under the License.
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -24,8 +26,11 @@ import (
 	nvcdspec "github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi/spec"
 	resourceapi "k8s.io/api/resource/v1"
 	utilcache "k8s.io/apimachinery/pkg/util/cache"
+	"k8s.io/utils/ptr"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
+
+	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/common"
 )
 
 type fakeNVCDI struct {
@@ -363,4 +368,32 @@ func TestInvalidateDeviceSpec(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "/dev/nvidia1", specs[0].ContainerEdits.DeviceNodes[0].Path)
 	require.Equal(t, 2, fake.deviceSpecCalls)
+}
+
+// Regression test: on a mock NVML node the MIG capability tree is staged away
+// from /proc, and preparing a MIG device must read it from ALT_PROC_DRIVER_PATH.
+func TestGetDevNodesForMigDeviceReadsAltProcDriverPath(t *testing.T) {
+	procDevices := filepath.Join(t.TempDir(), "proc-devices")
+	require.NoError(t, os.WriteFile(procDevices,
+		[]byte("Character devices:\n195 nvidia-frontend\n236 nvidia-caps\n\nBlock devices:\n  8 sd\n"), 0o644))
+	common.ConfigureProcDevicesPath(procDevices)
+	t.Cleanup(common.ResetProcDevicesPath)
+
+	procDriver := filepath.Join(t.TempDir(), "proc", "driver")
+	giDir := filepath.Join(procDriver, "nvidia/capabilities/gpu2/mig/gi5")
+	require.NoError(t, os.MkdirAll(filepath.Join(giDir, "ci0"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(giDir, "access"),
+		[]byte("DeviceFileMinor: 35\nDeviceFileMode: 292\nDeviceFileModify: 1\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(giDir, "ci0", "access"),
+		[]byte("DeviceFileMinor: 36\nDeviceFileMode: 292\nDeviceFileModify: 1\n"), 0o644))
+	common.ConfigureProcDriverPath(procDriver)
+	t.Cleanup(common.ResetProcDriverPath)
+
+	handler := &CDIHandler{}
+	nodes, err := handler.GetDevNodesForMigDevice(&MigLiveTuple{ParentMinor: 2, GIID: 5, CIID: 0})
+	require.NoError(t, err)
+	require.Equal(t, []*cdispec.DeviceNode{
+		{Path: "/dev/nvidia-caps/nvidia-cap35", Type: "c", FileMode: ptr.To(os.FileMode(292)), Major: 236, Minor: 35},
+		{Path: "/dev/nvidia-caps/nvidia-cap36", Type: "c", FileMode: ptr.To(os.FileMode(292)), Major: 236, Minor: 36},
+	}, nodes)
 }
