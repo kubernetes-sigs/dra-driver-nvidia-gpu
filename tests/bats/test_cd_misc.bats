@@ -152,12 +152,11 @@ bats::on_failure() {
 
   # Stage 1: provoke partially prepared claim.
   #
-  # Based on the "catch unknown field in opaque cfg in ResourceClaim" test
-  # above: Provoke a permanent Prepare() error, leaving behind a partially
-  # prepared claim in the checkpoint.
-  envsubst < tests/bats/specs/rc-opaque-cfg-unknown-field.yaml.tmpl > \
-    "${BATS_TEST_TMPDIR}"/rc-opaque-cfg-unknown-field.yaml
-  local SPEC="${BATS_TEST_TMPDIR}/rc-opaque-cfg-unknown-field.yaml"
+  # A valid config for a ComputeDomain that does not exist passes the
+  # preflight, is checkpointed, and then fails permanently.
+  envsubst < tests/bats/specs/rc-missing-cd.yaml.tmpl > \
+    "${BATS_TEST_TMPDIR}"/rc-missing-cd.yaml
+  local SPEC="${BATS_TEST_TMPDIR}/rc-missing-cd.yaml"
   local POD
   POD=$(kubectl create -f "${SPEC}" | grep pod | awk '{print $1;}')
   kubectl wait \
@@ -169,7 +168,7 @@ bats::on_failure() {
     -l dra-driver-nvidia-gpu-component=kubelet-plugin \
     -n dra-driver-nvidia-gpu \
     --prefix --tail=-1
-  assert_output --partial 'strict decoding error: unknown field "unexpectedField"'
+  assert_output --partial 'ComputeDomain not found: does-not-exist'
 
   # Stage 2: test that cleanup routine leaves this claim alone ('not stale')
   #
@@ -183,7 +182,7 @@ bats::on_failure() {
     -l dra-driver-nvidia-gpu-component=kubelet-plugin \
     -n dra-driver-nvidia-gpu \
     --prefix --tail=-1
-  assert_output --partial "partially prepared claim not stale: default/batssuite-rc-bad-opaque-config"
+  assert_output --partial "partially prepared claim not stale: default/batssuite-rc-missing-cd"
 
   # Stage 3: simulate stale claim, test cleanup.
   #
@@ -191,7 +190,7 @@ bats::on_failure() {
   # Then, re-install DRA driver and confirm detection and removal of stale claim.
   helm uninstall -n dra-driver-nvidia-gpu dra-driver-nvidia-gpu-batssuite --wait
   kubectl delete "${POD}" --force
-  kubectl delete resourceclaim batssuite-rc-bad-opaque-config
+  kubectl delete resourceclaim batssuite-rc-missing-cd
   local _iargs=("--set" "logVerbosity=6")
   iupgrade_wait "${TEST_CHART_REPO}" "${TEST_CHART_VERSION}" _iargs
   sleep 1  # give the on-startup cleanup a chance to run.
@@ -200,8 +199,8 @@ bats::on_failure() {
     -l dra-driver-nvidia-gpu-component=kubelet-plugin \
     -n dra-driver-nvidia-gpu \
     --prefix --tail=-1
-  assert_output --partial "Marked claim PrepareAborted in checkpoint: default/batssuite-rc-bad-opaque-config"
-  assert_output --partial "Checkpointed RC cleanup: unprepared stale claim: default/batssuite-rc-bad-opaque-config"
+  assert_output --partial "Marked claim PrepareAborted in checkpoint: default/batssuite-rc-missing-cd"
+  assert_output --partial "Checkpointed RC cleanup: unprepared stale claim: default/batssuite-rc-missing-cd"
 
   # Stage 4: appendix -- happens shortly thereafter: we do get a
   # UnprepareResourceClaims() call for this claim. Why? It's a noop because

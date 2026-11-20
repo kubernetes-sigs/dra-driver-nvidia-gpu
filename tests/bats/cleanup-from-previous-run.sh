@@ -73,6 +73,7 @@ timeout -v 10 kubectl delete resourceclaimtemplates --all --namespace=batssuite
 timeout -v 10 kubectl delete resourceclaim --all --namespace=default
 timeout -v 10 kubectl delete resourceclaim --all --namespace=batssuite
 timeout -v 2 kubectl delete resourceclaim batssuite-rc-bad-opaque-config --force 2> /dev/null
+timeout -v 2 kubectl delete resourceclaim batssuite-rc-missing-cd --force 2> /dev/null
 
 kubectl wait --for=delete pods -l 'env=batssuite,test=stress-shared' \
     --timeout=60s \
