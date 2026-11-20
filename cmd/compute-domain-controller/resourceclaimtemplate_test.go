@@ -65,7 +65,7 @@ func TestChannelAllocationModeFor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, channelAllocationModeFor(tt.cd, tt.hostManaged))
+			require.Equal(t, tt.want, channelAllocationModeFor(tt.cd.Spec.GetChannels()[0], tt.hostManaged))
 		})
 	}
 }

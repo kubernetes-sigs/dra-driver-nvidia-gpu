@@ -217,7 +217,7 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 		// Apply any edits passed back as part of the device config state to all devices
 		for _, device := range group.Devices {
 			deviceSpec := cdispec.Device{
-				Name:           fmt.Sprintf("%s-%s", claimUID, device.CanonicalName()),
+				Name:           claimDeviceName(claimUID, device.DeviceName()),
 				ContainerEdits: *group.ConfigState.containerEdits.ContainerEdits,
 			}
 
@@ -278,5 +278,11 @@ func (cdi *CDIHandler) GetClaimDevice(claimUID string, device *AllocatableDevice
 	if containerEdits == nil {
 		return ""
 	}
-	return cdiparser.QualifiedName(cdi.vendor, cdi.claimClass, fmt.Sprintf("%s-%s", claimUID, device.CanonicalName()))
+	return cdiparser.QualifiedName(cdi.vendor, cdi.claimClass, claimDeviceName(claimUID, device.CanonicalName()))
+}
+
+// claimDeviceName names the CDI device of an allocated device in a claim
+// spec. Both the spec and the CDI device IDs handed to the kubelet use it.
+func claimDeviceName(claimUID, deviceName string) string {
+	return fmt.Sprintf("%s-%s", claimUID, deviceName)
 }

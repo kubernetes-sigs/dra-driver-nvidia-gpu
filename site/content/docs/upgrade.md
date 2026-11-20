@@ -63,7 +63,8 @@ If you already used `nameOverride` or upgraded the release to v0.4.0 or later, y
 The per-claim MPS daemon inherits the existing `image.pullPolicy` and `imagePullSecrets` values, so existing MPS installations do not require an image configuration change.
 
 {{% alert color="warning" title="Warning" %}}
-If you change `resources.computeDomains.imex.mode` or `.isolation` as part of this upgrade, first drain ComputeDomain workloads and delete existing ComputeDomain resources.
+If you change `resources.computeDomains.imex.daemonLifecycle` as part of this upgrade, first drain ComputeDomain workloads and delete existing ComputeDomain resources.
+The `imex.mode` and `imex.isolation` values of v0.5 are deprecated but keep working: `imex.mode=hostManaged` selects `imex.daemonLifecycle=hostManaged`, and `imex.isolation` is ignored. Helm prints a warning for each.
 The DRA Driver does not enforce a safe transition while ComputeDomain workloads are active.
 {{% /alert %}}
 
