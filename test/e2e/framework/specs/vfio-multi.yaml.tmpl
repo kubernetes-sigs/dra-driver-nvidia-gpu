@@ -31,6 +31,16 @@ spec:
       labels:
         app: vfio-test
     spec:
+{{- if index . "NodeName" }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchFields:
+              - key: metadata.name
+                operator: In
+                values: [{{ .NodeName | printf "%q" }}]
+{{- end }}
       containers:
       - name: ctr
         image: ubuntu:22.04

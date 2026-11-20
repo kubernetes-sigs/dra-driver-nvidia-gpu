@@ -26,12 +26,12 @@ import (
 
 func TestEnsureCapability(t *testing.T) {
 	mockGpus := map[string]*GpuInfo{
-		"3fee046f-55d0-4b6a-ac23-b80f6af87123": {cudaComputeCapability: "10.0"},
-		"025f9375-cd42-40ec-aa2f-7719143654c5": {cudaComputeCapability: "8.5"},
-		"04d8ce42-b7f6-4bd8-9eb8-7bc8d2af4111": {cudaComputeCapability: "7.0"},
-		"4af11389-15b5-4fcd-9524-97d4a13ed838": {cudaComputeCapability: "6.2"},
-		"ffcb7875-4980-4c6b-8bac-55f8278e0ea6": {cudaComputeCapability: "0.0"},
-		"43ce870d-cc46-41ba-b818-8211db9f95b8": {cudaComputeCapability: ""},
+		"3fee046f-55d0-4b6a-ac23-b80f6af87123": {CudaComputeCapability: "10.0"},
+		"025f9375-cd42-40ec-aa2f-7719143654c5": {CudaComputeCapability: "8.5"},
+		"04d8ce42-b7f6-4bd8-9eb8-7bc8d2af4111": {CudaComputeCapability: "7.0"},
+		"4af11389-15b5-4fcd-9524-97d4a13ed838": {CudaComputeCapability: "6.2"},
+		"ffcb7875-4980-4c6b-8bac-55f8278e0ea6": {CudaComputeCapability: "0.0"},
+		"43ce870d-cc46-41ba-b818-8211db9f95b8": {CudaComputeCapability: ""},
 	}
 
 	tests := map[string]struct {
@@ -58,7 +58,7 @@ func TestEnsureCapability(t *testing.T) {
 			expectErr: true,
 			expectedError: fmt.Sprintf(
 				"4af11389-15b5-4fcd-9524-97d4a13ed838 has insufficient cudaComputeCapability %q, wanted >= %q",
-				mockGpus["4af11389-15b5-4fcd-9524-97d4a13ed838"].cudaComputeCapability,
+				mockGpus["4af11389-15b5-4fcd-9524-97d4a13ed838"].CudaComputeCapability,
 				voltaCudaComputeCapability,
 			),
 		},
@@ -74,10 +74,10 @@ func TestEnsureCapability(t *testing.T) {
 			expectErr: true,
 			expectedError: fmt.Sprintf(
 				"ffcb7875-4980-4c6b-8bac-55f8278e0ea6 has insufficient cudaComputeCapability %q, wanted >= %q\n%s has insufficient cudaComputeCapability %q, wanted >= %q",
-				mockGpus["ffcb7875-4980-4c6b-8bac-55f8278e0ea6"].cudaComputeCapability,
+				mockGpus["ffcb7875-4980-4c6b-8bac-55f8278e0ea6"].CudaComputeCapability,
 				voltaCudaComputeCapability,
 				"4af11389-15b5-4fcd-9524-97d4a13ed838",
-				mockGpus["4af11389-15b5-4fcd-9524-97d4a13ed838"].cudaComputeCapability,
+				mockGpus["4af11389-15b5-4fcd-9524-97d4a13ed838"].CudaComputeCapability,
 				voltaCudaComputeCapability,
 			),
 		},
@@ -92,7 +92,7 @@ func TestEnsureCapability(t *testing.T) {
 			expectErr: true,
 			expectedError: fmt.Sprintf(
 				"gpu 43ce870d-cc46-41ba-b818-8211db9f95b8 has invalid cudaComputeCapability %q: %s",
-				mockGpus["43ce870d-cc46-41ba-b818-8211db9f95b8"].cudaComputeCapability,
+				mockGpus["43ce870d-cc46-41ba-b818-8211db9f95b8"].CudaComputeCapability,
 				semver.ErrInvalidSemVer.Error(),
 			),
 		},

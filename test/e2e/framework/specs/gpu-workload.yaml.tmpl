@@ -19,6 +19,16 @@ metadata:
   labels:
     app: gpu-workload
 spec:
+{{- if index . "NodeName" }}
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchFields:
+          - key: metadata.name
+            operator: In
+            values: [{{ .NodeName | printf "%q" }}]
+{{- end }}
   containers:
   - name: ctr
     image: nvcr.io/nvidia/cuda:12.2.0-base-ubuntu22.04

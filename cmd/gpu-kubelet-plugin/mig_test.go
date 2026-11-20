@@ -34,19 +34,19 @@ func TestMigSpecTupleToCanonicalName(t *testing.T) {
 		want        DeviceName
 	}{
 		"dots stripped from profile name": {
-			tuple:       MigSpecTuple{ParentMinor: 0, ProfileID: 19, PlacementStart: 0},
+			tuple:       MigSpecTuple{ParentIndex: 0, ParentMinor: 0, ProfileID: 19, PlacementStart: 0},
 			profileName: "1g.5gb",
 			want:        "gpu-0-mig-1g5gb-19-0",
 		},
 		"uppercase folded to lowercase": {
-			tuple:       MigSpecTuple{ParentMinor: 1, ProfileID: 14, PlacementStart: 2},
+			tuple:       MigSpecTuple{ParentIndex: 1, ParentMinor: 1, ProfileID: 14, PlacementStart: 2},
 			profileName: "2G.10GB",
 			want:        "gpu-1-mig-2g10gb-14-2",
 		},
 		// '+' is not RFC1123-legal and becomes '-', so a profile-name segment can
 		// itself contain a hyphen -- the parse test covers recovery from this.
 		"plus becomes hyphen": {
-			tuple:       MigSpecTuple{ParentMinor: 3, ProfileID: 19, PlacementStart: 4},
+			tuple:       MigSpecTuple{ParentIndex: 3, ParentMinor: 3, ProfileID: 19, PlacementStart: 4},
 			profileName: "1g.5gb+me",
 			want:        "gpu-3-mig-1g5gb-me-19-4",
 		},
@@ -66,13 +66,13 @@ func TestNewMigSpecTupleFromCanonicalName(t *testing.T) {
 	}{
 		"valid name": {
 			name: "gpu-0-mig-1g5gb-19-0",
-			want: &MigSpecTuple{ParentMinor: 0, ProfileID: 19, PlacementStart: 0},
+			want: &MigSpecTuple{ParentIndex: 0, ProfileID: 19, PlacementStart: 0},
 		},
 		// The profile-name group is greedy; trailing -<id>-<start> must still be
 		// recovered when the profile name itself contains a hyphen.
 		"profile name containing a hyphen": {
 			name: "gpu-3-mig-1g5gb-me-19-4",
-			want: &MigSpecTuple{ParentMinor: 3, ProfileID: 19, PlacementStart: 4},
+			want: &MigSpecTuple{ParentIndex: 3, ProfileID: 19, PlacementStart: 4},
 		},
 		"missing placement group":  {name: "gpu-0-mig-1g5gb-19"},
 		"not a mig device name":    {name: "gpu-0-gpu-0"},
@@ -95,7 +95,7 @@ func TestNewMigSpecTupleFromCanonicalName(t *testing.T) {
 	// deliberately not part of the parsed tuple (device_state.go relies on this
 	// to classify device names).
 	t.Run("round trip recovers numeric dimensions", func(t *testing.T) {
-		in := MigSpecTuple{ParentMinor: 7, ProfileID: 21, PlacementStart: 4}
+		in := MigSpecTuple{ParentIndex: 7, ProfileID: 21, PlacementStart: 4}
 		got, err := NewMigSpecTupleFromCanonicalName(in.ToCanonicalName("3g.20gb"))
 		require.NoError(t, err)
 		assert.Equal(t, &in, got)

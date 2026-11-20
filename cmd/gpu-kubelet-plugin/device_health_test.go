@@ -40,24 +40,6 @@ func (m *mockNVMLDevice) GetFieldValues(values []nvml.FieldValue) nvml.Return {
 	return m.getFieldValuesFunc(values)
 }
 
-type mockNVMLLibrary struct {
-	nvml.Interface
-	deviceGetHandleByPciBusIdFunc  func(string) (nvml.Device, nvml.Return)
-	deviceGetHandleByPciBusIdCalls int
-	deviceGetHandleByUUIDFunc      func(string) (nvml.Device, nvml.Return)
-	deviceGetHandleByUUIDCalls     int
-}
-
-func (m *mockNVMLLibrary) DeviceGetHandleByPciBusId(busID string) (nvml.Device, nvml.Return) {
-	m.deviceGetHandleByPciBusIdCalls++
-	return m.deviceGetHandleByPciBusIdFunc(busID)
-}
-
-func (m *mockNVMLLibrary) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.Return) {
-	m.deviceGetHandleByUUIDCalls++
-	return m.deviceGetHandleByUUIDFunc(uuid)
-}
-
 // mockHealthMonitor implements deviceHealthMonitor for testing healthEventToTaint.
 type mockHealthMonitor struct {
 	nonFatalXids map[uint64]bool
@@ -199,10 +181,10 @@ func TestAddOrUpdateTaint_TimeAddedResetOnChange(t *testing.T) {
 func TestPartGetDeviceIncludesHealthTaints(t *testing.T) {
 	parent := &GpuInfo{
 		UUID:                  "GPU-parent-1",
-		minor:                 0,
-		cudaComputeCapability: "9.0",
-		driverVersion:         "580.0",
-		cudaDriverVersion:     "13.0",
+		Minor:                 0,
+		CudaComputeCapability: "9.0",
+		DriverVersion:         "580.0",
+		CudaDriverVersion:     "13.0",
 	}
 	dev := &AllocatableDevice{MigDynamic: &MigSpec{
 		Parent:            parent,
@@ -520,13 +502,13 @@ func TestIsEventNonFatal(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			parent := &GpuInfo{UUID: "GPU-parent-1", pciBusID: pciBusID}
+			parent := &GpuInfo{UUID: "GPU-parent-1", PciBusID: pciBusID}
 			affectedDevice := &AllocatableDevice{Gpu: parent}
 			if tc.mig {
 				affectedDevice = &AllocatableDevice{
 					MigStatic: &MigDeviceInfo{
 						ParentUUID: parent.UUID,
-						parent:     parent,
+						Parent:     parent,
 					},
 				}
 			}
@@ -583,14 +565,14 @@ func TestIsEventNonFatal(t *testing.T) {
 }
 
 func TestAllocatableDevicesFindByAddress(t *testing.T) {
-	parent := &GpuInfo{UUID: "GPU-parent-1", minor: 0, pciBusID: "0000:01:00.0"}
+	parent := &GpuInfo{UUID: "GPU-parent-1", Minor: 0, PciBusID: "0000:01:00.0"}
 	fullGPU := &AllocatableDevice{Gpu: parent}
 	staticMIG := &AllocatableDevice{
 		MigStatic: &MigDeviceInfo{
 			ParentUUID: parent.UUID,
 			GIID:       2,
 			CIID:       3,
-			parent:     parent},
+			Parent:     parent},
 	}
 	devices := AllocatableDevices{
 		"gpu":    fullGPU,
@@ -618,7 +600,7 @@ func TestAllocatableDevicesFindByAddress(t *testing.T) {
 }
 
 func TestAllocatableDevicesFindDynamicMIGBySpec(t *testing.T) {
-	parent := &GpuInfo{UUID: "GPU-parent-1", minor: 0, pciBusID: "0000:01:00.0"}
+	parent := &GpuInfo{UUID: "GPU-parent-1", Minor: 0, PciBusID: "0000:01:00.0"}
 	dynamicMIG := &AllocatableDevice{MigDynamic: &MigSpec{
 		Parent:        parent,
 		GIProfileInfo: nvml.GpuInstanceProfileInfo{Id: 19},
@@ -631,9 +613,9 @@ func TestAllocatableDevicesFindDynamicMIGBySpec(t *testing.T) {
 		spec *MigSpecTuple
 		want *AllocatableDevice
 	}{
-		{name: "exact match", spec: &MigSpecTuple{ParentPCIBusID: parent.pciBusID, ProfileID: 19, PlacementStart: 0}, want: dynamicMIG},
-		{name: "profile mismatch", spec: &MigSpecTuple{ParentPCIBusID: parent.pciBusID, ProfileID: 14, PlacementStart: 0}},
-		{name: "placement mismatch", spec: &MigSpecTuple{ParentPCIBusID: parent.pciBusID, ProfileID: 19, PlacementStart: 1}},
+		{name: "exact match", spec: &MigSpecTuple{ParentPCIBusID: parent.PciBusID, ProfileID: 19, PlacementStart: 0}, want: dynamicMIG},
+		{name: "profile mismatch", spec: &MigSpecTuple{ParentPCIBusID: parent.PciBusID, ProfileID: 14, PlacementStart: 0}},
+		{name: "placement mismatch", spec: &MigSpecTuple{ParentPCIBusID: parent.PciBusID, ProfileID: 19, PlacementStart: 1}},
 		{name: "parent mismatch", spec: &MigSpecTuple{ParentPCIBusID: "0000:02:00.0", ProfileID: 19, PlacementStart: 0}},
 		{name: "nil spec"},
 	}
@@ -645,18 +627,18 @@ func TestAllocatableDevicesFindDynamicMIGBySpec(t *testing.T) {
 }
 
 func TestResolveDeviceByEventAddressUsesGPUUUIDIndex(t *testing.T) {
-	parent := &GpuInfo{UUID: "GPU-parent-1", minor: 0, pciBusID: "0000:01:00.0"}
+	parent := &GpuInfo{UUID: "GPU-parent-1", Minor: 0, PciBusID: "0000:01:00.0"}
 	staticMIG := &AllocatableDevice{
 		MigStatic: &MigDeviceInfo{
 			ParentUUID: parent.UUID,
 			GIID:       2,
 			CIID:       3,
-			parent:     parent},
+			Parent:     parent},
 	}
 	monitor := &nvmlDeviceHealthMonitor{
 		perGPUAllocatable: &PerGPUAllocatableDevices{
 			allocatablesMap: map[PCIBusID]AllocatableDevices{
-				parent.pciBusID: {
+				parent.PciBusID: {
 					"static": staticMIG,
 				},
 			},
@@ -680,11 +662,11 @@ func TestResolveDeviceByEventAddressUsesGPUUUIDIndex(t *testing.T) {
 func TestAllocatableDevicesFindRejectsWrongParent(t *testing.T) {
 	parent := &GpuInfo{
 		UUID:     "GPU-parent-1",
-		pciBusID: "0000:01:00.0",
+		PciBusID: "0000:01:00.0",
 	}
 	otherParent := &GpuInfo{
 		UUID:     "GPU-parent-2",
-		pciBusID: parent.pciBusID,
+		PciBusID: parent.PciBusID,
 	}
 
 	devices := AllocatableDevices{
@@ -696,7 +678,7 @@ func TestAllocatableDevicesFindRejectsWrongParent(t *testing.T) {
 				ParentUUID: otherParent.UUID,
 				GIID:       2,
 				CIID:       3,
-				parent:     otherParent,
+				Parent:     otherParent,
 			},
 		},
 	}
@@ -716,10 +698,10 @@ func TestHealthMonitorStartRequiresRegisteredEvents(t *testing.T) {
 func TestGetDeviceIncludesHealthTaints(t *testing.T) {
 	dev := &AllocatableDevice{Gpu: &GpuInfo{
 		UUID:                  "GPU-1",
-		minor:                 0,
-		cudaComputeCapability: "9.0",
-		driverVersion:         "580.0",
-		cudaDriverVersion:     "13.0",
+		Minor:                 0,
+		CudaComputeCapability: "9.0",
+		DriverVersion:         "580.0",
+		CudaDriverVersion:     "13.0",
 	}}
 	taint := &resourceapi.DeviceTaint{
 		Key:    TaintKeyXID,

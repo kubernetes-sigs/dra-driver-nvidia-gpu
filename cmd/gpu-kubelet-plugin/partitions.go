@@ -22,6 +22,8 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/api/validate/constraints"
+
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
 type PartCapacityMap map[resourceapi.QualifiedName]resourceapi.DeviceCapacity
@@ -32,12 +34,12 @@ type PartCapacityMap map[resourceapi.QualifiedName]resourceapi.DeviceCapacity
 // dispatched separately (feature-gate-gated in publishResources()), so
 // without a shared helper they may silently drift.
 func (d *GpuInfo) fullGpuCapacity() PartCapacityMap {
-	if d.memoryBytes == nil {
+	if d.MemoryBytes == nil {
 		return nil
 	}
 	return PartCapacityMap{
 		"memory": resourceapi.DeviceCapacity{
-			Value: *resource.NewQuantity(int64(*d.memoryBytes), resource.BinarySI),
+			Value: *resource.NewQuantity(int64(*d.MemoryBytes), resource.BinarySI),
 		},
 	}
 }
@@ -51,8 +53,8 @@ func (d *GpuInfo) fullGpuCapacity() PartCapacityMap {
 // legacy non-DynamicMIG GetDevice() path so that the full GPU device is
 // announced with quantitative capacity in both paths.
 func (d *GpuInfo) PartCapacities() PartCapacityMap {
-	if len(d.maxCapacities) > 0 {
-		return d.maxCapacities
+	if len(d.MaxCapacities) > 0 {
+		return d.MaxCapacities
 	}
 	return d.fullGpuCapacity()
 }
@@ -73,12 +75,18 @@ func (d *GpuInfo) PartSharedCounterSets() []resourceapi.CounterSet {
 	// no partitions, so a per-GPU CounterSet has no consumers and the
 	// Kubernetes API would reject an empty Counters map.
 	// error: spec.sharedCounters[0].counters: Required value
-	if len(d.maxCapacities) == 0 {
+	// For passthrough support, we still need to publish a counter set for the GPU,
+	// even if we don't have any MIG profile data.
+	if len(d.MaxCapacities) == 0 && !featuregates.Enabled(featuregates.PassthroughSupport) {
 		return nil
+	}
+	counters := addCountersForMemSlices(capacitiesToCounters(d.MaxCapacities), 0, d.MemSliceCount)
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		counters = addCountersForGpuShare(counters, 100)
 	}
 	return []resourceapi.CounterSet{{
 		Name:     d.GetSharedCounterSetName(),
-		Counters: addCountersForMemSlices(capacitiesToCounters(d.maxCapacities), 0, d.memSliceCount),
+		Counters: counters,
 	}}
 }
 
@@ -89,12 +97,17 @@ func (d *GpuInfo) PartSharedCounterSets() []resourceapi.CounterSet {
 func (d *GpuInfo) PartConsumesCounters() []resourceapi.DeviceCounterConsumption {
 	// Returns nil when no MIG profile data has been collected for this GPU
 	// (matches PartSharedCounterSets — there is no CounterSet to consume from).
-	if len(d.maxCapacities) == 0 {
+	// For passthrough support, the GPU needs to consume from its own counter set.
+	if len(d.MaxCapacities) == 0 && !featuregates.Enabled(featuregates.PassthroughSupport) {
 		return nil
+	}
+	counters := addCountersForMemSlices(capacitiesToCounters(d.MaxCapacities), 0, d.MemSliceCount)
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		counters = addCountersForGpuShare(counters, 100)
 	}
 	return []resourceapi.DeviceCounterConsumption{{
 		CounterSet: d.GetSharedCounterSetName(),
-		Counters:   addCountersForMemSlices(capacitiesToCounters(d.maxCapacities), 0, d.memSliceCount),
+		Counters:   counters,
 	}}
 }
 
@@ -109,8 +122,8 @@ func (d *GpuInfo) PartGetDevice() resourceapi.Device {
 
 	// Not available in all environments, enrich advertised device only
 	// conditionally.
-	if d.pcieRootAttr != nil {
-		dev.Attributes[d.pcieRootAttr.Name] = d.pcieRootAttr.Value
+	if d.PcieRootAttr != nil {
+		dev.Attributes[d.PcieRootAttr.Name] = d.PcieRootAttr.Value
 	}
 
 	return dev
@@ -124,6 +137,13 @@ func (i *MigSpec) PartGetDevice() resourceapi.Device {
 		Capacity:         i.Capacities(),
 		ConsumesCounters: i.PartConsumesCounters(),
 	}
+
+	// Not available in all environments, enrich advertised device only
+	// conditionally.
+	if i.Parent.PcieRootAttr != nil {
+		d.Attributes[i.Parent.PcieRootAttr.Name] = i.Parent.PcieRootAttr.Value
+	}
+
 	return d
 }
 
@@ -209,10 +229,70 @@ func capacitiesToCounters(m PartCapacityMap) map[string]resourceapi.Counter {
 // its name has the form 'gpu-%d-counter-set' where the placeholder is the GPU
 // minor.
 func (i MigSpec) PartConsumesCounters() []resourceapi.DeviceCounterConsumption {
+	counters := addCountersForMemSlices(capacitiesToCounters(i.Capacities()), int(i.Placement.Start), int(i.Placement.Size))
+	if featuregates.Enabled(featuregates.PassthroughSupport) {
+		memory := i.Capacities()["memory"].Value
+		totalMemory := i.Parent.PartCapacities()["memory"].Value
+		counters = addCountersForGpuShare(counters, calculateGpuShare(memory.Value(), totalMemory.Value()))
+	}
 	return []resourceapi.DeviceCounterConsumption{{
 		CounterSet: i.Parent.GetSharedCounterSetName(),
-		Counters:   addCountersForMemSlices(capacitiesToCounters(i.Capacities()), int(i.Placement.Start), int(i.Placement.Size)),
+		Counters:   counters,
 	}}
+}
+
+func (v *VfioDeviceInfo) PartCapacities() PartCapacityMap {
+	return v.Capacities()
+}
+
+func (v *VfioDeviceInfo) PartConsumesCounters() []resourceapi.DeviceCounterConsumption {
+	counters := make(map[string]resourceapi.Counter)
+	counterSetName := v.GetSharedCounterSetName()
+	if v.Parent != nil {
+		counterSetName = v.Parent.GetSharedCounterSetName()
+	}
+	return []resourceapi.DeviceCounterConsumption{{
+		CounterSet: counterSetName,
+		Counters:   addCountersForGpuShare(counters, 100),
+	}}
+}
+
+func (v *VfioDeviceInfo) GetSharedCounterSetName() string {
+	if v.Parent != nil {
+		return v.Parent.GetSharedCounterSetName()
+	}
+	// Adapted from expected parent GPU canonical name.
+	return toRFC1123Compliant(fmt.Sprintf("gpu-%d-counter-set", v.Index))
+}
+
+func (v *VfioDeviceInfo) PartSharedCounterSets() []resourceapi.CounterSet {
+	// We expect this to be called only when the GPU is in passthrough mode
+	// and we don't have its parent GPU snapshot. In case we reach here, then
+	// its a mistake and dont publish any counter sets.
+	if v.Parent != nil {
+		return nil
+	}
+	counters := make(map[string]resourceapi.Counter)
+	counters = addCountersForGpuShare(counters, 100)
+	return []resourceapi.CounterSet{{
+		Name:     v.GetSharedCounterSetName(),
+		Counters: counters,
+	}}
+}
+func (v *VfioDeviceInfo) PartGetDevice() resourceapi.Device {
+	dev := resourceapi.Device{
+		Name:             v.CanonicalName(),
+		Attributes:       v.Attributes(),
+		Capacity:         v.PartCapacities(),
+		ConsumesCounters: v.PartConsumesCounters(),
+	}
+
+	// Not available in all environments, enrich advertised device only
+	// conditionally.
+	if v.PcieRootAttr != nil {
+		dev.Attributes[v.PcieRootAttr.Name] = v.PcieRootAttr.Value
+	}
+	return dev
 }
 
 // A variant of the legacy `GetDevice()`, for the Partitionable Devices paradigm.
@@ -228,7 +308,7 @@ func (d *AllocatableDevice) PartGetDevice(config *Config) resourceapi.Device {
 		dev = d.MigDynamic.PartGetDevice()
 		applyConsumableShares(&dev, config)
 	case VfioDeviceType:
-		panic("not yet implemented")
+		dev = d.Vfio.PartGetDevice()
 	default:
 		panic("unexpected type for AllocatableDevice")
 	}
@@ -246,6 +326,15 @@ func addCountersForMemSlices(counters map[string]resourceapi.Counter, start int,
 	return counters
 }
 
+// Add counter for the gpu-share of the device.
+// Full GPU: always at 100%.
+// VFIO: always at 100%.
+// MIG: gpu-share is the percentage of the total memory consumed by the device.
+func addCountersForGpuShare(counters map[string]resourceapi.Counter, gpuShare int64) map[string]resourceapi.Counter {
+	counters["gpu-share"] = resourceapi.Counter{Value: *resource.NewQuantity(gpuShare, resource.BinarySI)}
+	return counters
+}
+
 // Return canonical name for memory slice (placement) `i` (a zero-based index).
 // Note that this name must be used for memslice-N counters in a SharedCounters
 // counter set, and for corresponding counters in a ConsumesCounters counter
@@ -258,4 +347,14 @@ func memsliceCounterName(i int) string {
 // Helper for creating an integer-based DeviceCapacity. Accept any integer type.
 func intcap[T constraints.Integer](i T) resourceapi.DeviceCapacity {
 	return resourceapi.DeviceCapacity{Value: *resource.NewQuantity(int64(i), resource.BinarySI)}
+}
+
+// Calcuate the gpu-share as a percentage of the total memory consumed by the device.
+func calculateGpuShare(memory int64, totalMemory int64) int64 {
+	share := (memory * 100) / totalMemory
+	// Unlikely to happen, but cap the gpu-share at 100%.
+	if share > 100 {
+		share = 100
+	}
+	return share
 }

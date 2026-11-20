@@ -118,10 +118,11 @@ func TestGenerateDriverResources(t *testing.T) {
 	// Both GPUs need valid semver fields; Attributes() calls semver.MustParse
 	// on the CUDA/driver version strings. newTestGpuInfo provides them.
 	gpu1 := newTestGpuInfo(nil)
-	gpu1.minor = 1 // -> "gpu-1"
+	gpu1.Index = 1 // -> "gpu-1"
+	gpu1.Minor = 1
 	gpu1.UUID = "GPU-test-1"
 	gpus := map[PCIBusID]*GpuInfo{
-		"0000:01:00.0": newTestGpuInfo(nil), // minor 0 -> "gpu-0"
+		"0000:01:00.0": newTestGpuInfo(nil), // index 0 -> "gpu-0"
 		"0000:02:00.0": gpu1,
 	}
 

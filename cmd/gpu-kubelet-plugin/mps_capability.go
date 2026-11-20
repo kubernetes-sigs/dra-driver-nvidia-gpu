@@ -42,10 +42,10 @@ func ensureCapability(gpuInfo map[string]*GpuInfo, gpus []string, cudaComputeCap
 			)
 		}
 
-		cc, parseErr := semver.NewVersion(info.cudaComputeCapability)
+		cc, parseErr := semver.NewVersion(info.CudaComputeCapability)
 		if parseErr != nil {
 			err = errors.Join(fmt.Errorf("gpu %s has invalid cudaComputeCapability %q: %w",
-				id, info.cudaComputeCapability, parseErr), err)
+				id, info.CudaComputeCapability, parseErr), err)
 			continue
 		}
 
@@ -53,7 +53,7 @@ func ensureCapability(gpuInfo map[string]*GpuInfo, gpus []string, cudaComputeCap
 			err = errors.Join(fmt.Errorf(
 				"%s has insufficient cudaComputeCapability %q, wanted >= %q",
 				id,
-				info.cudaComputeCapability,
+				info.CudaComputeCapability,
 				cudaComputeCapability,
 			), err)
 		}

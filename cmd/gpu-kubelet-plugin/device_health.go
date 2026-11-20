@@ -316,9 +316,9 @@ func (m *nvmlDeviceHealthMonitor) resolveDeviceByEventAddress(parentUUID string,
 		return nil, fmt.Errorf("failed to find parent GPU UUID %s in the discovered GPU inventory", parentUUID)
 	}
 
-	devices, ok := m.perGPUAllocatable.allocatablesMap[parent.pciBusID]
+	devices, ok := m.perGPUAllocatable.allocatablesMap[parent.PciBusID]
 	if !ok {
-		return nil, fmt.Errorf("failed to find PCI Bus ID %s for parent GPU UUID %s in the allocatable inventory", parent.pciBusID, parent.UUID)
+		return nil, fmt.Errorf("failed to find PCI Bus ID %s for parent GPU UUID %s in the allocatable inventory", parent.PciBusID, parent.UUID)
 	}
 
 	switch {
@@ -376,8 +376,8 @@ func resolveMigEvent(device nvml.Device, parent *GpuInfo, giID, ciID uint32) (*M
 		parent.UUID, giID, ciID, giInfo.ProfileId, giInfo.Placement.Start,
 	)
 	return &MigSpecTuple{
-		ParentMinor:    parent.minor,
-		ParentPCIBusID: parent.pciBusID,
+		ParentMinor:    parent.Minor,
+		ParentPCIBusID: parent.PciBusID,
 		ProfileID:      int(giInfo.ProfileId),
 		PlacementStart: int(giInfo.Placement.Start),
 	}, nil

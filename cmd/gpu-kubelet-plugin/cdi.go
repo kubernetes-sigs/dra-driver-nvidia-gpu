@@ -302,9 +302,13 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 
 			if dev.Type() == GpuDeviceType {
 				uuid = dev.Gpu.Info.UUID
+				minor := dev.Gpu.Info.Minor
+				if minor == nil {
+					return fmt.Errorf("minor cannot be unset for prepared device %q", dev.CanonicalName())
+				}
 				// Get (copy of) cached CDI spec (is safe to be mutated below,
 				// w/o compromising cache).
-				dspecsgpu, err := cdi.getDeviceSpecsByUUIDAndMinor(uuid, dev.Gpu.Info.minor)
+				dspecsgpu, err := cdi.getDeviceSpecsByUUIDAndMinor(uuid, *minor)
 				if err != nil {
 					return fmt.Errorf("unable to get device spec for %s: %w", dname, err)
 				}
