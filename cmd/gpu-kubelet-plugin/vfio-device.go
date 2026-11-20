@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"k8s.io/klog/v2"
+
+	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 )
 
 const (
@@ -73,15 +75,22 @@ func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib 
 }
 
 // Configure binds the GPU to the vfio-pci driver.
-func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) error {
-	loaded, err := vm.checkKernelModuleLoaded(info.vfioModule)
+func (vm *VfioPciManager) Configure(ctx context.Context, config *configapi.VfioDeviceConfig, info *VfioDeviceInfo) error {
+	vfioModule := info.vfioModule
+	// Use driver override if specified in the config.
+	if config != nil && config.DriverOverride != nil {
+		vfioDriver := string(*config.DriverOverride)
+		vfioModule = getVfioModuleName(vfioDriver)
+	}
+
+	loaded, err := vm.checkKernelModuleLoaded(vfioModule)
 	if err != nil {
-		return fmt.Errorf("error checking if module %q is loaded: %w", info.vfioModule, err)
+		return fmt.Errorf("error checking if module %q is loaded: %w", vfioModule, err)
 	}
 	if !loaded {
-		err := vm.loadKernelModule(info.vfioModule)
+		err := vm.loadKernelModule(vfioModule)
 		if err != nil {
-			return fmt.Errorf("failed to load module %q: %w", info.vfioModule, err)
+			return fmt.Errorf("failed to load module %q: %w", vfioModule, err)
 		}
 	}
 
@@ -90,14 +99,14 @@ func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) e
 		return fmt.Errorf("a driver switch is inflight for GPU %q, please check the kernel logs for more details", info.PciBusID)
 	}
 
-	vfioDriver, err := getVfioDriverName(info.vfioModule)
-	if err != nil {
-		return fmt.Errorf("error getting vfio driver for GPU %q: %w", info.PciBusID, err)
-	}
-
 	driver, err := getDriver(pciDevicesPath, info.PciBusID)
 	if err != nil {
 		return fmt.Errorf("error getting driver details for GPU %q: %w", info.PciBusID, err)
+	}
+
+	vfioDriver, err := getVfioDriverName(vfioModule)
+	if err != nil {
+		return fmt.Errorf("error getting vfio driver for GPU %q: %w", info.PciBusID, err)
 	}
 
 	// Skip if the GPU is already bound to the vfio-pci (or variant) driver.
@@ -244,6 +253,11 @@ func getVfioDriverName(vfioModule string) (string, error) {
 		vfioDriver = vfioDriverNormalized
 	}
 	return vfioDriver, nil
+}
+
+// Module names will only ever contain underscore characters and not dashes.
+func getVfioModuleName(vfioDriver string) string {
+	return strings.ReplaceAll(vfioDriver, "-", "_")
 }
 
 // Get the current driver the GPU is bound to.
