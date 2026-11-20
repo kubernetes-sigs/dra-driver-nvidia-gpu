@@ -657,6 +657,16 @@ func TestPreparedClaimGetHeldDevices(t *testing.T) {
 			want:   []DeviceName{"gpu-0", "mig-0"},
 			wantOK: true,
 		},
+		"results of other drivers are left out": {
+			claim: PreparedClaim{Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{Results: []resourceapi.DeviceRequestAllocationResult{
+					{Driver: "other.driver.com", Device: "gpu-0-mig-1g10gb-19-0"},
+					{Driver: DriverName, Device: "gpu-1"},
+				}},
+			}}},
+			want:   []DeviceName{"gpu-1"},
+			wantOK: true,
+		},
 		"an allocation of nothing is still an answer": {
 			claim:  PreparedClaim{Status: allocated()},
 			want:   []DeviceName{},

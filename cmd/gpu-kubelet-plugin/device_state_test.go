@@ -951,6 +951,84 @@ func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
 		require.NoError(t, err)
 		require.Zero(t, nvmllib.deviceGetHandleByUUIDCalls, "a device held by a completed claim must not reach MIG teardown")
 	})
+
+	// Same name, but the completed claim got it from another driver.
+	t.Run("our own MIG name in another driver's result of a completed claim", func(t *testing.T) {
+		state, nvmllib := newState()
+
+		pc := claimWith(resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: ownedMIG})
+
+		err := state.rollbackPartiallyPreparedMIGDevices(t.Context(), "claim-uid", pc,
+			completedWith(resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: ownedMIG}))
+
+		require.NoError(t, err)
+		require.Equal(t, 1, nvmllib.deviceGetHandleByUUIDCalls, "another driver's result must not keep our device")
+	})
+}
+
+// The startup keep-list, walked over a GPU that holds one MIG device.
+func TestDestroyUnknownMIGDevicesIgnoresOtherDrivers(t *testing.T) {
+	enableDynamicMIGForTest(t)
+
+	const live = "gpu-0-mig-1g5gb-19-2"
+
+	tests := map[string]struct {
+		driver       string
+		wantTeardown bool
+	}{
+		"a completed claim of ours holds the device": {
+			driver: DriverName,
+		},
+		"another driver's result names the device": {
+			driver:       "other.driver.com",
+			wantTeardown: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			var events []string
+			gi := &fakeNVMLGpuInstance{
+				info:      nvml.GpuInstanceInfo{Id: 3, ProfileId: 19, Placement: nvml.GpuInstancePlacement{Start: 2, Size: 1}},
+				ci:        &fakeNVMLComputeInstance{info: nvml.ComputeInstanceInfo{Id: 4, ProfileId: 7}, events: &events},
+				ciProfile: nvml.ComputeInstanceProfileInfo{Id: 7},
+				events:    &events,
+			}
+			gpu := &fakeNVMLGPU{
+				migDevice: &fakeNVMLMigDevice{giID: 3, ciID: 4, uuid: "MIG-0"},
+				gi:        gi,
+				giProfile: nvml.GpuInstanceProfileInfo{Id: 19},
+				events:    &events,
+			}
+			parent := &GpuInfo{UUID: "GPU-0", migEnabled: true, migProfiles: []*MigProfileInfo{{profile: testMigProfile()}}}
+
+			state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{
+				"completed": {
+					CheckpointState: ClaimCheckpointStatePrepareCompleted,
+					Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
+						Devices: resourceapi.DeviceAllocationResult{Results: []resourceapi.DeviceRequestAllocationResult{
+							{Driver: DriverName, Device: "gpu-1"},
+							{Driver: tc.driver, Device: live},
+						}},
+					}},
+				},
+			}}})
+			state.nvdevlib = &deviceLib{
+				Interface:       fakeNVMLDeviceLib{device: fakeNVDevice{uuid: parent.UUID, migEnabled: true}},
+				nvmllib:         &mockNVMLLibrary{},
+				gpuInfosByUUID:  map[string]*GpuInfo{parent.UUID: parent},
+				devhandleByUUID: map[string]nvml.Device{parent.UUID: gpu},
+			}
+
+			state.DestroyUnknownMIGDevices(t.Context())
+
+			if tc.wantTeardown {
+				require.Equal(t, []string{"destroy-ci", "destroy-gi"}, events)
+			} else {
+				require.Empty(t, events)
+			}
+		})
+	}
 }
 
 // A completed claim whose allocation is missing from the checkpoint still

@@ -38,17 +38,31 @@ func (l fakeNVMLDeviceLib) NewDevice(nvml.Device) (nvdev.Device, error) {
 	return l.device, nil
 }
 
-// VisitDevices reports a machine with no GPUs, which keeps a caller that only
-// needs to reach the device walk away from NVML.
-func (l fakeNVMLDeviceLib) VisitDevices(func(int, nvdev.Device) error) error {
+// VisitDevices walks device when it is set, and otherwise reports a machine
+// with no GPUs, which keeps a caller that only needs to reach the walk away
+// from NVML.
+func (l fakeNVMLDeviceLib) VisitDevices(visit func(int, nvdev.Device) error) error {
 	if l.visited != nil {
 		*l.visited++
 	}
-	return nil
+	if l.device == nil {
+		return nil
+	}
+	return visit(0, l.device)
+}
+
+// NewMigProfile offers testMigProfile for the first profile triple only. The
+// others get G != C, which getGpuInfo skips.
+func (l fakeNVMLDeviceLib) NewMigProfile(gi, ci, eng int, _, _ uint64) (nvdev.MigProfile, error) {
+	if gi == 0 && ci == 0 && eng == 0 {
+		return testMigProfile(), nil
+	}
+	return &nvdev.MigProfileInfo{C: 1, G: 2}, nil
 }
 
 type fakeNVDevice struct {
 	nvdev.Device
+	uuid       string
 	migEnabled bool
 	profiles   []nvdev.MigProfile
 	giProfile  nvml.GpuInstanceProfileInfo
@@ -58,6 +72,19 @@ type fakeNVDevice struct {
 func (d fakeNVDevice) IsMigEnabled() (bool, error) {
 	return d.migEnabled, nil
 }
+
+// The rest of what getGpuInfo reads; any well-formed answer will do.
+func (d fakeNVDevice) GetUUID() (string, nvml.Return)                    { return d.uuid, nvml.SUCCESS }
+func (d fakeNVDevice) GetMinorNumber() (int, nvml.Return)                { return 0, nvml.SUCCESS }
+func (d fakeNVDevice) IsMigCapable() (bool, error)                       { return d.migEnabled, nil }
+func (d fakeNVDevice) GetMemoryInfo() (nvml.Memory, nvml.Return)         { return nvml.Memory{}, nvml.SUCCESS }
+func (d fakeNVDevice) GetName() (string, nvml.Return)                    { return "", nvml.SUCCESS }
+func (d fakeNVDevice) GetArchitectureAsString() (string, error)          { return "", nil }
+func (d fakeNVDevice) GetBrandAsString() (string, error)                 { return "", nil }
+func (d fakeNVDevice) GetCudaComputeCapabilityAsString() (string, error) { return "", nil }
+func (d fakeNVDevice) GetPCIBusID() (string, error)                      { return "0000:01:00.0", nil }
+func (d fakeNVDevice) GetAddressingModeAsString() (string, error)        { return "", nil }
+func (d fakeNVDevice) GetModuleId() (int, nvml.Return)                   { return 0, nvml.ERROR_NOT_SUPPORTED }
 
 func (d fakeNVDevice) VisitMigProfiles(visit func(nvdev.MigProfile) error) error {
 	for _, profile := range d.profiles {

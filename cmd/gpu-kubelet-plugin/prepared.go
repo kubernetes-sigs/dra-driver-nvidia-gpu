@@ -306,6 +306,9 @@ func (c *PreparedClaim) GetHeldDevices() ([]DeviceName, bool) {
 		results := c.Status.Allocation.Devices.Results
 		names := make([]DeviceName, 0, len(results))
 		for _, r := range results {
+			if r.Driver != DriverName {
+				continue
+			}
 			names = append(names, r.Device)
 		}
 		return names, true

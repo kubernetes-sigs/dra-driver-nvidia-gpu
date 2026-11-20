@@ -60,6 +60,9 @@ func (m *mockNVMLLibrary) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.
 	return m.deviceGetHandleByUUIDFunc(uuid)
 }
 
+func (m *mockNVMLLibrary) SystemGetDriverVersion() (string, nvml.Return)  { return "", nvml.SUCCESS }
+func (m *mockNVMLLibrary) SystemGetCudaDriverVersion() (int, nvml.Return) { return 0, nvml.SUCCESS }
+
 // mockHealthMonitor implements deviceHealthMonitor for testing healthEventToTaint.
 type mockHealthMonitor struct {
 	nonFatalXids map[uint64]bool
