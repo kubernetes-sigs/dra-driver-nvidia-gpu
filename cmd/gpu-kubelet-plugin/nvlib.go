@@ -37,6 +37,7 @@ import (
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/lookup/root"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/fabricmanager"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
@@ -52,6 +53,7 @@ type deviceLib struct {
 	hostRoot          string
 	sysfsRoot         string
 	nvidiaSMIPath     string
+	vfioOnly          bool
 	// vfioEnabled records node-local IOMMU capability.
 	vfioEnabled       bool
 	gpuInfosByUUID    map[string]*GpuInfo
@@ -59,7 +61,7 @@ type deviceLib struct {
 	devhandleByUUID   map[string]nvml.Device
 }
 
-func newDeviceLib(driver *root.Driver, hostRoot string) (*deviceLib, error) {
+func newDeviceLib(driver *root.Driver, hostRoot string, vfioOnly bool) (*deviceLib, error) {
 	vfioEnabled := false
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
 		var err error
@@ -69,14 +71,21 @@ func newDeviceLib(driver *root.Driver, hostRoot string) (*deviceLib, error) {
 		}
 	}
 
-	driverLibraryPath, err := driver.DriverLibraryPath()
-	if err != nil {
-		return nil, fmt.Errorf("failed to locate driver libraries: %w", err)
-	}
-
-	nvidiaSMIPath, err := driver.BinaryPath("nvidia-smi")
-	if err != nil {
-		return nil, fmt.Errorf("failed to locate nvidia-smi: %w", err)
+	var driverLibraryPath, nvidiaSMIPath string
+	if vfioOnly {
+		if !featuregates.Enabled(featuregates.PassthroughSupport) || !vfioEnabled {
+			return nil, fmt.Errorf("VFIO-only mode requires PassthroughSupport and IOMMU support")
+		}
+	} else {
+		var err error
+		driverLibraryPath, err = driver.DriverLibraryPath()
+		if err != nil {
+			return nil, fmt.Errorf("failed to locate driver libraries: %w", err)
+		}
+		nvidiaSMIPath, err = driver.BinaryPath("nvidia-smi")
+		if err != nil {
+			return nil, fmt.Errorf("failed to locate nvidia-smi: %w", err)
+		}
 	}
 
 	// We construct an NVML library specifying the path to libnvidia-ml.so.1
@@ -88,7 +97,25 @@ func newDeviceLib(driver *root.Driver, hostRoot string) (*deviceLib, error) {
 	if sysfsRoot != "" {
 		klog.Infof("Using alternate sysfs root: %s", sysfsRoot)
 	}
-	nvpci := nvpci.New()
+	var pciOptions []nvpci.Option
+	if vfioOnly {
+		pciOptions = append(pciOptions, nvpci.WithPCIDevicesRoot(filepath.Join(hostRoot, pciDevicesPath)))
+	}
+	nvpci := nvpci.New(pciOptions...)
+	if vfioOnly {
+		// PCI discovery works even when no NVIDIA kernel module is loaded.
+		switches, err := nvpci.GetNVSwitches()
+		if err != nil {
+			return nil, fmt.Errorf("error detecting NVSwitch PCI devices: %w", err)
+		}
+		hasFabric, err := fabricmanager.HasFabricManagerFabric(hostRoot)
+		if err != nil {
+			return nil, fmt.Errorf("error detecting NVLink fabric: %w", err)
+		}
+		if len(switches) > 0 || hasFabric {
+			return nil, fmt.Errorf("VFIO-only mode is unsupported on nodes with NVSwitch/NVLink fabric")
+		}
+	}
 	nvpassthrough := nvpassthrough.New(
 		nvpassthrough.WithNvpciLib(nvpci),
 		nvpassthrough.WithHostRoot(hostRoot),
@@ -101,6 +128,7 @@ func newDeviceLib(driver *root.Driver, hostRoot string) (*deviceLib, error) {
 		devRoot:           driver.DevRoot,
 		hostRoot:          hostRoot,
 		vfioEnabled:       vfioEnabled,
+		vfioOnly:          vfioOnly,
 		sysfsRoot:         sysfsRoot,
 		nvidiaSMIPath:     nvidiaSMIPath,
 		nvpci:             nvpci,
@@ -112,7 +140,7 @@ func newDeviceLib(driver *root.Driver, hostRoot string) (*deviceLib, error) {
 
 	// Current design: when DynamicMIG is enabled, use one long-lived NVML
 	// session.
-	if featuregates.Enabled(featuregates.DynamicMIG) {
+	if !vfioOnly && featuregates.Enabled(featuregates.DynamicMIG) {
 		klog.V(1).Infof("DynamicMIG enabled: initialize long-lived NVML session")
 		if err := d.Init(); err != nil {
 			return nil, fmt.Errorf("failed to initialize NVML: %w", err)
@@ -205,15 +233,19 @@ func (l deviceLib) ensureNVML() (func(), nvml.Return) {
 
 // Discover devices that are allocatable, on this node.
 func (l deviceLib) enumerateAllPossibleDevices() (*PerGPUAllocatableDevices, error) {
-	perGPUAllocatable, err := l.GetPerGpuAllocatableDevices()
-	if err != nil {
-		return nil, fmt.Errorf("error enumerating allocatable devices: %w", err)
+	perGPUAllocatable := &PerGPUAllocatableDevices{allocatablesMap: make(map[PCIBusID]AllocatableDevices)}
+	if !l.vfioOnly {
+		var err error
+		perGPUAllocatable, err = l.GetPerGpuAllocatableDevices()
+		if err != nil {
+			return nil, fmt.Errorf("error enumerating allocatable devices: %w", err)
+		}
 	}
 
 	if featuregates.Enabled(featuregates.PassthroughSupport) && l.IsVfioEnabled() {
 		// Discover passthrough devices and insert them into the
 		// `perGPUAllocatable` devices map
-		err = l.enumerateGpuVfioDevices(perGPUAllocatable)
+		err := l.enumerateGpuVfioDevices(perGPUAllocatable)
 		if err != nil {
 			return nil, fmt.Errorf("error enumerating GPU PCI devices: %w", err)
 		}

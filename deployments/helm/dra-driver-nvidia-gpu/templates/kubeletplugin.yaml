@@ -59,6 +59,8 @@ spec:
           privileged: true
         command: [bash, /usr/bin/kubelet-plugin-prestart.sh]
         env:
+        - name: VFIO_ONLY
+          value: {{ .Values.vfioOnly | quote }}
         - name: NVIDIA_DRIVER_ROOT
           value: "{{ .Values.nvidiaDriverRoot }}"
         # Use runc: explicit "void"; otherwise we inherit "all".
@@ -305,6 +307,8 @@ spec:
         - name: NVIDIA_CDI_HOOK_PATH
           value: "{{ .Values.nvidiaCDIHookPath }}"
         {{- end }}
+        - name: VFIO_ONLY
+          value: {{ .Values.vfioOnly | quote }}
         {{- if .Values.consumableShares }}
         - name: CONSUMABLE_SHARES
           value: "{{ .Values.consumableShares }}"

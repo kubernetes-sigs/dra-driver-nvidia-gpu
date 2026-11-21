@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	nvdev "github.com/NVIDIA/go-nvlib/pkg/nvlib/device"
+	"github.com/NVIDIA/go-nvlib/pkg/nvpassthrough"
 	"github.com/NVIDIA/go-nvlib/pkg/nvpci"
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/require"
@@ -56,7 +57,7 @@ func TestNewDeviceLibVfioCapability(t *testing.T) {
 				for _, name := range []string{"libnvidia-ml.so.1", "nvidia-smi"} {
 					require.NoError(t, os.WriteFile(filepath.Join(hostRoot, name), nil, 0o644))
 				}
-				lib, err := newDeviceLib(root.New(root.WithDriverRoot(hostRoot)), hostRoot)
+				lib, err := newDeviceLib(root.New(root.WithDriverRoot(hostRoot)), hostRoot, false)
 				if gate && mode == "read error" {
 					require.ErrorContains(t, err, "error checking if IOMMU is enabled")
 					var pathErr *os.PathError
@@ -150,4 +151,104 @@ func setVfioTestFeatureGate(t *testing.T, gate featuregate.Feature, enabled bool
 		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(gate): previous}))
 	})
 	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(gate): enabled}))
+}
+
+func TestVfioOnlyStartupWithoutNvidiaDriver(t *testing.T) {
+	setVfioTestFeatureGate(t, featuregates.PassthroughSupport, true)
+	setVfioTestFeatureGate(t, featuregates.DynamicMIG, false)
+	setVfioTestFeatureGate(t, featuregates.FabricManagerPartitioning, false)
+	hostRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(hostRoot, kernelIommuGroupPath, "0"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(hostRoot, pciDevicesPath), 0o755))
+	config := &Config{flags: &Flags{
+		vfioOnly: true, hostRoot: hostRoot, containerDriverRoot: t.TempDir(),
+		kubeletPluginsDirectoryPath: t.TempDir(), cdiRoot: t.TempDir(),
+	}}
+	for range 2 {
+		// A second start exercises recovery of the checkpoint without NVIDIA libraries.
+		state, err := NewDeviceState(context.Background(), config)
+		require.NoError(t, err)
+		require.True(t, state.nvdevlib.vfioOnly)
+		require.False(t, state.vfioPciManager.nvidiaEnabled)
+		require.Empty(t, state.nvdevlib.driverLibraryPath)
+		require.Empty(t, state.nvdevlib.nvidiaSMIPath)
+	}
+}
+
+func TestVfioOnlyPrerequisites(t *testing.T) {
+	for _, mode := range []string{"no gate", "no iommu", "nvswitch", "nvlink5", "pci error"} {
+		t.Run(mode, func(t *testing.T) {
+			setVfioTestFeatureGate(t, featuregates.PassthroughSupport, mode != "no gate")
+			setVfioTestFeatureGate(t, featuregates.DynamicMIG, false)
+			hostRoot := t.TempDir()
+			if mode != "no iommu" {
+				require.NoError(t, os.MkdirAll(filepath.Join(hostRoot, kernelIommuGroupPath, "0"), 0o755))
+			}
+			if mode != "pci error" {
+				require.NoError(t, os.MkdirAll(filepath.Join(hostRoot, pciDevicesPath), 0o755))
+			}
+			if mode == "nvswitch" {
+				devicePath := filepath.Join(hostRoot, pciDevicesPath, "0000:01:00.0")
+				require.NoError(t, os.MkdirAll(devicePath, 0o755))
+				for name, value := range map[string]string{"vendor": "0x10de", "device": "0x22a3", "class": "0x068000", "resource": "0 0 0", "numa_node": "0"} {
+					require.NoError(t, os.WriteFile(filepath.Join(devicePath, name), []byte(value), 0o644))
+				}
+			}
+			if mode == "nvlink5" {
+				devicePath := filepath.Join(hostRoot, "sys/class/infiniband/mlx5_0/device")
+				require.NoError(t, os.MkdirAll(devicePath, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(devicePath, "vpd"), []byte("SW_MNG"), 0o644))
+			}
+			_, err := newDeviceLib(root.New(root.WithDriverRoot(t.TempDir())), hostRoot, true)
+			require.Error(t, err)
+			if mode == "nvswitch" || mode == "nvlink5" {
+				require.ErrorContains(t, err, "unsupported on nodes with NVSwitch/NVLink fabric")
+			}
+		})
+	}
+}
+
+type vfioOnlyTestPassthrough struct{ nvpassthrough.Interface }
+
+func (vfioOnlyTestPassthrough) FindBestVFIOVariant(string) (string, error) {
+	return "vfio-pci", nil
+}
+
+func TestVfioOnlyDiscoveryAndRelease(t *testing.T) {
+	setVfioTestFeatureGate(t, featuregates.PassthroughSupport, true)
+	setVfioTestFeatureGate(t, featuregates.DynamicMIG, false)
+	setVfioTestFeatureGate(t, featuregates.FabricManagerPartitioning, false)
+	pci := &nvpci.InterfaceMock{GetGPUsFunc: func() ([]*nvpci.NvidiaPCIDevice, error) {
+		return []*nvpci.NvidiaPCIDevice{{
+			Address: "0000:01:00.0", Vendor: 0x10de, Device: 0x2330,
+			Resources: nvpci.MemoryResources{}, IommuGroup: 1,
+		}}, nil
+	}}
+	// Any NVML or nvdev call panics, proving discovery and release use only PCI.
+	lib := &deviceLib{
+		vfioOnly: true, vfioEnabled: true, hostRoot: t.TempDir(),
+		nvmllib: &mockNVMLLibrary{}, Interface: nil,
+		nvpci: pci, nvpasst: vfioOnlyTestPassthrough{},
+	}
+	devices, err := lib.enumerateAllPossibleDevices()
+	require.NoError(t, err)
+	all := devices.GetAllDevices()
+	require.Len(t, all, 1)
+	state := &DeviceState{
+		nvdevlib: lib, perGPUAllocatable: devices, config: &Config{flags: &Flags{}},
+		vfioPciManager: NewVfioPciManager("", "", lib, false),
+	}
+	for _, device := range all {
+		require.Equal(t, VfioDeviceType, device.Type())
+		require.Nil(t, device.Vfio.parent)
+		require.NoError(t, state.vfioPciManager.Unconfigure(context.Background(), device.Vfio))
+		require.NoError(t, state.discoverSiblingAllocatables(device))
+	}
+	var published []resourceapi.Device
+	for _, device := range devices.GetAllDevices() {
+		// Passthrough publication uses GetDevice, not DynamicMIG's PartGetDevice.
+		published = append(published, device.GetDevice(state.config))
+	}
+	require.Len(t, published, 1)
+	require.Equal(t, VfioDeviceType, *published[0].Attributes["type"].StringValue)
 }
