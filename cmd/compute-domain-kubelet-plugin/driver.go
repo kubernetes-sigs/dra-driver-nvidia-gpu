@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"sync"
 	"time"
 
 	resourceapi "k8s.io/api/resource/v1"
@@ -181,29 +180,33 @@ func (d *driver) Shutdown() error {
 func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceapi.ResourceClaim) (map[types.UID]kubeletplugin.PrepareResult, error) {
 	klog.V(6).Infof("PrepareResourceClaims called with %d claim(s)", len(claims))
 
-	var wg sync.WaitGroup
-	ctx, cancel := context.WithTimeout(ctx, ErrorRetryMaxTimeout)
-	workQueue := workqueue.New(workqueue.DefaultPrepUnprepRateLimiter())
 	results := make(map[types.UID]kubeletplugin.PrepareResult)
+	// With no claims nothing cancels ctx, and Run would wait out the timeout.
+	if len(claims) == 0 {
+		return results, nil
+	}
 
+	ctx, cancel := context.WithTimeout(ctx, ErrorRetryMaxTimeout)
+	defer cancel()
+	workQueue := workqueue.New(workqueue.DefaultPrepUnprepRateLimiter())
+
+	// Run calls back on this goroutine, so pending and results need no lock.
+	pending := len(claims)
 	for _, claim := range claims {
-		wg.Add(1)
 		key := fmt.Sprintf("%v", claim.UID)
 		workQueue.EnqueueRawWithKey(claim, key, func(ctx context.Context, obj any) error {
 			done, res := d.nodePrepareResource(ctx, claim)
 			if done {
 				results[claim.UID] = res
-				wg.Done()
+				pending--
+				if pending == 0 {
+					cancel()
+				}
 				return nil
 			}
 			return fmt.Errorf("%w", res.Err)
 		})
 	}
-
-	go func() {
-		wg.Wait()
-		cancel()
-	}()
 
 	workQueue.Run(ctx)
 	return results, nil
@@ -212,22 +215,31 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 func (d *driver) UnprepareResourceClaims(ctx context.Context, claimRefs []kubeletplugin.NamespacedObject) (map[types.UID]error, error) {
 	klog.V(6).Infof("UnprepareResourceClaims called with %d claim(s)", len(claimRefs))
 
-	var wg sync.WaitGroup
+	results := make(map[types.UID]error)
+	// With no claims nothing cancels ctx, and Run would wait out the timeout.
+	if len(claimRefs) == 0 {
+		return results, nil
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, ErrorRetryMaxTimeout)
+	defer cancel()
 
 	// Review: do we want to have a new queue per incoming Prepare/Unprepare
 	// request?
 	workQueue := workqueue.New(workqueue.DefaultPrepUnprepRateLimiter())
-	results := make(map[types.UID]error)
 
+	// Run calls back on this goroutine, so pending and results need no lock.
+	pending := len(claimRefs)
 	for _, claim := range claimRefs {
-		wg.Add(1)
 		key := fmt.Sprintf("%v", claim.UID)
 		workQueue.EnqueueRawWithKey(claim, key, func(ctx context.Context, obj any) error {
 			done, err := d.nodeUnprepareResource(ctx, claim)
 			if done {
 				results[claim.UID] = err
-				wg.Done()
+				pending--
+				if pending == 0 {
+					cancel()
+				}
 				if err != nil {
 					klog.V(0).Infof("Permanent error unpreparing devices for claim %v: %v", claim.UID, err)
 				}
@@ -236,11 +248,6 @@ func (d *driver) UnprepareResourceClaims(ctx context.Context, claimRefs []kubele
 			return fmt.Errorf("%w", err)
 		})
 	}
-
-	go func() {
-		wg.Wait()
-		cancel()
-	}()
 
 	workQueue.Run(ctx)
 
