@@ -26,16 +26,22 @@ import (
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/mount-utils"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
 func TestLocalIPCManager(t *testing.T) {
-	manager := NewLocalIPCManager(t.TempDir())
+	mounter := mount.NewFakeMounter(nil)
+	manager := NewLocalIPCManager(t.TempDir(), mounter)
 
 	info, err := manager.ensureDirectory("claim-1")
 	require.NoError(t, err)
 	require.Equal(t, localIPCContainerPath, info.ContainerPath)
+	assertLocalIPCMounted(t, mounter, info.HostPath)
+	require.Len(t, mounter.MountPoints, 1)
+	assert.Equal(t, "tmpfs", mounter.MountPoints[0].Type)
+	assert.Equal(t, localIPCMountOptions, mounter.MountPoints[0].Opts)
 
 	stat, err := os.Stat(info.HostPath)
 	require.NoError(t, err)
@@ -48,6 +54,7 @@ func TestLocalIPCManager(t *testing.T) {
 	require.NoError(t, err)
 	_, err = os.Stat(marker)
 	require.NoError(t, err)
+	require.Len(t, mounter.MountPoints, 1, "an existing claim mount must not be mounted again")
 
 	otherInfo, err := manager.ensureDirectory("claim-other")
 	require.NoError(t, err)
@@ -70,7 +77,7 @@ func TestLocalIPCManager(t *testing.T) {
 	_, err = os.Stat(claimSymlinkMarker)
 	require.NoError(t, err)
 
-	symlinkRootManager := NewLocalIPCManager(t.TempDir())
+	symlinkRootManager := NewLocalIPCManager(t.TempDir(), mount.NewFakeMounter(nil))
 	symlinkRootTarget := t.TempDir()
 	targetClaimPath := filepath.Join(symlinkRootTarget, "claim-3")
 	require.NoError(t, os.Mkdir(targetClaimPath, 0o700))
@@ -87,15 +94,18 @@ func TestLocalIPCManager(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 	_, err = os.Stat(otherInfo.HostPath)
 	require.NoError(t, err)
+	assertLocalIPCMounted(t, mounter, otherInfo.HostPath)
+	require.Len(t, mounter.MountPoints, 1)
 }
 
 func TestLocalIPCReconcile(t *testing.T) {
-	emptyManager := NewLocalIPCManager(t.TempDir())
+	emptyManager := NewLocalIPCManager(t.TempDir(), mount.NewFakeMounter(nil))
 	require.NoError(t, emptyManager.Reconcile(nil))
 	_, err := os.Stat(emptyManager.root)
 	require.ErrorIs(t, err, os.ErrNotExist)
 
-	manager := NewLocalIPCManager(t.TempDir())
+	mounter := mount.NewFakeMounter(nil)
+	manager := NewLocalIPCManager(t.TempDir(), mounter)
 	for _, claimUID := range []string{"active", "stale", "partial", "disabled"} {
 		_, err = manager.ensureDirectory(claimUID)
 		require.NoError(t, err)
@@ -127,10 +137,12 @@ func TestLocalIPCReconcile(t *testing.T) {
 
 	_, err = os.Stat(activeMarker)
 	require.NoError(t, err)
+	assertLocalIPCMounted(t, mounter, filepath.Join(manager.root, "active"))
 	for _, claimUID := range []string{"stale", "partial", "disabled"} {
 		_, err = os.Stat(filepath.Join(manager.root, claimUID))
 		require.ErrorIs(t, err, os.ErrNotExist)
 	}
+	require.Len(t, mounter.MountPoints, 1, "stale claim mounts must be unmounted")
 }
 
 func TestLocalIPCInfoGetCDIContainerEdits(t *testing.T) {
@@ -168,7 +180,7 @@ func TestGetLocalIPCConfig(t *testing.T) {
 	require.NotNil(t, got)
 	assert.True(t, got.Enabled)
 
-	manager := NewLocalIPCManager(t.TempDir())
+	manager := NewLocalIPCManager(t.TempDir(), mount.NewFakeMounter(nil))
 	info, err := manager.Prepare("prepared", allocation(config()))
 	require.NoError(t, err)
 	require.NotNil(t, info)
@@ -223,6 +235,13 @@ func TestGetLocalIPCConfig(t *testing.T) {
 	require.NoError(t, manager.Restore("restored", allocation(futureConfig)))
 	_, err = os.Stat(filepath.Join(manager.root, "restored"))
 	require.NoError(t, err)
+}
+
+func assertLocalIPCMounted(t *testing.T, mounter mount.Interface, path string) {
+	t.Helper()
+	mounted, err := mounter.IsMountPoint(path)
+	require.NoError(t, err)
+	assert.True(t, mounted, "%s must be a mount point", path)
 }
 
 func allocationWithLocalIPCConfig() *resourceapi.AllocationResult {

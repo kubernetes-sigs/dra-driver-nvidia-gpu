@@ -26,6 +26,7 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/mount-utils"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 	cdispec "tags.cncf.io/container-device-interface/specs-go"
 
@@ -37,13 +38,20 @@ const (
 	localIPCContainerPath = "/run/nvidia-dra/local-ipc"
 )
 
+// Each claim directory is backed by its own tmpfs so that workloads cannot
+// fill the node's disk or inodes. UNIX sockets use an inode but no data
+// pages, so nr_inodes is the real limit; size only bounds small regular
+// files, which cost one page each.
+var localIPCMountOptions = []string{"rw", "nosuid", "nodev", "noexec", "mode=1777", "size=64k", "nr_inodes=1024"}
+
 type LocalIPCInfo struct {
 	HostPath      string
 	ContainerPath string
 }
 
 type LocalIPCManager struct {
-	root string
+	root    string
+	mounter mount.Interface
 }
 
 // GetCDIContainerEdits returns the CDI edits for a prepared local IPC directory.
@@ -60,8 +68,11 @@ func (i *LocalIPCInfo) GetCDIContainerEdits() *cdiapi.ContainerEdits {
 	}
 }
 
-func NewLocalIPCManager(driverPluginPath string) *LocalIPCManager {
-	return &LocalIPCManager{root: filepath.Join(driverPluginPath, localIPCDirectoryName)}
+func NewLocalIPCManager(driverPluginPath string, mounter mount.Interface) *LocalIPCManager {
+	return &LocalIPCManager{
+		root:    filepath.Join(driverPluginPath, localIPCDirectoryName),
+		mounter: mounter,
+	}
 }
 
 func getLocalIPCConfig(allocation *resourceapi.AllocationResult) (*configapi.LocalIPCConfig, error) {
@@ -170,6 +181,17 @@ func (m *LocalIPCManager) ensureDirectory(claimUID string) (*LocalIPCInfo, error
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return nil, fmt.Errorf("claim local IPC path is not a directory: %q", path)
 	}
+	// Restore and Reconcile call this for directories that may already be
+	// mounted; mounting again would hide the live sockets underneath.
+	mounted, err := m.mounter.IsMountPoint(path)
+	if err != nil {
+		return nil, fmt.Errorf("check claim local IPC mount: %w", err)
+	}
+	if !mounted {
+		if err := m.mounter.Mount(localIPCDirectoryName, path, "tmpfs", localIPCMountOptions); err != nil {
+			return nil, fmt.Errorf("mount claim local IPC tmpfs: %w", err)
+		}
+	}
 	if err := os.Chmod(path, os.ModeSticky|0o777); err != nil {
 		return nil, fmt.Errorf("set claim local IPC directory permissions: %w", err)
 	}
@@ -188,7 +210,7 @@ func (m *LocalIPCManager) Remove(claimUID string) error {
 	if !exists {
 		return nil
 	}
-	if err := os.RemoveAll(path); err != nil {
+	if err := m.removeClaimPath(path); err != nil {
 		return fmt.Errorf("remove claim local IPC directory: %w", err)
 	}
 	return nil
@@ -229,11 +251,35 @@ func (m *LocalIPCManager) Reconcile(claims PreparedClaimsByUID) error {
 		if _, ok := expected[entry.Name()]; ok {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(m.root, entry.Name())); err != nil {
+		if err := m.removeClaimPath(filepath.Join(m.root, entry.Name())); err != nil {
 			return fmt.Errorf("remove stale local IPC entry %q: %w", entry.Name(), err)
 		}
 	}
 	return nil
+}
+
+// removeClaimPath unmounts the claim tmpfs, if present, and then removes the
+// mount point. Symlinks are removed without being followed.
+func (m *LocalIPCManager) removeClaimPath(path string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		mounted, err := m.mounter.IsMountPoint(path)
+		if err != nil {
+			return fmt.Errorf("check mount: %w", err)
+		}
+		if mounted {
+			if err := m.mounter.Unmount(path); err != nil {
+				return fmt.Errorf("unmount: %w", err)
+			}
+		}
+	}
+	return os.RemoveAll(path)
 }
 
 func (m *LocalIPCManager) validateRoot() (bool, error) {

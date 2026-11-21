@@ -39,6 +39,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	cperrors "k8s.io/kubernetes/pkg/kubelet/checkpointmanager/errors"
+	"k8s.io/mount-utils"
 	"k8s.io/utils/ptr"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 
@@ -209,9 +210,9 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("unable to create checkpoint manager: %w", err)
 	}
 
-	// The manager only stores paths. Keep it available when the gate is
-	// disabled so previously prepared claims can still be restored and removed.
-	localIPCManager := NewLocalIPCManager(config.DriverPluginPath())
+	// Keep the manager available when the gate is disabled so previously
+	// prepared claims can still be restored and removed.
+	localIPCManager := NewLocalIPCManager(config.DriverPluginPath(), mount.New(""))
 
 	cpLockPath := filepath.Join(config.DriverPluginPath(), "cp.lock")
 

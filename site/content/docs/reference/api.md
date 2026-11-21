@@ -121,6 +121,8 @@ Requires [`PassthroughSupport`](feature-gates.md) (Alpha, default: false). `iomm
 
 Exposes a writable directory for same-node IPC, such as UNIX domain sockets, shared by every container that consumes a GPU device from the ResourceClaim. It must not specify `requests`. For cross-Pod IPC, all Pods must reference the same ResourceClaim; a ResourceClaimTemplate creates a separate claim and directory for each Pod.
 
+The directory is backed by a per-claim tmpfs limited to 64 KiB and 1024 inodes. It is created when the claim is prepared and removed when the claim is unprepared. Use it for sockets and other small rendezvous files, not for bulk data.
+
 ```yaml
 apiVersion: resource.nvidia.com/v1beta1
 kind: LocalIPCConfig
@@ -133,11 +135,27 @@ enabled: true
 |---|---|---|
 | `enabled` | bool | When `true`, mounts the directory at `/run/nvidia-dra/local-ipc` and sets `NVIDIA_DRA_LOCAL_IPC_DIR` to that path. Defaults to `false`. |
 
-The driver provides only the directory; applications own their socket protocol, file permissions, and transferred handles.
-
 {{% alert title="Note" %}}
 Requires [`LocalIPCDirectory`](feature-gates.md) (Alpha, default: false).
 {{% /alert %}}
+
+#### Trust boundary
+
+The ResourceClaim is the trust boundary. Any container that consumes the claim can create entries in the directory. The sticky bit prevents a container from removing entries it does not own, but it does not prevent a container from binding the expected socket name before the real server does. A client that connects by name alone may then pass its memory handles to the wrong process.
+
+The driver only provides the directory. Applications are responsible for their socket protocol and file permissions, and must authenticate the peer before passing file descriptors or other handles. For example, check the peer's credentials with `SO_PEERCRED`, or have both sides prove they hold a secret mounted from the same Kubernetes Secret.
+
+A client finds the directory through `NVIDIA_DRA_LOCAL_IPC_DIR`:
+
+```python
+import os
+import socket
+
+path = os.path.join(os.environ["NVIDIA_DRA_LOCAL_IPC_DIR"], "server.sock")
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(path)
+# Authenticate the server before sending any handles over sock.
+```
 
 ## ComputeDomain CRDs
 

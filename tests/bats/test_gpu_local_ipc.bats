@@ -144,20 +144,28 @@ SPEC
     bash -lc 'stat -Lc "%d:%i" "${NVIDIA_DRA_LOCAL_IPC_DIR}"')
   assert_equal "${reader_inode}" "${writer_inode}"
 
+  local fs_type
+  fs_type=$(kubectl exec -n local-ipc-e2e pod-local-ipc-writer -- \
+    bash -lc 'stat -f -c %T "${NVIDIA_DRA_LOCAL_IPC_DIR}"')
+  assert_equal "${fs_type}" "tmpfs"
+
+  # The per-claim tmpfs is small, so a large write must fail with ENOSPC.
+  run kubectl exec -n local-ipc-e2e pod-local-ipc-writer -- \
+    bash -lc 'trap "rm -f \"${NVIDIA_DRA_LOCAL_IPC_DIR}/fill\"" EXIT; head -c 2M /dev/zero > "${NVIDIA_DRA_LOCAL_IPC_DIR}/fill"'
+  assert_failure
+
   local unsafe_pods
   unsafe_pods=$(kubectl get pods -n local-ipc-e2e pod-local-ipc-writer pod-local-ipc-reader -o json | \
     jq '[.items[] | select(.spec.hostIPC == true or any(.spec.volumes[]?; has("hostPath")))] | length')
   assert_equal "${unsafe_pods}" "0"
 
-  local claim_uid node
+  local claim_uid node reader_node
   claim_uid=$(kubectl get resourceclaim -n local-ipc-e2e rc-local-ipc -o jsonpath='{.metadata.uid}')
   node=$(kubectl get pod -n local-ipc-e2e pod-local-ipc-writer -o jsonpath='{.spec.nodeName}')
+  reader_node=$(kubectl get pod -n local-ipc-e2e pod-local-ipc-reader -o jsonpath='{.spec.nodeName}')
   [ -n "${claim_uid}" ]
   [ -n "${node}" ]
-
-  kubectl delete pods -n local-ipc-e2e pod-local-ipc-writer pod-local-ipc-reader
-  kubectl wait -n local-ipc-e2e --for=delete pods pod-local-ipc-writer pod-local-ipc-reader --timeout=60s
-  kubectl delete resourceclaim -n local-ipc-e2e rc-local-ipc
+  assert_equal "${reader_node}" "${node}"
 
   local plugin_pod
   plugin_pod=$(kubectl get pods -n dra-driver-nvidia-gpu \
@@ -165,6 +173,18 @@ SPEC
     --field-selector spec.nodeName="${node}" \
     -o jsonpath='{.items[0].metadata.name}')
   [ -n "${plugin_pod}" ]
+
+  kubectl delete pod -n local-ipc-e2e pod-local-ipc-writer
+  kubectl wait -n local-ipc-e2e --for=delete pod pod-local-ipc-writer --timeout=60s
+
+  run kubectl exec -n local-ipc-e2e pod-local-ipc-reader -- \
+    bash -lc 'cat "${NVIDIA_DRA_LOCAL_IPC_DIR}/value"'
+  assert_output "shared"
+  kubectl exec -n dra-driver-nvidia-gpu "${plugin_pod}" -c gpus -- \
+    test -d "/var/lib/kubelet/plugins/gpu.nvidia.com/local-ipc/${claim_uid}"
+
+  kubectl delete pod -n local-ipc-e2e pod-local-ipc-reader
+  kubectl wait -n local-ipc-e2e --for=delete pod pod-local-ipc-reader --timeout=60s
 
   local removed="false"
   for _ in $(seq 1 30); do
@@ -176,4 +196,6 @@ SPEC
     sleep 1
   done
   assert_equal "${removed}" "true"
+
+  kubectl delete resourceclaim -n local-ipc-e2e rc-local-ipc
 }
