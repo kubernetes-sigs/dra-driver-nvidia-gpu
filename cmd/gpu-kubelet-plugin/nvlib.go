@@ -422,6 +422,9 @@ func (l deviceLib) discoverGPUByPCIBusID(pciBusID string) (*AllocatableDevice, [
 	if err != nil {
 		return nil, nil, fmt.Errorf("error visiting devices: %w", err)
 	}
+	if gpu == nil {
+		return nil, nil, fmt.Errorf("error discovering GPU by PCI bus ID: %s", pciBusID)
+	}
 	return gpu, migs, nil
 }
 
@@ -673,16 +676,18 @@ func (l deviceLib) enumerateGpuVfioDevices(perGPUAllocatable *PerGPUAllocatableD
 		return fmt.Errorf("error getting GPU PCI devices: %w", err)
 	}
 
-	// For each discovered PCI device, look up the corresponding full-GPU-device
+	// For each discovered PCI device, look up the corresponding physical GPU
 	// and construct a corresponding new `AllocatableDevice` object.
 	for idx, pci := range gpuPciDevices {
-		klog.Infof("Adding VFIO device for discovered GPU PCI device: %s", pci.Address)
-
-		parent := perGPUAllocatable.GetGPUDeviceByPCIBusID(pci.Address)
-		if parent != nil && !parent.Gpu.vfioEnabled {
-			klog.Infof("Skipping VFIO device for discovered GPU PCI device: %s, vfio is not enabled", pci.Address)
+		// Use the GpuInfo recorded at discovery, not the full-GPU allocatable:
+		// a GPU in MIG mode has none. A GPU not seen by NVML (e.g. already
+		// bound to vfio-pci at startup) has no GpuInfo and is allowed.
+		parent := l.gpuInfoByPCIBusID(pci.Address)
+		if parent != nil && !parent.vfioEnabled {
+			klog.Infof("Skipping VFIO device for discovered GPU PCI device: %s, GPU %s has static MIG devices", pci.Address, parent.CanonicalName())
 			continue
 		}
+		klog.Infof("Adding VFIO device for discovered GPU PCI device: %s", pci.Address)
 
 		vfioDeviceInfo, err := l.getVfioDeviceInfo(idx, pci)
 		if err != nil {
@@ -690,7 +695,7 @@ func (l deviceLib) enumerateGpuVfioDevices(perGPUAllocatable *PerGPUAllocatableD
 		}
 
 		if parent != nil {
-			vfioDeviceInfo.parent = parent.Gpu
+			vfioDeviceInfo.parent = parent
 		} else {
 			// Its likely that the parent is nil because the GPU is prepared in passthrough mode.
 			klog.V(4).Infof("Skipping association with parent GPU device for VFIO device: %s", pci.Address)
@@ -706,6 +711,16 @@ func (l deviceLib) enumerateGpuVfioDevices(perGPUAllocatable *PerGPUAllocatableD
 	}
 
 	return nil
+}
+
+// gpuInfoByPCIBusID returns the GpuInfo recorded at discovery for the GPU at
+// the given PCI bus ID, or nil if NVML did not see it.
+func (l deviceLib) gpuInfoByPCIBusID(pciBusID PCIBusID) *GpuInfo {
+	uuid, ok := l.gpuUUIDbyPCIBusID[pciBusID]
+	if !ok {
+		return nil
+	}
+	return l.gpuInfosByUUID[uuid]
 }
 
 func (l deviceLib) getVfioDeviceInfo(idx int, device *nvpci.NvidiaPCIDevice) (*VfioDeviceInfo, error) {
