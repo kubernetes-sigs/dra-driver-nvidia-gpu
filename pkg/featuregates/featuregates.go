@@ -83,7 +83,8 @@ const (
 	// matchAttribute on gpu.nvidia.com/partitionN. Requires Fabric Manager
 	// running with FABRIC_MODE=1. Independent of PassthroughSupport: with both
 	// gates on, full-GPU and VFIO claims are partitioned; with only this gate
-	// on, only full-GPU claims are.
+	// on, only full-GPU claims are. The GPU kubelet plugin disables the feature
+	// locally when the NVIDIA vGPU host kernel module is loaded.
 	FabricManagerPartitioning featuregate.Feature = "FabricManagerPartitioning"
 
 	// HostManagedIMEXDaemon gates whether the imex deployment mode

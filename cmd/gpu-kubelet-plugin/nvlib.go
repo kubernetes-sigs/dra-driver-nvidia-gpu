@@ -37,6 +37,7 @@ import (
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/lookup/root"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/fabricmanager"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
@@ -655,7 +656,7 @@ func (l deviceLib) getGpuInfo(index int, device nvdev.Device) (*GpuInfo, error) 
 		addressingMode:        addressingMode,
 	}
 
-	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
+	if fabricmanager.SupportsFabricManagerPartitioning() {
 		if moduleID, ret := device.GetModuleId(); ret == nvml.SUCCESS {
 			gpuInfo.gpuModuleID = moduleID
 		} else {
