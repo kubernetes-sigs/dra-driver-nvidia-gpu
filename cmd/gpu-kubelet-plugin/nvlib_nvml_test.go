@@ -24,6 +24,7 @@ import (
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/mount-utils"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
@@ -412,6 +413,7 @@ func TestDeviceStateRollbackAfterComputeInstanceCreationFailure(t *testing.T) {
 				deviceName: {MigDynamic: migSpec},
 			},
 		}},
+		localIPCManager: NewLocalIPCManager(t.TempDir(), mount.NewFakeMounter(nil)),
 	}
 
 	err = state.rollbackPartiallyPreparedClaim(context.Background(), "claim-uid", preparedClaim, checkpoint)
