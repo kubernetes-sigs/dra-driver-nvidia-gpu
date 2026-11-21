@@ -57,6 +57,7 @@ If you plan to use ComputeDomains, you also need:
 
 - NVIDIA Driver v570.158.01 or later. The `IMEXDaemonsWithDNSNames` feature gate is enabled by default and requires this driver version. The ComputeDomain plugin will fail to start on older drivers unless `IMEXDaemonsWithDNSNames` is explicitly disabled.
 - Multi-Node NVLink (MNNVL) hardware. Nodes must be connected via NVLink fabric, such as GB200 NVL72 and similar systems.
+- The same NVIDIA driver version on every node of an NVLink domain. IMEX daemons on nodes with different driver versions refuse to talk to each other. In driver-managed mode, the readiness probe of each affected daemon then fails, so the ComputeDomain is not reported as `Ready` while workloads spanning those nodes would hang.
 - A component that manages the `nvidia.com/gpu.clique` node label.
   Use GPU Feature Discovery (GFD), or set `kubeletPlugin.containers.computeDomains.gpuCliqueLabelEnabled=true` so the ComputeDomain kubelet plugin manages the label.
 
