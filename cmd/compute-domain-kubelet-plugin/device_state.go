@@ -778,6 +778,11 @@ func (s *DeviceState) applyComputeDomainDaemonConfig(ctx context.Context, config
 		return nil, permanentError{fmt.Errorf("ComputeDomain daemon claims are not supported when imex.mode=hostManaged")}
 	}
 
+	// Only the controller creates daemon claims, in the driver namespaces.
+	if err := s.assertDaemonClaimNamespace(claim.Namespace); err != nil {
+		return nil, permanentError{err}
+	}
+
 	// Get the list of claim requests this config is being applied over.
 	var requests []string
 	for _, r := range results {
@@ -943,6 +948,19 @@ func (s *DeviceState) assertImexChannelNotAllocated(id int) error {
 		}
 	}
 	return nil
+}
+
+// assertDaemonClaimNamespace allows only the driver and additional namespaces.
+func (s *DeviceState) assertDaemonClaimNamespace(namespace string) error {
+	if namespace != "" && namespace == s.config.flags.namespace {
+		return nil
+	}
+	for _, ns := range s.config.flags.additionalNamespaces.Value() {
+		if namespace != "" && strings.TrimSpace(ns) == namespace {
+			return nil
+		}
+	}
+	return fmt.Errorf("daemon claim not allowed in namespace %q", namespace)
 }
 
 // validateDriverVersionForIMEXDaemonsWithDNSNames validates that the driver version

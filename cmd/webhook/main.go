@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/urfave/cli/v2"
@@ -45,10 +46,16 @@ type Flags struct {
 	loggingConfig     *flags.LoggingConfig
 	featureGateConfig *flags.FeatureGateConfig
 
-	certFile string
-	keyFile  string
-	port     int
+	certFile             string
+	keyFile              string
+	port                 int
+	namespace            string
+	additionalNamespaces cli.StringSlice
 }
+
+// daemonNamespaces lists where ComputeDomainDaemonConfig is allowed.
+// Empty disables the check.
+var daemonNamespaces []string
 
 func main() {
 	if err := newApp().Run(os.Args); err != nil {
@@ -82,6 +89,20 @@ func newApp() *cli.App {
 			Destination: &flags.port,
 		},
 	}
+	cliFlags = append(cliFlags,
+		&cli.StringFlag{
+			Name:        "namespace",
+			Usage:       "The driver namespace. Empty allows ComputeDomainDaemonConfig in any namespace.",
+			Destination: &flags.namespace,
+			EnvVars:     []string{"NAMESPACE"},
+		},
+		&cli.StringSliceFlag{
+			Name:        "additional-namespaces",
+			Usage:       "Additional namespaces where the driver can manage resources.",
+			Destination: &flags.additionalNamespaces,
+			EnvVars:     []string{"ADDITIONAL_NAMESPACES"},
+		},
+	)
 	cliFlags = append(cliFlags, flags.loggingConfig.Flags()...)
 	cliFlags = append(cliFlags, flags.featureGateConfig.Flags()...)
 
@@ -98,6 +119,12 @@ func newApp() *cli.App {
 			return flags.loggingConfig.Apply()
 		},
 		Action: func(c *cli.Context) error {
+			if flags.namespace != "" {
+				daemonNamespaces = []string{flags.namespace}
+				for _, ns := range flags.additionalNamespaces.Value() {
+					daemonNamespaces = append(daemonNamespaces, strings.TrimSpace(ns))
+				}
+			}
 			server := &http.Server{
 				Handler: newMux(),
 				Addr:    fmt.Sprintf(":%d", flags.port),
@@ -271,6 +298,10 @@ func admitResourceClaimParameters(ar admissionv1.AdmissionReview) *admissionv1.A
 		case *nvapi.ComputeDomainChannelConfig:
 			configInterface = castConfig
 		case *nvapi.ComputeDomainDaemonConfig:
+			if len(daemonNamespaces) > 0 && !slices.Contains(daemonNamespaces, ar.Request.Namespace) {
+				errs = append(errs, fmt.Errorf("object at %s: ComputeDomainDaemonConfig not allowed in namespace %q", fieldPath, ar.Request.Namespace))
+				continue
+			}
 			configInterface = castConfig
 		default:
 			errs = append(errs, fmt.Errorf("expected a recognized configuration type at %s but got: %T", fieldPath, decodedConfig))

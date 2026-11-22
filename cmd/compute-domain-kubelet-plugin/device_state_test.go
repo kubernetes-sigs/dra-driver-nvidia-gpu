@@ -894,6 +894,55 @@ func TestApplyComputeDomainDaemonConfigHostManagedRejected(t *testing.T) {
 	assert.True(t, isPermanentError(err), "daemon claims must be a permanent error under host-managed IMEX")
 }
 
+func daemonNamespaceConfig(namespace string, additionalNamespaces ...string) *Config {
+	flags := &Flags{namespace: namespace}
+	for _, ns := range additionalNamespaces {
+		_ = flags.additionalNamespaces.Set(ns)
+	}
+	return &Config{flags: flags, imexConfig: imex.Config{Mode: imex.ModeDriverManaged}}
+}
+
+func TestAssertDaemonClaimNamespace(t *testing.T) {
+	state := &DeviceState{config: daemonNamespaceConfig("nvidia-dra-driver-gpu", "legacy-ns", " other-ns")}
+
+	for namespace, allowed := range map[string]bool{
+		"nvidia-dra-driver-gpu": true,
+		"legacy-ns":             true,
+		"other-ns":              true,
+		"tenant-a":              false,
+		"default":               false,
+		"":                      false,
+	} {
+		t.Run(namespace, func(t *testing.T) {
+			err := state.assertDaemonClaimNamespace(namespace)
+			if allowed {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}
+
+// Rejected before any ComputeDomain lookup. The nil manager would panic.
+func TestApplyComputeDomainDaemonConfigRejectsClaimOutsideDriverNamespace(t *testing.T) {
+	result := allocationResult("request", DriverName, "daemon-0", nil)
+	claim := claimWithResults("claim-uid", result)
+	claim.Namespace = "tenant-a"
+
+	state := &DeviceState{config: daemonNamespaceConfig("nvidia-dra-driver-gpu")}
+	_, err := state.applyComputeDomainDaemonConfig(
+		context.Background(),
+		daemonConfig("cd-uid"),
+		claim,
+		[]*resourceapi.DeviceRequestAllocationResult{&result},
+	)
+
+	require.Error(t, err)
+	assert.True(t, isPermanentError(err))
+	assert.Contains(t, err.Error(), `not allowed in namespace "tenant-a"`)
+}
+
 func TestApplyComputeDomainChannelConfigHostManagedNoCliqueSkipsInjection(t *testing.T) {
 	cd := &configapi.ComputeDomain{
 		ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "cd-uid"},

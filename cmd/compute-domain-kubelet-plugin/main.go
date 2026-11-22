@@ -71,6 +71,7 @@ type Flags struct {
 	imexMode                      string
 	imexIsolation                 string
 	imexHostSocketPath            string
+	additionalNamespaces          cli.StringSlice
 }
 
 type Config struct {
@@ -109,6 +110,12 @@ func newApp() *cli.App {
 			Value:       "default",
 			Destination: &flags.namespace,
 			EnvVars:     []string{"NAMESPACE"},
+		},
+		&cli.StringSliceFlag{
+			Name:        "additional-namespaces",
+			Usage:       "Additional namespaces where the driver can manage resources.",
+			Destination: &flags.additionalNamespaces,
+			EnvVars:     []string{"ADDITIONAL_NAMESPACES"},
 		},
 		&cli.StringFlag{
 			Name:        "http-endpoint",

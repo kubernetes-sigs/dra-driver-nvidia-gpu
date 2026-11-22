@@ -178,6 +178,14 @@ listed in ADDITIONAL_NAMESPACES, or repeated entries in the comma-separated list
 {{- end -}}
 
 {{/*
+The controller's ADDITIONAL_NAMESPACES, normalized, without the driver
+namespace. Empty when none are set.
+*/}}
+{{- define "dra-driver-nvidia-gpu.additionalNamespaces" -}}
+  {{- rest (splitList "," (include "dra-driver-nvidia-gpu.namespaces" .)) | join "," -}}
+{{- end -}}
+
+{{/*
 Get the latest available resource.k8s.io API version
 
 Priority:
