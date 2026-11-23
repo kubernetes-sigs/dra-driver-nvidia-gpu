@@ -42,8 +42,9 @@ spec:
             properties:
               channel:
                 description: |-
-                  A single workload ResourceClaimTemplate. Exactly one of channel and
-                  channels must be set.
+                  Channel provides the spec for a channel used to run a workload inside
+                  the ComputeDomain, through a single workload ResourceClaimTemplate.
+                  Exactly one of channel and channels must be set.
                 properties:
                   allocationMode:
                     default: Single
@@ -73,9 +74,9 @@ spec:
                 type: object
               channels:
                 description: |-
-                  Workload ResourceClaimTemplates, each backed by its own IMEX channel.
-                  Pods using the same template share its channel. Requires the
-                  ComputeDomainChannelReservations feature gate.
+                  Channels lists workload ResourceClaimTemplates, each backed by its own
+                  IMEX channel. Pods using the same template share its channel. Requires
+                  the ComputeDomainChannelReservations feature gate.
                 items:
                   description: |-
                     ComputeDomainReservedChannelSpec provides the spec for one of several

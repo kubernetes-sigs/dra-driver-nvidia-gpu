@@ -90,13 +90,14 @@ type ComputeDomainSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Optional
 	NumNodes int `json:"numNodes,omitempty"`
-	// A single workload ResourceClaimTemplate. Exactly one of channel and
-	// channels must be set.
+	// Channel provides the spec for a channel used to run a workload inside
+	// the ComputeDomain, through a single workload ResourceClaimTemplate.
+	// Exactly one of channel and channels must be set.
 	// +kubebuilder:validation:Optional
 	Channel *ComputeDomainChannelSpec `json:"channel,omitempty"`
-	// Workload ResourceClaimTemplates, each backed by its own IMEX channel.
-	// Pods using the same template share its channel. Requires the
-	// ComputeDomainChannelReservations feature gate.
+	// Channels lists workload ResourceClaimTemplates, each backed by its own
+	// IMEX channel. Pods using the same template share its channel. Requires
+	// the ComputeDomainChannelReservations feature gate.
 	// +listType=atomic
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=32
