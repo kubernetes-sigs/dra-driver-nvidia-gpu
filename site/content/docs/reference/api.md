@@ -253,8 +253,7 @@ Requires [`ComputeDomainDaemonSet`](feature-gates.md) (Alpha, default: false).
 | `spec.updateStrategy.rollingUpdate.paused` | boolean | `false` | Stops new batches. |
 | `spec.updateStrategy.rollingUpdate.progressDeadlineSeconds` | integer | `1200` | How long the daemons of a clique may take to become available before the clique is reported as stalled. Must be greater than `minReadySeconds`. |
 | `spec.updateStrategy.rollingUpdate.topologyKey` | string | | Node label key that groups cliques, for example by block or Scalable Unit of racks. The update finishes the cliques of one value, in sorted order, before it starts the next. Cliques without the label go last. |
-| `status.cliques[]` | list | | Nodes, ready daemons, updated daemons, the `topology` value and, for a stalled clique, the `stalledReason` per clique. |
-| `status.updatingTopology` | string | | Value of `topologyKey` whose cliques a rolling update is restarting. |
+| `status.cliques[]` | list | | Nodes, ready daemons, updated daemons and `state` (`Ready`, `NotReady` or `Stalled`) per clique, for up to 1024 cliques. |
 | `status.conditions[]` | list | | `Ready`, `RolloutInProgress`, `TemplateOutdated`, `UpdateBlocked`, `DeletionBlocked` and `Degraded`. See [Conditions](../guides/static-imex-daemons.md#conditions). |
 
 ## ComputeDomain opaque configuration types

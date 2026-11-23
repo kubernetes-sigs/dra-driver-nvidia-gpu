@@ -272,8 +272,8 @@ func TestComputeDomainDaemonSetStatus(t *testing.T) {
 	assert.Equal(t, int32(3), status.UpdatedNumberScheduled)
 	assert.Equal(t, int32(2), status.NumberCliques)
 	assert.Equal(t, []nvapi.ComputeDomainDaemonSetCliqueStatus{
-		{ID: "c0", Nodes: 2, ReadyNodes: 2, UpdatedNodes: 2},
-		{ID: "c1", Nodes: 2, ReadyNodes: 2, UpdatedNodes: 1},
+		{ID: "c0", Nodes: 2, ReadyNodes: 2, UpdatedNodes: 2, State: nvapi.ComputeDomainDaemonSetCliqueReady},
+		{ID: "c1", Nodes: 2, ReadyNodes: 2, UpdatedNodes: 1, State: nvapi.ComputeDomainDaemonSetCliqueReady},
 	}, status.Cliques)
 	assert.True(t, meta.IsStatusConditionTrue(status.Conditions, nvapi.ComputeDomainDaemonSetConditionReady))
 	rollout := meta.FindStatusCondition(status.Conditions, nvapi.ComputeDomainDaemonSetConditionRolloutInProgress)
@@ -344,10 +344,6 @@ func TestComputeDomainDaemonSetRollingUpdateByTopology(t *testing.T) {
 	f.sync(t)
 
 	assert.ElementsMatch(t, []string{"imex-c1-n0", "imex-c1-n1"}, f.deletedPods(), "the clique of the first topology restarts")
-	status := f.cdds(t).Status
-	assert.Equal(t, "a", status.UpdatingTopology)
-	assert.Equal(t, []string{"b", "a"}, []string{status.Cliques[0].Topology, status.Cliques[1].Topology})
-
 	ds := f.daemonSet(t)
 	ds.Status.DesiredNumberScheduled = 4
 	_, err := f.core.AppsV1().DaemonSets("driver").UpdateStatus(context.Background(), ds, metav1.UpdateOptions{})
@@ -394,8 +390,8 @@ func TestComputeDomainDaemonSetReportsStalledRollout(t *testing.T) {
 
 	assert.Empty(t, f.deletedPods(), "a stalled clique stops the rollout")
 	status := f.cdds(t).Status
-	assert.Equal(t, "node c0-n0: pod imex-c0-n0 container compute-domain-daemon ImagePullBackOff", status.Cliques[0].StalledReason)
-	assert.Empty(t, status.Cliques[1].StalledReason)
+	assert.Equal(t, nvapi.ComputeDomainDaemonSetCliqueStalled, status.Cliques[0].State)
+	assert.Equal(t, nvapi.ComputeDomainDaemonSetCliqueReady, status.Cliques[1].State)
 	rollout := meta.FindStatusCondition(status.Conditions, nvapi.ComputeDomainDaemonSetConditionRolloutInProgress)
 	require.NotNil(t, rollout)
 	assert.Equal(t, "ProgressDeadlineExceeded", rollout.Reason)

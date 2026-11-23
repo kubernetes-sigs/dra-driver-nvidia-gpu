@@ -77,8 +77,8 @@ spec:
                 maxLength: 1024
                 type: string
                 x-kubernetes-validations:
-                - message: image must not contain spaces
-                  rule: '!self.contains('' '')'
+                - message: image must not contain whitespace
+                  rule: '!self.matches(''[[:space:]]'')'
               imagePullSecrets:
                 description: ImagePullSecrets in the driver namespace for the IMEX
                   daemon pods.
@@ -253,10 +253,14 @@ spec:
                   type:
                     default: OnDelete
                     description: |-
-                      Type is OnDelete (default) or RollingUpdate. With OnDelete, daemons
-                      keep their revision until their pods are deleted. With RollingUpdate,
-                      the controller restarts outdated daemons one batch of whole cliques at
-                      a time.
+                      Type of IMEX daemon update. Can be "OnDelete" or "RollingUpdate".
+                      Default is OnDelete.
+
+                      Possible enum values:
+                       - `"OnDelete"` Replace the old daemons only when their pods are deleted.
+                       - `"RollingUpdate"` Replace the old daemons by new ones one batch of
+                         whole cliques at a time, as restarting an IMEX daemon disrupts its
+                         whole clique.
                     enum:
                     - OnDelete
                     - RollingUpdate
@@ -270,8 +274,9 @@ spec:
             description: ComputeDomainDaemonSetStatus reports the IMEX daemons.
             properties:
               cliques:
-                description: Cliques reports the daemons of each NVLink clique, sorted
-                  by ID.
+                description: |-
+                  Cliques reports the daemons of each NVLink clique, sorted by ID. It
+                  lists at most 1024 cliques, numberCliques counts them all.
                 items:
                   description: ComputeDomainDaemonSetCliqueStatus reports the IMEX
                     daemons of one clique.
@@ -284,15 +289,13 @@ spec:
                     readyNodes:
                       format: int32
                       type: integer
-                    stalledReason:
-                      description: |-
-                        StalledReason tells which nodes keep the clique unavailable past
-                        rollingUpdate.progressDeadlineSeconds, and why.
-                      type: string
-                    topology:
-                      description: |-
-                        Topology is the value of rollingUpdate.topologyKey that the clique is
-                        updated with.
+                    state:
+                      description: 'State of the daemons of the clique: Ready, NotReady,
+                        or Stalled.'
+                      enum:
+                      - Ready
+                      - NotReady
+                      - Stalled
                       type: string
                     updatedNodes:
                       description: UpdatedNodes is the number of daemons on the current
@@ -302,6 +305,7 @@ spec:
                   required:
                   - id
                   type: object
+                maxItems: 1024
                 type: array
                 x-kubernetes-list-map-keys:
                 - id
@@ -361,6 +365,7 @@ spec:
                   - status
                   - type
                   type: object
+                maxItems: 8
                 type: array
                 x-kubernetes-list-map-keys:
                 - type
@@ -372,6 +377,7 @@ spec:
                 description: Image of the current revision.
                 type: string
               numberCliques:
+                description: NumberCliques is the number of NVLink cliques with daemons.
                 format: int32
                 type: integer
               numberReady:
@@ -387,12 +393,6 @@ spec:
                   revision.
                 format: int32
                 type: integer
-              updatingTopology:
-                description: |-
-                  UpdatingTopology is the value of rollingUpdate.topologyKey whose
-                  cliques a rolling update is restarting. It is empty when no update is
-                  in progress, or when the cliques left have no such label.
-                type: string
             type: object
         type: object
         x-kubernetes-validations:

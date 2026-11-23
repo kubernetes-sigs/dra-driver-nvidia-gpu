@@ -982,8 +982,7 @@ func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *
 		}
 	}
 	status.Cliques = cliqueStatuses(cliques, hash)
-	status.NumberCliques = int32(len(status.Cliques))
-	status.UpdatingTopology = plan.topology
+	status.NumberCliques = int32(len(cliques))
 
 	ready := metav1.Condition{Type: nvapi.ComputeDomainDaemonSetConditionReady, Status: metav1.ConditionFalse, Reason: "DaemonsNotReady",
 		Message: fmt.Sprintf("%d of %d IMEX daemons are ready", status.NumberReady, status.DesiredNumberScheduled)}

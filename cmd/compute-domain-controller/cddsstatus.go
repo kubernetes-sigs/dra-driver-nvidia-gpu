@@ -146,11 +146,13 @@ func podReadySince(pod *corev1.Pod) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// cliqueStatuses summarizes the daemons of each clique.
+// cliqueStatuses summarizes the daemons of each clique, up to the number of
+// cliques the status can list.
 func cliqueStatuses(cliques []*staticClique, hash string) []nvapi.ComputeDomainDaemonSetCliqueStatus {
+	cliques = cliques[:min(len(cliques), nvapi.MaxComputeDomainDaemonSetCliqueStatuses)]
 	statuses := make([]nvapi.ComputeDomainDaemonSetCliqueStatus, 0, len(cliques))
 	for _, c := range cliques {
-		status := nvapi.ComputeDomainDaemonSetCliqueStatus{ID: c.id, Nodes: int32(len(c.nodes)), Topology: c.topology, StalledReason: c.stalled}
+		status := nvapi.ComputeDomainDaemonSetCliqueStatus{ID: c.id, Nodes: int32(len(c.nodes))}
 		for _, pod := range c.pods {
 			if _, ready := podReadySince(pod); ready {
 				status.ReadyNodes++
@@ -158,6 +160,14 @@ func cliqueStatuses(cliques []*staticClique, hash string) []nvapi.ComputeDomainD
 			if podUpdated(pod, hash) {
 				status.UpdatedNodes++
 			}
+		}
+		switch {
+		case c.stalled != "":
+			status.State = nvapi.ComputeDomainDaemonSetCliqueStalled
+		case status.ReadyNodes >= status.Nodes:
+			status.State = nvapi.ComputeDomainDaemonSetCliqueReady
+		default:
+			status.State = nvapi.ComputeDomainDaemonSetCliqueNotReady
 		}
 		statuses = append(statuses, status)
 	}

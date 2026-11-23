@@ -103,5 +103,5 @@ func TestGroupByCliqueAppliesNodeSelector(t *testing.T) {
 
 	assert.Equal(t, []string{"c0-n0"}, cliques[0].nodes, "only selected nodes run a daemon")
 	statuses := cliqueStatuses(cliques, "h")
-	assert.Equal(t, []nvapi.ComputeDomainDaemonSetCliqueStatus{{ID: "c0", Nodes: 1, ReadyNodes: 1, UpdatedNodes: 1}}, statuses)
+	assert.Equal(t, []nvapi.ComputeDomainDaemonSetCliqueStatus{{ID: "c0", Nodes: 1, ReadyNodes: 1, UpdatedNodes: 1, State: nvapi.ComputeDomainDaemonSetCliqueReady}}, statuses)
 }

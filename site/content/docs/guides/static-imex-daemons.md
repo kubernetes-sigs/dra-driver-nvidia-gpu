@@ -88,10 +88,9 @@ network switches and usually carry a node label for it. Set
 The controller sorts the values of the label and restarts the cliques of the
 first value, `maxUnavailableCliques` at a time. It moves to the next value
 once all cliques of the current one run the new revision and are available.
-Cliques on nodes without the label go last. `status.updatingTopology` and the
-`RolloutInProgress` condition show the block being updated, and
-`status.cliques[].topology` the block of each clique. Set `paused: true` to
-stop between batches, for example to check the first block.
+Cliques on nodes without the label go last. The `RolloutInProgress`
+condition shows the block being updated. Set `paused: true` to stop between
+batches, for example to check the first block.
 
 ```bash
 kubectl patch computedomaindaemonset default --type merge -p \
@@ -113,12 +112,13 @@ their pods last changed is stalled. The default of 1200 matches the time the
 startup probe gives a daemon. A stalled clique keeps its place in the batch,
 so that a broken revision reaches at most `maxUnavailableCliques` cliques,
 and the rollout waits. The `RolloutInProgress` condition then has
-reason `ProgressDeadlineExceeded` and names the stalled cliques, and
-`status.cliques[].stalledReason` tells which nodes block each one and why:
+reason `ProgressDeadlineExceeded`. Its message names the stalled cliques and
+which nodes block each one and why, and `status.cliques[].state` is
+`Stalled` for them:
 
 ```bash
 kubectl get computedomaindaemonset default \
-  -o jsonpath='{range .status.cliques[?(@.stalledReason)]}{.id}{": "}{.stalledReason}{"\n"}{end}'
+  -o jsonpath='{.status.conditions[?(@.type=="RolloutInProgress")].message}{"\n"}'
 ```
 
 | Reason | Meaning | To continue |

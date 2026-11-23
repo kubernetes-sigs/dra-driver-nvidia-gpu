@@ -51,6 +51,23 @@ const (
 	ComputeDomainDaemonSetConditionDegraded = "Degraded"
 )
 
+// States of the IMEX daemons of a clique.
+const (
+	// ComputeDomainDaemonSetCliqueReady means the daemons on all nodes of the
+	// clique are ready.
+	ComputeDomainDaemonSetCliqueReady = "Ready"
+	// ComputeDomainDaemonSetCliqueNotReady means some daemons of the clique
+	// are not ready.
+	ComputeDomainDaemonSetCliqueNotReady = "NotReady"
+	// ComputeDomainDaemonSetCliqueStalled means the clique is not available
+	// past rollingUpdate.progressDeadlineSeconds, which holds the rolling
+	// update back. The RolloutInProgress condition tells why.
+	ComputeDomainDaemonSetCliqueStalled = "Stalled"
+)
+
+// MaxComputeDomainDaemonSetCliqueStatuses bounds status.cliques.
+const MaxComputeDomainDaemonSetCliqueStatuses = 1024
+
 // +genclient
 // +genclient:nonNamespaced
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -99,7 +116,7 @@ type ComputeDomainDaemonSetSpec struct {
 	// upgrade them.
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxLength=1024
-	// +kubebuilder:validation:XValidation:rule="!self.contains(' ')",message="image must not contain spaces"
+	// +kubebuilder:validation:XValidation:rule="!self.matches('[[:space:]]')",message="image must not contain whitespace"
 	Image string `json:"image,omitempty"`
 
 	// ImagePullSecrets in the driver namespace for the IMEX daemon pods.
@@ -153,10 +170,14 @@ type ComputeDomainDaemonSetSpec struct {
 // clique, so updates never restart daemons node by node.
 // +kubebuilder:validation:XValidation:rule="self.type == 'RollingUpdate' || !has(self.rollingUpdate)",message="rollingUpdate requires type RollingUpdate"
 type ComputeDomainDaemonSetUpdateStrategy struct {
-	// Type is OnDelete (default) or RollingUpdate. With OnDelete, daemons
-	// keep their revision until their pods are deleted. With RollingUpdate,
-	// the controller restarts outdated daemons one batch of whole cliques at
-	// a time.
+	// Type of IMEX daemon update. Can be "OnDelete" or "RollingUpdate".
+	// Default is OnDelete.
+	//
+	// Possible enum values:
+	//  - `"OnDelete"` Replace the old daemons only when their pods are deleted.
+	//  - `"RollingUpdate"` Replace the old daemons by new ones one batch of
+	//    whole cliques at a time, as restarting an IMEX daemon disrupts its
+	//    whole clique.
 	// +kubebuilder:validation:Enum=OnDelete;RollingUpdate
 	// +kubebuilder:default:=OnDelete
 	// +kubebuilder:validation:Optional
@@ -228,21 +249,20 @@ type ComputeDomainDaemonSetStatus struct {
 	// revision.
 	// +kubebuilder:validation:Optional
 	UpdatedNumberScheduled int32 `json:"updatedNumberScheduled"`
+	// NumberCliques is the number of NVLink cliques with daemons.
 	// +kubebuilder:validation:Optional
 	NumberCliques int32 `json:"numberCliques"`
-	// UpdatingTopology is the value of rollingUpdate.topologyKey whose
-	// cliques a rolling update is restarting. It is empty when no update is
-	// in progress, or when the cliques left have no such label.
-	// +kubebuilder:validation:Optional
-	UpdatingTopology string `json:"updatingTopology,omitempty"`
 
-	// Cliques reports the daemons of each NVLink clique, sorted by ID.
+	// Cliques reports the daemons of each NVLink clique, sorted by ID. It
+	// lists at most 1024 cliques, numberCliques counts them all.
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxItems=1024
 	// +listType=map
 	// +listMapKey=id
 	Cliques []ComputeDomainDaemonSetCliqueStatus `json:"cliques,omitempty"`
 
 	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxItems=8
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
@@ -258,12 +278,8 @@ type ComputeDomainDaemonSetCliqueStatus struct {
 	// UpdatedNodes is the number of daemons on the current revision.
 	// +kubebuilder:validation:Optional
 	UpdatedNodes int32 `json:"updatedNodes"`
-	// Topology is the value of rollingUpdate.topologyKey that the clique is
-	// updated with.
+	// State of the daemons of the clique: Ready, NotReady, or Stalled.
+	// +kubebuilder:validation:Enum=Ready;NotReady;Stalled
 	// +kubebuilder:validation:Optional
-	Topology string `json:"topology,omitempty"`
-	// StalledReason tells which nodes keep the clique unavailable past
-	// rollingUpdate.progressDeadlineSeconds, and why.
-	// +kubebuilder:validation:Optional
-	StalledReason string `json:"stalledReason,omitempty"`
+	State string `json:"state,omitempty"`
 }

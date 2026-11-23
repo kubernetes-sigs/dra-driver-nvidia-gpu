@@ -256,16 +256,36 @@ func TestPlanCliqueRolloutByTopology(t *testing.T) {
 	}
 }
 
-func TestCliqueStatusesReportTopology(t *testing.T) {
+func TestAssignTopology(t *testing.T) {
 	nodes, pods := testCliques(2, 2, "h")
 	topologyOf := map[string]string{"c0-n0": "b", "c0-n1": "a", "c1-n0": "", "c1-n1": ""}
 	cliques, _ := groupByClique(nodes, pods, nil)
 	assignTopology(cliques, topologyOf)
 
+	assert.Equal(t, "a", cliques[0].topology, "a clique spanning topologies goes with the first")
+	assert.Empty(t, cliques[1].topology)
+}
+
+func TestCliqueStatusesReportState(t *testing.T) {
+	nodes, pods := testCliques(3, 2, "h")
+	pods[2] = daemonPod("c1-n0", "h", -1)
+	cliques, _ := groupByClique(nodes, pods, nil)
+	cliques[2].stalled = "node c2-n0: no IMEX daemon pod"
+
 	statuses := cliqueStatuses(cliques, "h")
 
-	assert.Equal(t, "a", statuses[0].Topology, "a clique spanning topologies goes with the first")
-	assert.Empty(t, statuses[1].Topology)
+	assert.Equal(t, []string{
+		nvapi.ComputeDomainDaemonSetCliqueReady,
+		nvapi.ComputeDomainDaemonSetCliqueNotReady,
+		nvapi.ComputeDomainDaemonSetCliqueStalled,
+	}, []string{statuses[0].State, statuses[1].State, statuses[2].State})
+}
+
+func TestCliqueStatusesAreBounded(t *testing.T) {
+	nodes, pods := testCliques(nvapi.MaxComputeDomainDaemonSetCliqueStatuses+1, 1, "h")
+	cliques, _ := groupByClique(nodes, pods, nil)
+
+	assert.Len(t, cliqueStatuses(cliques, "h"), nvapi.MaxComputeDomainDaemonSetCliqueStatuses)
 }
 
 func TestValidateSpecTopologyKey(t *testing.T) {
