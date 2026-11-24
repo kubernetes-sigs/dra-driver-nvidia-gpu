@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
 )
@@ -334,6 +335,23 @@ func TestDeviceLibSetTimeSlice(t *testing.T) {
 		require.Error(t, l.setTimeSlice([]string{"GPU-1", "GPU-2"}, 5))
 
 		require.Len(t, smi.invocations(t), 1)
+	})
+
+	t.Run("a not-supported exit code wraps nvml.ERROR_NOT_SUPPORTED", func(t *testing.T) {
+		smi := newFakeSMI(t, 3)
+		l := deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath}
+
+		err := l.setTimeSlice([]string{"GPU-1"}, 5)
+		require.ErrorIs(t, err, nvml.ERROR_NOT_SUPPORTED)
+	})
+
+	t.Run("other exit codes do not wrap nvml.ERROR_NOT_SUPPORTED", func(t *testing.T) {
+		smi := newFakeSMI(t, 1)
+		l := deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath}
+
+		err := l.setTimeSlice([]string{"GPU-1"}, 5)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, nvml.ERROR_NOT_SUPPORTED)
 	})
 
 	t.Run("the driver library is prepended to an existing LD_PRELOAD", func(t *testing.T) {
