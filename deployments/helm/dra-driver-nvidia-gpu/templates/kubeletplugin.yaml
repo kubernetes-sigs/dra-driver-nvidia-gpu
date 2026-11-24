@@ -162,6 +162,11 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        {{- with include "dra-driver-nvidia-gpu.additionalNamespaces" . }}
+        # Daemon claims are only prepared in NAMESPACE and these.
+        - name: ADDITIONAL_NAMESPACES
+          value: {{ . | quote }}
+        {{- end }}
         {{- if .Values.nvidiaCDIHookPath }}
         - name: NVIDIA_CDI_HOOK_PATH
           value: "{{ .Values.nvidiaCDIHookPath }}"

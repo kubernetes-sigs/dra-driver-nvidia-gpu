@@ -59,6 +59,15 @@ spec:
           - --tls-private-key-file=/cert/tls.key
           - --port={{ .Values.webhook.containerPort }}
         env:
+        # ComputeDomainDaemonConfig is only allowed in NAMESPACE and ADDITIONAL_NAMESPACES.
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        {{- with include "dra-driver-nvidia-gpu.additionalNamespaces" . }}
+        - name: ADDITIONAL_NAMESPACES
+          value: {{ . | quote }}
+        {{- end }}
         {{- if .Values.featureGates }}
         - name: FEATURE_GATES
           value: "{{ range $key, $value := .Values.featureGates }}{{ $key }}={{ $value }},{{ end }}"

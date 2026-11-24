@@ -363,7 +363,7 @@ func TestPrepareLeavesNoCheckpointForARejectedClaim(t *testing.T) {
 			state := testDeviceState()
 			state.checkpointManager = &fakeCheckpointManager{checkpoint: checkpointWithClaims(map[string]PreparedClaim{})}
 			state.computeDomainManager = &ComputeDomainManager{configFilesRoot: t.TempDir()}
-			state.config = &Config{flags: &Flags{nodeName: "test-node"}}
+			state.config = &Config{flags: &Flags{nodeName: "test-node", namespace: "default"}}
 
 			_, err := state.Prepare(t.Context(), claim)
 
@@ -438,7 +438,7 @@ func TestPrepareRejectsAMixedClaimBeforeApplying(t *testing.T) {
 	require.NoError(t, err)
 
 	state := testDeviceState()
-	state.config = &Config{flags: &Flags{nodeName: "test-node"}}
+	state.config = &Config{flags: &Flags{nodeName: "test-node", namespace: "default"}}
 	state.computeDomainManager = &ComputeDomainManager{informer: informer, configFilesRoot: configFilesRoot}
 	state.checkpointManager = &fakeCheckpointManager{checkpoint: checkpointWithClaims(map[string]PreparedClaim{})}
 	state.cdi = &CDIHandler{cache: cache, vendor: cdiVendor, claimClass: cdiClaimClass}
@@ -892,6 +892,80 @@ func TestApplyComputeDomainDaemonConfigHostManagedRejected(t *testing.T) {
 
 	require.Error(t, err)
 	assert.True(t, isPermanentError(err), "daemon claims must be a permanent error under host-managed IMEX")
+}
+
+func daemonNamespaceConfig(namespace string, additionalNamespaces ...string) *Config {
+	flags := &Flags{namespace: namespace}
+	for _, ns := range additionalNamespaces {
+		_ = flags.additionalNamespaces.Set(ns)
+	}
+	return &Config{flags: flags, imexConfig: imex.Config{Mode: imex.ModeDriverManaged}}
+}
+
+func TestAssertDaemonClaimNamespace(t *testing.T) {
+	state := &DeviceState{config: daemonNamespaceConfig("nvidia-dra-driver-gpu", "legacy-ns", " other-ns")}
+
+	for namespace, allowed := range map[string]bool{
+		"nvidia-dra-driver-gpu": true,
+		"legacy-ns":             true,
+		"other-ns":              true,
+		"tenant-a":              false,
+		"default":               false,
+		"":                      false,
+	} {
+		t.Run(namespace, func(t *testing.T) {
+			err := state.assertDaemonClaimNamespace(namespace)
+			if allowed {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}
+
+// A daemon claim outside the allowed namespaces fails permanently before the
+// retryable overlap check and without touching the checkpoint.
+func TestPrepareRejectsDaemonClaimOutsideDriverNamespace(t *testing.T) {
+	cases := map[string]struct {
+		namespace string
+		want      string
+		permanent bool
+	}{
+		"tenant namespace fails permanently": {
+			namespace: "tenant-a",
+			want:      `daemon claim not allowed in namespace "tenant-a"`,
+			permanent: true,
+		},
+		"additional namespace keeps overlap retryable": {
+			namespace: "legacy-ns",
+			want:      "already allocated to different claim",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			owner := preparedClaim(ClaimCheckpointStatePrepareCompleted, allocationResult("request", DriverName, "daemon-0", nil))
+			state := testDeviceState()
+			state.config = daemonNamespaceConfig("nvidia-dra-driver-gpu", "legacy-ns")
+			state.checkpointManager = &fakeCheckpointManager{checkpoint: checkpointWithClaims(map[string]PreparedClaim{"owner-uid": owner})}
+			claim := &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "incoming", Namespace: tc.namespace, UID: types.UID("incoming-uid")},
+				Status: claimStatus(
+					[]resourceapi.DeviceRequestAllocationResult{allocationResult("request", DriverName, "daemon-0", nil)},
+					opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"request"}, daemonConfig("d3b07384-d9a7-4e2b-8f1a-2c1e6b5a9f00")),
+				),
+			}
+
+			_, err := state.Prepare(t.Context(), claim)
+
+			require.ErrorContains(t, err, tc.want)
+			require.Equal(t, tc.permanent, isPermanentError(err), "got %v", err)
+			manager := requireFakeCheckpointManager(t, state)
+			require.Zero(t, manager.creates)
+			require.Equal(t, PreparedClaimsByUID{"owner-uid": owner}, manager.checkpoint.V2.PreparedClaims)
+		})
+	}
 }
 
 func TestApplyComputeDomainChannelConfigHostManagedNoCliqueSkipsInjection(t *testing.T) {

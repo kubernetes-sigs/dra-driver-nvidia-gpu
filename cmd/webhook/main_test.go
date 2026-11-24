@@ -53,6 +53,7 @@ func TestResourceClaimValidatingWebhook(t *testing.T) {
 
 	tests := map[string]struct {
 		featureGates         map[string]bool
+		daemonNamespaces     []string
 		admissionReview      *admissionv1.AdmissionReview
 		requestContentType   string
 		expectedResponseCode int
@@ -154,6 +155,47 @@ func TestResourceClaimValidatingWebhook(t *testing.T) {
 				),
 			),
 			expectedAllowed: true,
+		},
+		"ComputeDomainDaemonConfig in the driver namespace is allowed": {
+			daemonNamespaces: []string{"nvidia-dra-driver-gpu", "legacy-ns"},
+			admissionReview: admissionReviewInNamespace("nvidia-dra-driver-gpu", admissionReviewWithObject(
+				resourceClaimWithComputeDomainDaemonConfig(
+					resourceClaimResourceV1,
+					&configapi.ComputeDomainDaemonConfig{DomainID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"},
+				),
+			)),
+			expectedAllowed: true,
+		},
+		"ComputeDomainDaemonConfig in an additional daemon namespace is allowed": {
+			daemonNamespaces: []string{"nvidia-dra-driver-gpu", "legacy-ns"},
+			admissionReview: admissionReviewInNamespace("legacy-ns", admissionReviewWithObject(
+				resourceClaimWithComputeDomainDaemonConfig(
+					resourceClaimResourceV1,
+					&configapi.ComputeDomainDaemonConfig{DomainID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"},
+				),
+			)),
+			expectedAllowed: true,
+		},
+		"ComputeDomainDaemonConfig update in a tenant namespace is allowed": {
+			daemonNamespaces: []string{"nvidia-dra-driver-gpu"},
+			admissionReview: admissionReviewWithOperation(admissionv1.Update, admissionReviewInNamespace("tenant-a", admissionReviewWithObject(
+				resourceClaimWithComputeDomainDaemonConfig(
+					resourceClaimResourceV1,
+					&configapi.ComputeDomainDaemonConfig{DomainID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"},
+				),
+			))),
+			expectedAllowed: true,
+		},
+		"ComputeDomainDaemonConfig in a tenant namespace is rejected": {
+			daemonNamespaces: []string{"nvidia-dra-driver-gpu"},
+			admissionReview: admissionReviewInNamespace("tenant-a", admissionReviewWithObject(
+				resourceClaimWithComputeDomainDaemonConfig(
+					resourceClaimResourceV1,
+					&configapi.ComputeDomainDaemonConfig{DomainID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"},
+				),
+			)),
+			expectedAllowed: false,
+			expectedMessage: `1 configs failed to validate: object at spec.devices.config[0].opaque.parameters: ComputeDomainDaemonConfig not allowed in namespace "tenant-a"`,
 		},
 		"path traversal domainID in ComputeDomainDaemonConfig is rejected": {
 			admissionReview: admissionReviewWithObject(
@@ -467,6 +509,9 @@ func TestResourceClaimValidatingWebhook(t *testing.T) {
 			err := featuregates.FeatureGates().SetEmulationVersion(utilversion.MajorMinor(999, 999))
 			require.NoError(t, err)
 
+			daemonNamespaces = test.daemonNamespaces
+			t.Cleanup(func() { daemonNamespaces = nil })
+
 			if test.featureGates != nil {
 				err := featuregates.FeatureGates().SetFromMap(test.featureGates)
 				require.NoError(t, err)
@@ -506,6 +551,16 @@ func TestResourceClaimValidatingWebhook(t *testing.T) {
 	}
 }
 
+func admissionReviewWithOperation(op admissionv1.Operation, ar *admissionv1.AdmissionReview) *admissionv1.AdmissionReview {
+	ar.Request.Operation = op
+	return ar
+}
+
+func admissionReviewInNamespace(namespace string, ar *admissionv1.AdmissionReview) *admissionv1.AdmissionReview {
+	ar.Request.Namespace = namespace
+	return ar
+}
+
 func admissionReviewWithObject(obj runtime.Object) *admissionv1.AdmissionReview {
 	// Extract GVR from the object's GVK
 	gvk := obj.GetObjectKind().GroupVersionKind()
@@ -517,7 +572,8 @@ func admissionReviewWithObject(obj runtime.Object) *admissionv1.AdmissionReview 
 
 	requestedAdmissionReview := &admissionv1.AdmissionReview{
 		Request: &admissionv1.AdmissionRequest{
-			Resource: resource,
+			Operation: admissionv1.Create,
+			Resource:  resource,
 			Object: runtime.RawExtension{
 				Object: obj,
 			},

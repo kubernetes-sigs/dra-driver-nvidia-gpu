@@ -539,6 +539,13 @@ type preparePlan struct {
 // have to undo. Decoding is strict because the config may not have passed a
 // validating webhook.
 func (s *DeviceState) buildPreparePlan(claim *resourceapi.ResourceClaim) (*preparePlan, error) {
+	// Only the controller creates daemon claims, in the driver namespaces.
+	if claimHasDaemonDevice(claim, s.allocatable) {
+		if err := s.assertDaemonClaimNamespace(claim.Namespace); err != nil {
+			return nil, permanentError{err}
+		}
+	}
+
 	configResultsMap, err := s.getConfigResultsMap(&claim.Status, configapi.StrictDecoder)
 	if err != nil {
 		return nil, permanentError{fmt.Errorf("error generating configResultsMap: %w", err)}
@@ -943,6 +950,35 @@ func (s *DeviceState) assertImexChannelNotAllocated(id int) error {
 		}
 	}
 	return nil
+}
+
+// claimHasDaemonDevice reports whether the claim is allocated a daemon device.
+func claimHasDaemonDevice(claim *resourceapi.ResourceClaim, allocatable AllocatableDevices) bool {
+	if claim.Status.Allocation == nil {
+		return false
+	}
+	for _, r := range claim.Status.Allocation.Devices.Results {
+		if r.Driver != DriverName {
+			continue
+		}
+		if device, ok := allocatable[r.Device]; ok && device.Type() == ComputeDomainDaemonType {
+			return true
+		}
+	}
+	return false
+}
+
+// assertDaemonClaimNamespace allows only the driver and additional namespaces.
+func (s *DeviceState) assertDaemonClaimNamespace(namespace string) error {
+	if namespace != "" && namespace == s.config.flags.namespace {
+		return nil
+	}
+	for _, ns := range s.config.flags.additionalNamespaces.Value() {
+		if namespace != "" && strings.TrimSpace(ns) == namespace {
+			return nil
+		}
+	}
+	return fmt.Errorf("daemon claim not allowed in namespace %q", namespace)
 }
 
 // validateDriverVersionForIMEXDaemonsWithDNSNames validates that the driver version
