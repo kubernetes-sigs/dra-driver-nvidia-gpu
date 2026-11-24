@@ -298,7 +298,9 @@ func admitResourceClaimParameters(ar admissionv1.AdmissionReview) *admissionv1.A
 		case *nvapi.ComputeDomainChannelConfig:
 			configInterface = castConfig
 		case *nvapi.ComputeDomainDaemonConfig:
-			if len(daemonNamespaces) > 0 && !slices.Contains(daemonNamespaces, ar.Request.Namespace) {
+			// Claim and template specs are immutable, so only CREATE needs the check.
+			// Checking UPDATE would block finalizer removal on existing claims.
+			if ar.Request.Operation == admissionv1.Create && len(daemonNamespaces) > 0 && !slices.Contains(daemonNamespaces, ar.Request.Namespace) {
 				errs = append(errs, fmt.Errorf("object at %s: ComputeDomainDaemonConfig not allowed in namespace %q", fieldPath, ar.Request.Namespace))
 				continue
 			}

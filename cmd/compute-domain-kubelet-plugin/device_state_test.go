@@ -363,7 +363,7 @@ func TestPrepareLeavesNoCheckpointForARejectedClaim(t *testing.T) {
 			state := testDeviceState()
 			state.checkpointManager = &fakeCheckpointManager{checkpoint: checkpointWithClaims(map[string]PreparedClaim{})}
 			state.computeDomainManager = &ComputeDomainManager{configFilesRoot: t.TempDir()}
-			state.config = &Config{flags: &Flags{nodeName: "test-node"}}
+			state.config = &Config{flags: &Flags{nodeName: "test-node", namespace: "default"}}
 
 			_, err := state.Prepare(t.Context(), claim)
 
@@ -438,7 +438,7 @@ func TestPrepareRejectsAMixedClaimBeforeApplying(t *testing.T) {
 	require.NoError(t, err)
 
 	state := testDeviceState()
-	state.config = &Config{flags: &Flags{nodeName: "test-node"}}
+	state.config = &Config{flags: &Flags{nodeName: "test-node", namespace: "default"}}
 	state.computeDomainManager = &ComputeDomainManager{informer: informer, configFilesRoot: configFilesRoot}
 	state.checkpointManager = &fakeCheckpointManager{checkpoint: checkpointWithClaims(map[string]PreparedClaim{})}
 	state.cdi = &CDIHandler{cache: cache, vendor: cdiVendor, claimClass: cdiClaimClass}
@@ -924,23 +924,48 @@ func TestAssertDaemonClaimNamespace(t *testing.T) {
 	}
 }
 
-// Rejected before any ComputeDomain lookup. The nil manager would panic.
-func TestApplyComputeDomainDaemonConfigRejectsClaimOutsideDriverNamespace(t *testing.T) {
-	result := allocationResult("request", DriverName, "daemon-0", nil)
-	claim := claimWithResults("claim-uid", result)
-	claim.Namespace = "tenant-a"
+// A daemon claim outside the allowed namespaces fails permanently before the
+// retryable overlap check and without touching the checkpoint.
+func TestPrepareRejectsDaemonClaimOutsideDriverNamespace(t *testing.T) {
+	cases := map[string]struct {
+		namespace string
+		want      string
+		permanent bool
+	}{
+		"tenant namespace fails permanently": {
+			namespace: "tenant-a",
+			want:      `daemon claim not allowed in namespace "tenant-a"`,
+			permanent: true,
+		},
+		"additional namespace keeps overlap retryable": {
+			namespace: "legacy-ns",
+			want:      "already allocated to different claim",
+		},
+	}
 
-	state := &DeviceState{config: daemonNamespaceConfig("nvidia-dra-driver-gpu")}
-	_, err := state.applyComputeDomainDaemonConfig(
-		context.Background(),
-		daemonConfig("cd-uid"),
-		claim,
-		[]*resourceapi.DeviceRequestAllocationResult{&result},
-	)
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			owner := preparedClaim(ClaimCheckpointStatePrepareCompleted, allocationResult("request", DriverName, "daemon-0", nil))
+			state := testDeviceState()
+			state.config = daemonNamespaceConfig("nvidia-dra-driver-gpu", "legacy-ns")
+			state.checkpointManager = &fakeCheckpointManager{checkpoint: checkpointWithClaims(map[string]PreparedClaim{"owner-uid": owner})}
+			claim := &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "incoming", Namespace: tc.namespace, UID: types.UID("incoming-uid")},
+				Status: claimStatus(
+					[]resourceapi.DeviceRequestAllocationResult{allocationResult("request", DriverName, "daemon-0", nil)},
+					opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"request"}, daemonConfig("d3b07384-d9a7-4e2b-8f1a-2c1e6b5a9f00")),
+				),
+			}
 
-	require.Error(t, err)
-	assert.True(t, isPermanentError(err))
-	assert.Contains(t, err.Error(), `not allowed in namespace "tenant-a"`)
+			_, err := state.Prepare(t.Context(), claim)
+
+			require.ErrorContains(t, err, tc.want)
+			require.Equal(t, tc.permanent, isPermanentError(err), "got %v", err)
+			manager := requireFakeCheckpointManager(t, state)
+			require.Zero(t, manager.creates)
+			require.Equal(t, PreparedClaimsByUID{"owner-uid": owner}, manager.checkpoint.V2.PreparedClaims)
+		})
+	}
 }
 
 func TestApplyComputeDomainChannelConfigHostManagedNoCliqueSkipsInjection(t *testing.T) {

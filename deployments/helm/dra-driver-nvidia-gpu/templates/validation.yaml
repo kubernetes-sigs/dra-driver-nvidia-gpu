@@ -60,6 +60,16 @@
 {{- fail $error }}
 {{- end }}
 
+{{- range .Values.kubeletPlugin.containers.computeDomains.env }}
+{{- if eq .name "ADDITIONAL_NAMESPACES" }}
+{{- $error := "" }}
+{{- $error = printf "%s\nkubeletPlugin.containers.computeDomains.env sets ADDITIONAL_NAMESPACES." $error }}
+{{- $error = printf "%s\nThe chart passes the controller value to the kubelet plugin and the webhook." $error }}
+{{- $error = printf "%s\nSet ADDITIONAL_NAMESPACES in controller.containers.computeDomain.env only." $error }}
+{{- fail $error }}
+{{- end }}
+{{- end }}
+
 {{- if .Values.webhook.enabled }}
 {{- if not .Values.webhook.tls }}
 {{- $error := "" }}

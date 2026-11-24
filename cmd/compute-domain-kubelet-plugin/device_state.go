@@ -539,6 +539,13 @@ type preparePlan struct {
 // have to undo. Decoding is strict because the config may not have passed a
 // validating webhook.
 func (s *DeviceState) buildPreparePlan(claim *resourceapi.ResourceClaim) (*preparePlan, error) {
+	// Only the controller creates daemon claims, in the driver namespaces.
+	if claimHasDaemonDevice(claim, s.allocatable) {
+		if err := s.assertDaemonClaimNamespace(claim.Namespace); err != nil {
+			return nil, permanentError{err}
+		}
+	}
+
 	configResultsMap, err := s.getConfigResultsMap(&claim.Status, configapi.StrictDecoder)
 	if err != nil {
 		return nil, permanentError{fmt.Errorf("error generating configResultsMap: %w", err)}
@@ -778,11 +785,6 @@ func (s *DeviceState) applyComputeDomainDaemonConfig(ctx context.Context, config
 		return nil, permanentError{fmt.Errorf("ComputeDomain daemon claims are not supported when imex.mode=hostManaged")}
 	}
 
-	// Only the controller creates daemon claims, in the driver namespaces.
-	if err := s.assertDaemonClaimNamespace(claim.Namespace); err != nil {
-		return nil, permanentError{err}
-	}
-
 	// Get the list of claim requests this config is being applied over.
 	var requests []string
 	for _, r := range results {
@@ -948,6 +950,22 @@ func (s *DeviceState) assertImexChannelNotAllocated(id int) error {
 		}
 	}
 	return nil
+}
+
+// claimHasDaemonDevice reports whether the claim is allocated a daemon device.
+func claimHasDaemonDevice(claim *resourceapi.ResourceClaim, allocatable AllocatableDevices) bool {
+	if claim.Status.Allocation == nil {
+		return false
+	}
+	for _, r := range claim.Status.Allocation.Devices.Results {
+		if r.Driver != DriverName {
+			continue
+		}
+		if device, ok := allocatable[r.Device]; ok && device.Type() == ComputeDomainDaemonType {
+			return true
+		}
+	}
+	return false
 }
 
 // assertDaemonClaimNamespace allows only the driver and additional namespaces.

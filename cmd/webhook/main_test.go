@@ -176,6 +176,16 @@ func TestResourceClaimValidatingWebhook(t *testing.T) {
 			)),
 			expectedAllowed: true,
 		},
+		"ComputeDomainDaemonConfig update in a tenant namespace is allowed": {
+			daemonNamespaces: []string{"nvidia-dra-driver-gpu"},
+			admissionReview: admissionReviewWithOperation(admissionv1.Update, admissionReviewInNamespace("tenant-a", admissionReviewWithObject(
+				resourceClaimWithComputeDomainDaemonConfig(
+					resourceClaimResourceV1,
+					&configapi.ComputeDomainDaemonConfig{DomainID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"},
+				),
+			))),
+			expectedAllowed: true,
+		},
 		"ComputeDomainDaemonConfig in a tenant namespace is rejected": {
 			daemonNamespaces: []string{"nvidia-dra-driver-gpu"},
 			admissionReview: admissionReviewInNamespace("tenant-a", admissionReviewWithObject(
@@ -541,6 +551,11 @@ func TestResourceClaimValidatingWebhook(t *testing.T) {
 	}
 }
 
+func admissionReviewWithOperation(op admissionv1.Operation, ar *admissionv1.AdmissionReview) *admissionv1.AdmissionReview {
+	ar.Request.Operation = op
+	return ar
+}
+
 func admissionReviewInNamespace(namespace string, ar *admissionv1.AdmissionReview) *admissionv1.AdmissionReview {
 	ar.Request.Namespace = namespace
 	return ar
@@ -557,7 +572,8 @@ func admissionReviewWithObject(obj runtime.Object) *admissionv1.AdmissionReview 
 
 	requestedAdmissionReview := &admissionv1.AdmissionReview{
 		Request: &admissionv1.AdmissionRequest{
-			Resource: resource,
+			Operation: admissionv1.Create,
+			Resource:  resource,
 			Object: runtime.RawExtension{
 				Object: obj,
 			},

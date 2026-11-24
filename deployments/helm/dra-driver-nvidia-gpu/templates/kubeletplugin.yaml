@@ -162,15 +162,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        {{- $additionalNamespaces := include "dra-driver-nvidia-gpu.additionalNamespaces" . }}
-        {{- $userEnvNames := list }}
-        {{- range .Values.kubeletPlugin.containers.computeDomains.env }}
-        {{- $userEnvNames = append $userEnvNames .name }}
-        {{- end }}
-        {{- if and $additionalNamespaces (not (has "ADDITIONAL_NAMESPACES" $userEnvNames)) }}
+        {{- with include "dra-driver-nvidia-gpu.additionalNamespaces" . }}
         # Daemon claims are only prepared in NAMESPACE and these.
         - name: ADDITIONAL_NAMESPACES
-          value: {{ $additionalNamespaces | quote }}
+          value: {{ . | quote }}
         {{- end }}
         {{- if .Values.nvidiaCDIHookPath }}
         - name: NVIDIA_CDI_HOOK_PATH
