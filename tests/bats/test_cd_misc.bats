@@ -49,7 +49,7 @@ bats::on_failure() {
   kubectl apply -f demo/specs/imex/channel-injection.yaml
   kubectl wait --for=condition=READY pods imex-channel-injection --timeout=100s
   run kubectl logs imex-channel-injection
-  assert_output --partial "channel0"
+  assert_imex_channel_injected
 
   local LOGPATH="${BATS_TEST_TMPDIR}/cd-daemon.log"
   local PNAME
@@ -102,7 +102,13 @@ bats::on_failure() {
   if [ "${MOCK_NVML:-}" = "true" ]; then skip "requires IMEX daemon"; fi
   iupgrade_wait "${TEST_CHART_REPO}" "${TEST_CHART_VERSION}" NOARGS
 
-  envsubst < tests/bats/specs/rc-opaque-cfg-unknown-field.yaml.tmpl > \
+  # The channel-0 DeviceClass bypasses admission. With admission, request the
+  # admitted channel device so that the controller sees the claim.
+  local DEVCLASS="${TEST_DEVCLASSNAME_CD_CHANNEL}"
+  if cd_claim_admission_enabled; then
+    DEVCLASS="${DEVCLASS/compute-domain-default-channel/compute-domain-channel}"
+  fi
+  TEST_DEVCLASSNAME_CD_CHANNEL="${DEVCLASS}" envsubst < tests/bats/specs/rc-opaque-cfg-unknown-field.yaml.tmpl > \
     "${BATS_TEST_TMPDIR}"/rc-opaque-cfg-unknown-field.yaml
   cd "${BATS_TEST_TMPDIR}"
 
@@ -113,30 +119,46 @@ bats::on_failure() {
   local POD
   POD=$(kubectl create -f "${SPEC}" | grep pod | awk '{print $1;}')
 
-  # Confirm ContainerCreating state (no failure yet though).
-  kubectl wait \
-    --for=jsonpath='{.status.containerStatuses[0].state.waiting.reason}'=ContainerCreating \
-    --timeout=10s \
-    "${POD}"
+  if cd_claim_admission_enabled; then
+    # The controller rejects the claim before the pod is bound.
+    local i
+    for i in $(seq 30); do
+      kubectl logs \
+        -l dra-driver-nvidia-gpu-component=controller \
+        -n dra-driver-nvidia-gpu \
+        --tail=-1 | \
+          grep 'batssuite-rc-bad-opaque-config' | grep 'InvalidConfig' | \
+          grep -q 'strict decoding error: unknown field "unexpectedField"' && break
+      sleep 1
+    done
+    [ "${i}" -lt 30 ]
+    kubectl wait --for=jsonpath='{.status.phase}'=Pending --timeout=10s "${POD}"
+  else
+    # Confirm ContainerCreating state (no failure yet though).
+    kubectl wait \
+      --for=jsonpath='{.status.containerStatuses[0].state.waiting.reason}'=ContainerCreating \
+      --timeout=10s \
+      "${POD}"
 
-  # Rather quickly, we expect an event with reason
-  # `FailedPrepareDynamicResources`. That's not typically the method users
-  # discover the error.
-  wait_for_pod_event "${POD}" FailedPrepareDynamicResources 10
+    # Rather quickly, we expect an event with reason
+    # `FailedPrepareDynamicResources`. That's not typically the method users
+    # discover the error.
+    wait_for_pod_event "${POD}" FailedPrepareDynamicResources 10
 
-  # This is how users probably see this error first.
-  kubectl describe "${POD}" | grep FailedPrepareDynamicResources | \
-    grep "error preparing devices"  | \
-    grep 'strict decoding error: unknown field "unexpectedField"'
-
-  # Confirm that precise root cause can also be inferred from
-  # CD kubelet plugin logs.
-  kubectl logs \
-    -l dra-driver-nvidia-gpu-component=kubelet-plugin \
-    -n dra-driver-nvidia-gpu \
-    --prefix --tail=-1 | \
-      grep 'Permanent error' | \
+    # This is how users probably see this error first.
+    kubectl describe "${POD}" | grep FailedPrepareDynamicResources | \
+      grep "error preparing devices"  | \
       grep 'strict decoding error: unknown field "unexpectedField"'
+
+    # Confirm that precise root cause can also be inferred from
+    # CD kubelet plugin logs.
+    kubectl logs \
+      -l dra-driver-nvidia-gpu-component=kubelet-plugin \
+      -n dra-driver-nvidia-gpu \
+      --prefix --tail=-1 | \
+        grep 'Permanent error' | \
+        grep 'strict decoding error: unknown field "unexpectedField"'
+  fi
 
   # Clean up.
   kubectl delete "${POD}"
