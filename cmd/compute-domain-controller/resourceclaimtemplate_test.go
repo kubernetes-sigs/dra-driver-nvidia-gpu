@@ -17,6 +17,9 @@ limitations under the License.
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -68,4 +71,56 @@ func TestChannelAllocationModeFor(t *testing.T) {
 			require.Equal(t, tt.want, channelAllocationModeFor(tt.cd, tt.hostManaged))
 		})
 	}
+}
+
+const testWorkloadTemplatePath = "../../templates/compute-domain-workload-claim-template.tmpl.yaml"
+
+func workloadTemplateData(namespace, name string) *ResourceClaimTemplateTemplateData {
+	channelConfig := nvapi.DefaultComputeDomainChannelConfig()
+	channelConfig.DomainID = "cd-uid"
+	return &ResourceClaimTemplateTemplateData{
+		Namespace:               namespace,
+		Name:                    name,
+		Finalizer:               computeDomainFinalizer,
+		ComputeDomainLabelKey:   computeDomainLabelKey,
+		ComputeDomainLabelValue: "cd-uid",
+		TargetLabelKey:          computeDomainResourceClaimTemplateTargetLabelKey,
+		TargetLabelValue:        computeDomainResourceClaimTemplateTargetWorkload,
+		DeviceClassName:         computeDomainDefaultChannelDeviceClass,
+		DriverName:              DriverName,
+		ChannelConfig:           channelConfig,
+	}
+}
+
+func TestRenderResourceClaimTemplate(t *testing.T) {
+	rct, err := renderResourceClaimTemplate(testWorkloadTemplatePath, workloadTemplateData("tenant-a", "imex-channel-0"))
+	require.NoError(t, err)
+	require.Equal(t, "tenant-a", rct.Namespace)
+	require.Equal(t, "imex-channel-0", rct.Name)
+}
+
+// Names carrying YAML must be rejected.
+func TestRenderResourceClaimTemplateRejectsInjectedName(t *testing.T) {
+	for name, templateName := range map[string]string{
+		"namespace injection": "imex-channel-0\n  namespace: victim-b\n  annotations:\n    injected-by: tenant-a",
+		"uppercase":           "Imex-Channel",
+		"empty":               "",
+		"too long":            strings.Repeat("a", 254),
+		"trailing whitespace": "imex-channel-0 ",
+		"flow mapping":        "{namespace: victim-b}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := renderResourceClaimTemplate(testWorkloadTemplatePath, workloadTemplateData("tenant-a", templateName))
+			require.Error(t, err)
+		})
+	}
+}
+
+// The post-render check catches a wrong namespace on its own.
+func TestRenderResourceClaimTemplateRejectsNamespaceMismatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rct.tmpl.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("apiVersion: resource.k8s.io/v1\nkind: ResourceClaimTemplate\nmetadata:\n  namespace: victim-b\n  name: {{ .Name }}\n"), 0o600))
+
+	_, err := renderResourceClaimTemplate(path, workloadTemplateData("tenant-a", "imex-channel-0"))
+	require.ErrorContains(t, err, "want tenant-a/imex-channel-0")
 }

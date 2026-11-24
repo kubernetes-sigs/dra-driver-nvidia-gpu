@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"text/template"
 
@@ -29,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
@@ -157,6 +159,30 @@ func (m *BaseResourceClaimTemplateManager) Stop() error {
 }
 
 func (m *BaseResourceClaimTemplateManager) Create(ctx context.Context, templatePath string, templateData *ResourceClaimTemplateTemplateData) (*resourceapi.ResourceClaimTemplate, error) {
+	resourceClaimTemplate, err := renderResourceClaimTemplate(templatePath, templateData)
+	if err != nil {
+		return nil, err
+	}
+
+	rct, err := m.config.clientsets.Resource.ResourceClaimTemplates(resourceClaimTemplate.Namespace).Create(ctx, resourceClaimTemplate, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("error creating ResourceClaimTemplate: %w", err)
+	}
+
+	// Add the newly created ResourceClaimTemplate to the mutation cache
+	// This ensures subsequent calls will see it immediately
+	m.mutationCache.Mutation(rct)
+
+	return rct, nil
+}
+
+// renderResourceClaimTemplate renders a ResourceClaimTemplate and checks
+// that it has the requested namespace and name.
+func renderResourceClaimTemplate(templatePath string, templateData *ResourceClaimTemplateTemplateData) (*resourceapi.ResourceClaimTemplate, error) {
+	if errs := validation.IsDNS1123Subdomain(templateData.Name); len(errs) > 0 {
+		return nil, fmt.Errorf("invalid ResourceClaimTemplate name %q: %s", templateData.Name, strings.Join(errs, ", "))
+	}
+
 	tmpl, err := template.ParseFiles(templatePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse template file: %w", err)
@@ -179,16 +205,12 @@ func (m *BaseResourceClaimTemplateManager) Create(ctx context.Context, templateP
 		return nil, fmt.Errorf("failed to convert unstructured data to typed object: %w", err)
 	}
 
-	rct, err := m.config.clientsets.Resource.ResourceClaimTemplates(resourceClaimTemplate.Namespace).Create(ctx, &resourceClaimTemplate, metav1.CreateOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("error creating ResourceClaimTemplate: %w", err)
+	if resourceClaimTemplate.Namespace != templateData.Namespace || resourceClaimTemplate.Name != templateData.Name {
+		return nil, fmt.Errorf("rendered ResourceClaimTemplate %s/%s, want %s/%s",
+			resourceClaimTemplate.Namespace, resourceClaimTemplate.Name, templateData.Namespace, templateData.Name)
 	}
 
-	// Add the newly created ResourceClaimTemplate to the mutation cache
-	// This ensures subsequent calls will see it immediately
-	m.mutationCache.Mutation(rct)
-
-	return rct, nil
+	return &resourceClaimTemplate, nil
 }
 
 func (m *BaseResourceClaimTemplateManager) Delete(ctx context.Context, cdUID string) error {

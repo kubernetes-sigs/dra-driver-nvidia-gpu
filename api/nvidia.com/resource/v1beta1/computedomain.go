@@ -105,6 +105,10 @@ type ComputeDomainChannelSpec struct {
 
 // ComputeDomainResourceClaimTemplate provides the details of the ResourceClaimTemplate to generate.
 type ComputeDomainResourceClaimTemplate struct {
+	// Name of the generated ResourceClaimTemplate. Must be a DNS-1123 subdomain.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Name string `json:"name"`
 }
 
