@@ -27,6 +27,3 @@ spec:
       # Reports cliques whose daemons are not available this long after
       # their restart as stalled. The rollout waits for them.
       progressDeadlineSeconds: 1200
-      # Updates the cliques of one block of racks at a time, in sorted order
-      # of the label value.
-      # topologyKey: example.com/block

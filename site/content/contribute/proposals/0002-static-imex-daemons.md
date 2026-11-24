@@ -57,9 +57,9 @@ named `default` by CEL rule):
 - `spec.updateStrategy`: `OnDelete` (default) or `RollingUpdate` with
   `maxUnavailableCliques` (number or percentage, default 1),
   `minReadySeconds` (default 30), `paused`, `progressDeadlineSeconds`
-  (default 1200), after which an unavailable clique is reported as stalled,
-  and `topologyKey`, a node label key, for example of a block of racks,
-  whose values the update goes through one at a time.
+  (default 1200), after which an unavailable clique is reported as stalled.
+  Updating cliques by a node label, for example one block of racks at a
+  time, is left to a follow-up.
 - Status: daemons desired, ready and updated in total and per clique, with
   `Ready`, `RolloutInProgress` and `DeletionBlocked` conditions.
 

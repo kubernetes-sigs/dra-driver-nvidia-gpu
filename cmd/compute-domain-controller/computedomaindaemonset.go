@@ -580,11 +580,6 @@ func (m *ComputeDomainDaemonSetManager) validateSpec(cdds *nvapi.ComputeDomainDa
 		}
 	}
 	if ru := cdds.Spec.UpdateStrategy.RollingUpdate; ru != nil {
-		if ru.TopologyKey != "" {
-			for _, msg := range validation.IsQualifiedName(ru.TopologyKey) {
-				errs = append(errs, fmt.Errorf("spec.updateStrategy.rollingUpdate.topologyKey %q: %s", ru.TopologyKey, msg))
-			}
-		}
 		// As for Deployments, the deadline must leave the daemons time to
 		// become available.
 		if deadline, minReady := progressDeadline(ru), minReadySeconds(ru); deadline <= minReady {
@@ -821,15 +816,7 @@ func nodeChanged(oldObj, newObj any) bool {
 func (m *ComputeDomainDaemonSetManager) rollout(ctx context.Context, cdds *nvapi.ComputeDomainDaemonSet, cliques []*staticClique, unclustered []*corev1.Pod, hash string, nodes []*corev1.Node) (rolloutPlan, error) {
 	now := m.now()
 	ru := cdds.Spec.UpdateStrategy.RollingUpdate
-	var topologyOf map[string]string
-	if ru != nil && ru.TopologyKey != "" {
-		topologyOf = make(map[string]string, len(nodes))
-		for _, node := range nodes {
-			topologyOf[node.Name] = node.Labels[ru.TopologyKey]
-		}
-		assignTopology(cliques, topologyOf)
-	}
-	plan := planCliqueRollout(cliques, unclustered, hash, ru, nodeReadiness(nodes), topologyOf, m.restartingCliques(cliques, hash, now), now)
+	plan := planCliqueRollout(cliques, unclustered, hash, ru, nodeReadiness(nodes), m.restartingCliques(cliques, hash, now), now)
 	if len(plan.cliques) > 0 {
 		klog.Infof("Restarting the static IMEX daemons of cliques %v", plan.cliques)
 	}
@@ -1000,13 +987,6 @@ func (m *ComputeDomainDaemonSetManager) updateStatus(ctx context.Context, cdds *
 			rollout.Reason, rollout.Message = "ProgressDeadlineExceeded", stalledMessage(plan.stalled, progressDeadline(cdds.Spec.UpdateStrategy.RollingUpdate))
 		case cdds.Spec.UpdateStrategy.RollingUpdate != nil && cdds.Spec.UpdateStrategy.RollingUpdate.Paused:
 			rollout.Reason, rollout.Message = "Paused", fmt.Sprintf("%d IMEX daemons run an outdated revision", outdated)
-		case cdds.Spec.UpdateStrategy.RollingUpdate != nil && cdds.Spec.UpdateStrategy.RollingUpdate.TopologyKey != "":
-			key := cdds.Spec.UpdateStrategy.RollingUpdate.TopologyKey
-			where := fmt.Sprintf("updating cliques with %s=%s", key, plan.topology)
-			if plan.topology == "" {
-				where = fmt.Sprintf("updating cliques without label %s", key)
-			}
-			rollout.Reason, rollout.Message = "RollingUpdate", fmt.Sprintf("%d IMEX daemons run an outdated revision, %s", outdated, where)
 		default:
 			rollout.Reason, rollout.Message = "RollingUpdate", fmt.Sprintf("%d IMEX daemons run an outdated revision", outdated)
 		}

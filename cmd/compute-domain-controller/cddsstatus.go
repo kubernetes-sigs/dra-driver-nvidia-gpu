@@ -46,9 +46,6 @@ type staticClique struct {
 	// nodes should run a daemon.
 	nodes []string
 	pods  []*corev1.Pod
-	// topology is the value of rollingUpdate.topologyKey that the clique is
-	// updated with.
-	topology string
 	// stalled tells why the clique is unavailable past the progress deadline
 	// of a rolling update, or is empty.
 	stalled string
@@ -93,40 +90,6 @@ func groupByClique(nodes []*corev1.Node, pods []*corev1.Pod, nodeSelector map[st
 	}
 	slices.SortFunc(cliques, func(a, b *staticClique) int { return strings.Compare(a.id, b.id) })
 	return cliques, unclustered
-}
-
-// assignTopology sets the topology of each clique from the topology of its
-// nodes. A clique whose nodes carry several values goes with the first in
-// rollout order, as its daemons restart together.
-func assignTopology(cliques []*staticClique, topologyOf map[string]string) {
-	for _, c := range cliques {
-		names := slices.Clone(c.nodes)
-		for _, pod := range c.pods {
-			names = append(names, pod.Spec.NodeName)
-		}
-		values := make([]string, 0, len(names))
-		for _, name := range names {
-			values = append(values, topologyOf[name])
-		}
-		c.topology = ""
-		if len(values) > 0 {
-			c.topology = slices.MinFunc(values, compareTopology)
-		}
-	}
-}
-
-// compareTopology orders topology values for a rolling update, with the empty
-// value of unlabeled nodes last.
-func compareTopology(a, b string) int {
-	switch {
-	case a == b:
-		return 0
-	case a == "":
-		return 1
-	case b == "":
-		return -1
-	}
-	return strings.Compare(a, b)
 }
 
 func podUpdated(pod *corev1.Pod, hash string) bool {

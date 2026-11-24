@@ -75,27 +75,12 @@ daemons pick them up depends on `spec.updateStrategy.type`:
 | Type | Behavior |
 |---|---|
 | `OnDelete` (default) | Daemons keep running their revision. The `RolloutInProgress` condition counts outdated daemons. Delete the daemon pods of a clique, for example during maintenance, to update it. |
-| `RollingUpdate` | The controller restarts whole cliques together, `maxUnavailableCliques` at a time (a number or a percentage, default 1). The next batch starts once each ready node of the updated cliques runs a daemon of the new revision that has been ready for `minReadySeconds` (default 30). Set `paused: true` to stop new batches. |
+| `RollingUpdate` | The controller restarts whole cliques together, `maxUnavailableCliques` at a time (a number or a percentage, default 1; `"100%"` restarts all cliques at once). The next batch starts once each ready node of the updated cliques runs a daemon of the new revision that has been ready for `minReadySeconds` (default 30). Set `paused: true` to stop new batches. |
 
 A rolling update restarts all daemons of a clique together, so each clique is
 disrupted once per rollout, not once per node. Nodes that are not ready or
 cordoned do not hold up a rollout, and cliques whose daemons are already
 unavailable go first.
-
-Large clusters group racks into blocks, or Scalable Units, that share
-network switches and usually carry a node label for it. Set
-`rollingUpdate.topologyKey` to that label key to update one block at a time.
-The controller sorts the values of the label and restarts the cliques of the
-first value, `maxUnavailableCliques` at a time. It moves to the next value
-once all cliques of the current one run the new revision and are available.
-Cliques on nodes without the label go last. The `RolloutInProgress`
-condition shows the block being updated. Set `paused: true` to stop between
-batches, for example to check the first block.
-
-```bash
-kubectl patch computedomaindaemonset default --type merge -p \
-  '{"spec":{"updateStrategy":{"rollingUpdate":{"topologyKey":"example.com/block"}}}}'
-```
 
 Leave `spec.image` empty to keep the driver image at creation. Set it to
 upgrade the daemons:
@@ -155,7 +140,7 @@ to the new driver image. Edits to the DaemonSet itself are reverted.
 
 Apply the `ComputeDomainDaemonSet` CRD of the release before upgrading, as
 Helm does not upgrade CRDs. With an older CRD, the API server drops fields it
-does not know, such as `topologyKey` or `progressDeadlineSeconds`, and the
+does not know, such as `progressDeadlineSeconds`, and the
 controller falls back to their defaults.
 
 ## NVLink partition changes

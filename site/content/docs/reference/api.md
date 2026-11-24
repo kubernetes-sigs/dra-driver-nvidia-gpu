@@ -248,11 +248,10 @@ Requires [`ComputeDomainDaemonSet`](feature-gates.md) (Alpha, default: false).
 | `spec.imexConfig` | map | | `nvidia-imex` config file settings to override or add. |
 | `spec.logVerbosity` | integer | `1` | Daemon log verbosity. |
 | `spec.updateStrategy.type` | string | `OnDelete` | `OnDelete` or `RollingUpdate`. |
-| `spec.updateStrategy.rollingUpdate.maxUnavailableCliques` | int or string | `1` | Cliques restarted at a time, a number or a percentage. |
+| `spec.updateStrategy.rollingUpdate.maxUnavailableCliques` | int or string | `1` | Cliques restarted at a time, a number or a percentage. `"100%"` restarts all cliques at once. |
 | `spec.updateStrategy.rollingUpdate.minReadySeconds` | integer | `30` | How long updated daemons must be ready before the next batch. |
 | `spec.updateStrategy.rollingUpdate.paused` | boolean | `false` | Stops new batches. |
 | `spec.updateStrategy.rollingUpdate.progressDeadlineSeconds` | integer | `1200` | How long the daemons of a clique may take to become available before the clique is reported as stalled. Must be greater than `minReadySeconds`. |
-| `spec.updateStrategy.rollingUpdate.topologyKey` | string | | Node label key that groups cliques, for example by block or Scalable Unit of racks. The update finishes the cliques of one value, in sorted order, before it starts the next. Cliques without the label go last. |
 | `status.cliques[]` | list | | Nodes, ready daemons, updated daemons and `state` (`Ready`, `NotReady` or `Stalled`) per clique, for up to 1024 cliques. |
 | `status.conditions[]` | list | | `Ready`, `RolloutInProgress`, `TemplateOutdated`, `UpdateBlocked`, `DeletionBlocked` and `Degraded`. See [Conditions](../guides/static-imex-daemons.md#conditions). |
 

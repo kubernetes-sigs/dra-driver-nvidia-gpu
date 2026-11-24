@@ -191,9 +191,11 @@ type ComputeDomainDaemonSetUpdateStrategy struct {
 // ComputeDomainDaemonSetRollingUpdate configures rolling updates by clique.
 type ComputeDomainDaemonSetRollingUpdate struct {
 	// MaxUnavailableCliques is the number, or percentage, of cliques that
-	// are updated at a time. A percentage rounds down, to at least 1.
+	// are updated at a time. A percentage rounds down, to at least 1, and
+	// "100%" updates all cliques at once.
 	// +kubebuilder:default:=1
 	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:XValidation:rule="type(self) == string ? self.matches('^[0-9]+%$') : self >= 0",message="maxUnavailableCliques must be a number or a percentage"
 	// +kubebuilder:validation:Optional
 	MaxUnavailableCliques *intstr.IntOrString `json:"maxUnavailableCliques,omitempty"`
 
@@ -219,16 +221,6 @@ type ComputeDomainDaemonSetRollingUpdate struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Optional
 	ProgressDeadlineSeconds int32 `json:"progressDeadlineSeconds,omitempty"`
-
-	// TopologyKey is a node label key that groups cliques, for example by
-	// block or Scalable Unit of racks. When set, the update restarts the
-	// cliques of one value of the label at a time, in sorted order, and moves
-	// to the next value once they all run the new revision and are available.
-	// Cliques on nodes without the label go last. A clique whose nodes carry
-	// several values goes with the first of them.
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:MaxLength=317
-	TopologyKey string `json:"topologyKey,omitempty"`
 }
 
 // ComputeDomainDaemonSetStatus reports the IMEX daemons.

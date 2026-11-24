@@ -212,8 +212,13 @@ spec:
                         default: 1
                         description: |-
                           MaxUnavailableCliques is the number, or percentage, of cliques that
-                          are updated at a time. A percentage rounds down, to at least 1.
+                          are updated at a time. A percentage rounds down, to at least 1, and
+                          "100%" updates all cliques at once.
                         x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: maxUnavailableCliques must be a number or a percentage
+                          rule: 'type(self) == string ? self.matches(''^[0-9]+%$'')
+                            : self >= 0'
                       minReadySeconds:
                         default: 30
                         description: |-
@@ -239,16 +244,6 @@ spec:
                         format: int32
                         minimum: 1
                         type: integer
-                      topologyKey:
-                        description: |-
-                          TopologyKey is a node label key that groups cliques, for example by
-                          block or Scalable Unit of racks. When set, the update restarts the
-                          cliques of one value of the label at a time, in sorted order, and moves
-                          to the next value once they all run the new revision and are available.
-                          Cliques on nodes without the label go last. A clique whose nodes carry
-                          several values goes with the first of them.
-                        maxLength: 317
-                        type: string
                     type: object
                   type:
                     default: OnDelete
