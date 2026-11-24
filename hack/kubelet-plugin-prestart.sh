@@ -32,6 +32,34 @@ emit_common_err () {
         "actually been installed under that path.\n"
 }
 
+# Check if all GPUs on the node are bound to the vfio-pci driver (prepared
+# for passthrough to e.g. KubeVirt/Kata workloads). Plain nvidia-smi fails on
+# such nodes even with a healthy NVIDIA driver: NVML doesn't see
+# vfio-pci-bound devices. We look for PCI devices with NVIDIA vendor ID
+# (0x10de) and display class (0x03xx: VGA/3D controllers) in the host sysfs;
+# this container is privileged, so it sees the host tree. Zero visible GPUs
+# also counts as "all bound to vfio-pci" here: it keeps the weaker check for
+# GPU-less test setups, as before. The sysfs devices dir can be overridden
+# via $1 (used by tests).
+all_gpus_on_vfio_pci () {
+    _pci_devices="${1:-/sys/bus/pci/devices}"
+    [ -d "${_pci_devices}" ] || return 0
+
+    for _dev in "${_pci_devices}"/*; do
+        [ -f "${_dev}/vendor" ] || continue
+        [ "$(< "${_dev}/vendor")" = "0x10de" ] || continue
+        case "$(< "${_dev}/class")" in
+            0x03*) ;;
+            *) continue ;;
+        esac
+        if [ "$(basename "$(readlink "${_dev}/driver")")" != "vfio-pci" ]; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
 validate_and_exit_on_success () {
     echo -n "$(date -u +"%Y-%m-%dT%H:%M:%SZ")  /driver-root (${NVIDIA_DRIVER_ROOT} on host): "
 
@@ -86,13 +114,20 @@ validate_and_exit_on_success () {
         # dependency). Emit message before invocation (nvidia-smi may be slow or
         # hang).
         # At this point, we only want to check if the nvidia driver is installed
-        # correctly. All GPUs on the node may be on the vfio-pci driver
-        # (prepared in passthrough-mode for KubeVirt/Kata workloads etc). So we
-        # run 'nvidia-smi --version' to avoid GPU initialization.
-        echo "invoke: env -i LD_PRELOAD=${NV_LIB_PATH} ${NV_PATH} --version"
+        # correctly. On nodes where all GPUs are on the vfio-pci driver, run
+        # 'nvidia-smi --version' instead: NVML can't reach vfio-bound GPUs, so
+        # plain nvidia-smi would fail there with a healthy driver. Everywhere
+        # else plain nvidia-smi is the stronger check: it also proves the
+        # driver actually talks to the GPUs.
+        NV_SMI_ARGS=""
+        if all_gpus_on_vfio_pci; then
+            echo "all GPUs on the node (if any) are on vfio-pci: skip GPU init"
+            NV_SMI_ARGS="--version"
+        fi
+        echo "invoke: env -i LD_PRELOAD=${NV_LIB_PATH} ${NV_PATH} ${NV_SMI_ARGS}"
 
         # Always show stderr, maybe hide or filter stdout?
-        env -i LD_PRELOAD="${NV_LIB_PATH}" "${NV_PATH}" --version
+        env -i LD_PRELOAD="${NV_LIB_PATH}" "${NV_PATH}" ${NV_SMI_ARGS}
         RCODE="$?"
 
         # For checking GPU driver health: rely on nvidia-smi's exit code. Rely
@@ -100,6 +135,20 @@ validate_and_exit_on_success () {
         # 'RETURN VALUE' in the nvidia-smi man page for meaning of error codes.
         if [ ${RCODE} -eq 0 ]; then
             echo "nvidia-smi returned with code 0: success, leave"
+
+            # nvidia-smi may have just created the /dev/nvidia* device nodes
+            # They live in this container's private /dev and die with the
+            # init container; consumers like CDI device-node injection need
+            # them in the host's /dev, mounted at /host-dev here. Copy them
+            # over. Best-effort: if no nodes exist (e.g. all GPUs on
+            # vfio-pci) there's simply nothing to copy.
+            if [ -d /host-dev ] && ls /dev/nvidia* > /dev/null 2>&1; then
+                if cp -a /dev/nvidia* /host-dev/ 2>/dev/null; then
+                    echo "replicated GPU device nodes into host /dev (mounted at /host-dev)"
+                else
+                    echo "warning: failed to replicate GPU device nodes into host /dev"
+                fi
+            fi
 
             # Exit script indicating success (leave init container).
             exit 0
