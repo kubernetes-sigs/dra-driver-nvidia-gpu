@@ -122,8 +122,11 @@ Deployed when `resources.computeDomains.enabled=true`.
 
 | Value | Default | Description |
 |---|---|---|
-| `controller.replicas` | `1` | Number of controller pod replicas. |
-| `controller.leaderElection.enabled` | `false` | Enable leader election when running multiple replicas. |
+| `controller.replicas` | `1` | Number of controller pod replicas. Values greater than `1` require `controller.leaderElection.enabled=true` when ComputeDomains are enabled. |
+| `controller.pdb.enabled` | `false` | Create a PodDisruptionBudget (PDB) for the controller when ComputeDomains are enabled and `controller.replicas > 1`. |
+| `controller.pdb.minAvailable` | Unset (effective default: `1`) | Minimum number or percentage of controller pods that must remain available during voluntary disruptions. Used only when the PDB is rendered and `maxUnavailable` is unset. |
+| `controller.pdb.maxUnavailable` | Unset | Maximum number or percentage of controller pods that may be unavailable during voluntary disruptions. Takes precedence over `minAvailable` when set. |
+| `controller.leaderElection.enabled` | `false` | Enable leader election. Required when ComputeDomains are enabled and `controller.replicas > 1`; otherwise, Helm rejects the configuration. |
 | `controller.leaderElection.leaseDuration` | `15s` | How long the leader holds the lease before renewal is required. |
 | `controller.leaderElection.renewDeadline` | `10s` | How long the leader retries renewal before giving up. |
 | `controller.leaderElection.retryPeriod` | `2s` | Interval between leader-election retries. |
@@ -132,6 +135,24 @@ Deployed when `resources.computeDomains.enabled=true`.
 | `controller.metrics.profilePath` | `""` | Optional pprof profile path. Empty disables profiling. |
 | `controller.priorityClassName` | `system-node-critical` | Priority class for the controller pod. Also applied to dynamically rendered `compute-domain-daemon` DaemonSet pods. |
 | `controller.networkPolicy.enabled` | `false` | Create a NetworkPolicy for the controller. |
+
+For multiple controller replicas with a PDB, add the following to your Helm values file:
+
+```yaml
+resources:
+  computeDomains:
+    enabled: true
+controller:
+  replicas: 2
+  leaderElection:
+    enabled: true
+  pdb:
+    enabled: true
+    minAvailable: 1
+```
+
+If you enable the PDB without setting `minAvailable` or `maxUnavailable`, the chart renders `minAvailable: 1`.
+The chart does not create a controller PDB when `controller.replicas` is `1` or ComputeDomains are disabled.
 
 The controller schedules onto control-plane nodes by default (`nodeSelector`, `tolerations`, and `affinity` are configurable). Additional `controller.*` values set pod annotations, security contexts, and container resource limits.
 
