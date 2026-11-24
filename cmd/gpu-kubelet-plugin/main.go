@@ -68,6 +68,7 @@ type Flags struct {
 	klogVerbosity                 int
 	additionalXidsToIgnore        string
 	consumableShares              string
+	vfioOnly                      bool
 }
 
 type Config struct {
@@ -129,6 +130,12 @@ func newApp() *cli.App {
 			Usage:       "the path where the NVIDIA driver root is mounted in the container; used for generating CDI specifications",
 			Destination: &flags.containerDriverRoot,
 			EnvVars:     []string{"DRIVER_ROOT_CTR_PATH"},
+		},
+		&cli.BoolFlag{
+			Name:        "vfio-only",
+			Usage:       "Publish only VFIO devices without requiring the NVIDIA driver; requires PassthroughSupport and a node without NVLink fabric.",
+			Destination: &flags.vfioOnly,
+			EnvVars:     []string{"VFIO_ONLY"},
 		},
 		&cli.StringFlag{
 			Name:        "host-root",
@@ -290,6 +297,15 @@ func newApp() *cli.App {
 
 // Input validation of CLI flags.
 func validateCLIFlags(flags *Flags) error {
+	if flags.vfioOnly {
+		if !featuregates.Enabled(featuregates.PassthroughSupport) {
+			return fmt.Errorf("--vfio-only requires feature gate %s", featuregates.PassthroughSupport)
+		}
+		if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
+			return fmt.Errorf("--vfio-only is incompatible with %s", featuregates.FabricManagerPartitioning)
+		}
+	}
+
 	if featuregates.Enabled(featuregates.PassthroughSupport) {
 		if flags.hostRoot == "" {
 			return fmt.Errorf("host root is required when PassthroughSupport feature gate is enabled")
