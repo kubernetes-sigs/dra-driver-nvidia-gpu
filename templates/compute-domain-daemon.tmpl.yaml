@@ -104,7 +104,7 @@ spec:
           successThreshold: 1
         readinessProbe:
           exec:
-            command: ["compute-domain-daemon", "-v", "$(LOG_VERBOSITY)", "check"]
+            command: ["compute-domain-daemon", "-v", "$(LOG_VERBOSITY)", "check", "--imex-peers"]
           periodSeconds: 10
           timeoutSeconds: 10
           failureThreshold: 1
