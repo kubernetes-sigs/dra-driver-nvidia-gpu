@@ -10,7 +10,9 @@ Install the DRA Driver for NVIDIA GPUs and validate that GPU or ComputeDomain al
 Before you begin:
 
 - Confirm all [prerequisites](prerequisites.md) are met.
-- If you have the NVIDIA GPU Operator installed, follow the [GPU Operator install guide](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/dra-intro-install.html) instead.
+- If you use NVIDIA GPU Operator, use the Operator to install the driver.
+  By default, the Operator does not install the driver.
+  Specify `gpuCluster.deployCR=true` and other Helm values when you [install the Operator with the DRA driver](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/dra-intro-install.html).
 
 ---
 
