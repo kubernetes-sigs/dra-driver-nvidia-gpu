@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
 
@@ -27,10 +28,9 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
-// This A100 topology has NVML module IDs 1-8 and FM physical IDs 9-16.
-// The UUIDs are synthetic; PCI addresses and partition membership reproduce
-// the hardware mapping. No constant offset maps all module IDs to physical IDs.
-func a100FabricIdentityFixture() ([]fabricmanager.Partition, map[int]*GpuInfo) {
+// This synthetic supported topology has NVML module IDs 1-8 and FM physical
+// IDs 9-16. No constant offset maps all module IDs to physical IDs.
+func fabricIdentityFixture() ([]fabricmanager.Partition, map[int]*GpuInfo) {
 	modules := []int{5, 6, 7, 8, 1, 2, 3, 4}
 	buses := []string{"91", "da", "8c", "d6", "15", "53", "0f", "50"}
 	members := make([]fabricmanager.PartitionGPU, 8)
@@ -38,7 +38,15 @@ func a100FabricIdentityFixture() ([]fabricmanager.Partition, map[int]*GpuInfo) {
 	for i, module := range modules {
 		uuid := fmt.Sprintf("GPU-00000000-0000-0000-0000-%012d", module)
 		members[i] = fabricmanager.PartitionGPU{PhysicalID: i + 9, UUID: uuid, PCIBusID: "00000000:" + buses[i] + ":00.0"}
-		gpus[module] = &GpuInfo{UUID: uuid, pciBusID: "0000:" + buses[i] + ":00.0", gpuModuleID: module}
+		gpus[module] = &GpuInfo{
+			UUID:                  uuid,
+			pciBusID:              "0000:" + buses[i] + ":00.0",
+			gpuModuleID:           module,
+			architectureID:        nvml.DEVICE_ARCH_HOPPER,
+			cudaComputeCapability: "9.0",
+			driverVersion:         "580.0.0",
+			cudaDriverVersion:     "13.0",
+		}
 	}
 	partitions := []fabricmanager.Partition{
 		{ID: 2, GPUs: members},
@@ -69,7 +77,7 @@ func TestResolveFabricPartitionGPUIdentity(t *testing.T) {
 		"empty":            {nil, 0, true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			partitions, inventory := a100FabricIdentityFixture()
+			partitions, inventory := fabricIdentityFixture()
 			manager, err := fabricmanager.Open(&testFMClient{partitions: partitions})
 			require.NoError(t, err)
 			defer manager.Close()
@@ -95,7 +103,7 @@ func TestFabricPartitionAttributesGPUIdentity(t *testing.T) {
 	t.Cleanup(func() {
 		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): oldGate}))
 	})
-	partitions, gpus := a100FabricIdentityFixture()
+	partitions, gpus := fabricIdentityFixture()
 	manager, err := fabricmanager.Open(&testFMClient{partitions: partitions})
 	require.NoError(t, err)
 	defer manager.Close()
@@ -116,6 +124,17 @@ func TestFabricPartitionAttributesGPUIdentity(t *testing.T) {
 			require.Equal(t, int64(id), *attrs[resourceapi.QualifiedName(fmt.Sprintf("partition%d", size))].IntValue)
 		}
 	}
+
+	ampere := *gpus[3]
+	ampere.architectureID = nvml.DEVICE_ARCH_AMPERE
+	ampere.partitionsBySize = map[int]int{1: 33}
+	require.NoError(t, state.attachFabricManagerPartitions(&ampere))
+	require.Nil(t, ampere.partitionsBySize)
+	attrs := ampere.Attributes()
+	_, hasModuleID := attrs["gpuModuleID"]
+	_, hasPartition := attrs["partition1"]
+	require.False(t, hasModuleID)
+	require.False(t, hasPartition)
 }
 
 func TestFabricPartitionLifecycleGPUIdentity(t *testing.T) {
@@ -126,7 +145,7 @@ func TestFabricPartitionLifecycleGPUIdentity(t *testing.T) {
 	})
 	for _, vfio := range []bool{false, true} {
 		t.Run(fmt.Sprintf("vfio=%t", vfio), func(t *testing.T) {
-			partitions, gpus := a100FabricIdentityFixture()
+			partitions, gpus := fabricIdentityFixture()
 			client := &testFMClient{partitions: partitions}
 			manager, err := fabricmanager.Open(client)
 			require.NoError(t, err)
@@ -148,6 +167,42 @@ func TestFabricPartitionLifecycleGPUIdentity(t *testing.T) {
 	}
 }
 
+func TestFabricPartitionLifecycleSkipsPreHopperGPU(t *testing.T) {
+	oldGate := featuregates.Enabled(featuregates.FabricManagerPartitioning)
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): true}))
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{string(featuregates.FabricManagerPartitioning): oldGate}))
+	})
+
+	partitions, gpus := fabricIdentityFixture()
+	client := &testFMClient{partitions: partitions}
+	manager, err := fabricmanager.Open(client)
+	require.NoError(t, err)
+	defer manager.Close()
+
+	gpu := gpus[3]
+	gpu.architectureID = nvml.DEVICE_ARCH_AMPERE
+	state := &DeviceState{
+		fmManager: manager,
+		config:    &Config{flags: &Flags{}},
+		perGPUAllocatable: &PerGPUAllocatableDevices{
+			allocatablesMap: map[PCIBusID]AllocatableDevices{
+				PCIBusID(gpu.pciBusID): {"device": {Gpu: gpu}},
+			},
+		},
+	}
+	claim := &resourceapi.ResourceClaim{Status: resourceapi.ResourceClaimStatus{
+		Allocation: &resourceapi.AllocationResult{Devices: resourceapi.DeviceAllocationResult{
+			Results: []resourceapi.DeviceRequestAllocationResult{{Driver: DriverName, Device: "device"}},
+		}},
+	}}
+
+	require.NoError(t, state.activateFabricPartition(claim))
+	require.Empty(t, client.activatedIDs)
+	require.NoError(t, state.deactivateFabricPartition("claim", &PreparedClaim{Status: claim.Status}, nil))
+	require.Empty(t, client.deactivatedIDs)
+}
+
 func TestResolveFabricPartitionIdentityValidation(t *testing.T) {
 	for name, tc := range map[string]struct {
 		mutate    func(*GpuInfo)
@@ -163,7 +218,7 @@ func TestResolveFabricPartitionIdentityValidation(t *testing.T) {
 		"missing identity":                     {mutate: func(g *GpuInfo) { g.UUID = ""; g.pciBusID = "" }, wantError: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			partitions, gpus := a100FabricIdentityFixture()
+			partitions, gpus := fabricIdentityFixture()
 			manager, err := fabricmanager.Open(&testFMClient{partitions: partitions})
 			require.NoError(t, err)
 			defer manager.Close()
@@ -191,7 +246,7 @@ func TestFabricPartitionWithoutFMIdentity(t *testing.T) {
 	})
 	for _, emptyPCI := range []string{"", "00000000:00:00.0"} {
 		t.Run("PCI="+emptyPCI, func(t *testing.T) {
-			partitions, gpus := a100FabricIdentityFixture()
+			partitions, gpus := fabricIdentityFixture()
 			moduleByUUID := make(map[string]int)
 			for module, gpu := range gpus {
 				moduleByUUID[gpu.UUID] = module

@@ -528,7 +528,7 @@ func TestDeactivateFabricPartitionRefCounting(t *testing.T) {
 		perGPUAllocatable: &PerGPUAllocatableDevices{
 			allocatablesMap: map[PCIBusID]AllocatableDevices{
 				"0000:00:00.0": {
-					"gpu-0": &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0000", gpuModuleID: 1}},
+					"gpu-0": &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0000", gpuModuleID: 1, architectureID: nvml.DEVICE_ARCH_HOPPER}},
 				},
 			},
 		},
