@@ -180,8 +180,11 @@ func TestNewTimeSlicingManager(t *testing.T) {
 }
 
 func TestTimeSlicingManagerSetTimeSlice(t *testing.T) {
+	// The fake nvidia-smi records LD_PRELOAD in every invocation line. Clear it
+	// for the whole test so a new subtest cannot inherit a leftover value.
+	t.Setenv("LD_PRELOAD", "")
+
 	t.Run("compute mode is reset to DEFAULT before the time slice is set", func(t *testing.T) {
-		t.Setenv("LD_PRELOAD", "")
 		smi := newFakeSMI(t, 0)
 		m := NewTimeSlicingManager(&deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath})
 
@@ -208,7 +211,6 @@ func TestTimeSlicingManagerSetTimeSlice(t *testing.T) {
 			configapi.LongTimeSlice:    "3",
 		} {
 			t.Run(string(interval), func(t *testing.T) {
-				t.Setenv("LD_PRELOAD", "")
 				smi := newFakeSMI(t, 0)
 				m := NewTimeSlicingManager(&deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath})
 
@@ -242,7 +244,6 @@ func TestTimeSlicingManagerSetTimeSlice(t *testing.T) {
 	})
 
 	t.Run("a failing time slice invocation is reported", func(t *testing.T) {
-		t.Setenv("LD_PRELOAD", "")
 		dir := t.TempDir()
 		smiPath := filepath.Join(dir, "nvidia-smi")
 		libPath := filepath.Join(dir, "libnvidia-ml.so.1")
@@ -259,7 +260,7 @@ func TestTimeSlicingManagerSetTimeSlice(t *testing.T) {
 }
 
 func TestNewMpsManager(t *testing.T) {
-	config := testConfig(k8sfake.NewSimpleClientset(), "/var/lib/kubelet/plugins")
+	config := testConfig(k8sfake.NewClientset(), "/var/lib/kubelet/plugins")
 	l := &deviceLib{}
 
 	m := NewMpsManager(config, l, "/run/nvidia/driver", "/templates/mps.tmpl.yaml")
@@ -273,7 +274,7 @@ func TestNewMpsManager(t *testing.T) {
 }
 
 func TestGetMpsControlDaemonID(t *testing.T) {
-	m := NewMpsManager(testConfig(k8sfake.NewSimpleClientset(), "/plugins"), nil, "/", "")
+	m := NewMpsManager(testConfig(k8sfake.NewClientset(), "/plugins"), nil, "/", "")
 	devices := fakeUUIDProvider{gpus: []string{"GPU-1", "GPU-2"}}
 
 	id := m.GetMpsControlDaemonID("claim-uid", devices)
@@ -307,7 +308,7 @@ func TestGetMpsControlDaemonID(t *testing.T) {
 }
 
 func TestNewMpsControlDaemon(t *testing.T) {
-	config := testConfig(k8sfake.NewSimpleClientset(), "/var/lib/kubelet/plugins")
+	config := testConfig(k8sfake.NewClientset(), "/var/lib/kubelet/plugins")
 	m := NewMpsManager(config, nil, "/", "")
 	devices := fakeUUIDProvider{gpus: []string{"GPU-1"}}
 
@@ -335,7 +336,7 @@ func TestIsControlDaemonStartedAndStopped(t *testing.T) {
 
 	t.Run("the deployment exists", func(t *testing.T) {
 		m := NewMpsManager(
-			testConfig(k8sfake.NewSimpleClientset(mpsDeployment(namespace, id, 1, nil)), "/plugins"),
+			testConfig(k8sfake.NewClientset(mpsDeployment(namespace, id, 1, nil)), "/plugins"),
 			nil, "/", "",
 		)
 
@@ -349,7 +350,7 @@ func TestIsControlDaemonStartedAndStopped(t *testing.T) {
 	})
 
 	t.Run("the deployment does not exist", func(t *testing.T) {
-		m := NewMpsManager(testConfig(k8sfake.NewSimpleClientset(), "/plugins"), nil, "/", "")
+		m := NewMpsManager(testConfig(k8sfake.NewClientset(), "/plugins"), nil, "/", "")
 
 		started, err := m.IsControlDaemonStarted(context.Background(), id)
 		require.NoError(t, err)
@@ -362,7 +363,7 @@ func TestIsControlDaemonStartedAndStopped(t *testing.T) {
 
 	t.Run("the deployment exists in a different namespace", func(t *testing.T) {
 		m := NewMpsManager(
-			testConfig(k8sfake.NewSimpleClientset(mpsDeployment("other", id, 1, nil)), "/plugins"),
+			testConfig(k8sfake.NewClientset(mpsDeployment("other", id, 1, nil)), "/plugins"),
 			nil, "/", "",
 		)
 
@@ -372,7 +373,7 @@ func TestIsControlDaemonStartedAndStopped(t *testing.T) {
 	})
 
 	t.Run("an API error is propagated rather than read as absence", func(t *testing.T) {
-		clientset := k8sfake.NewSimpleClientset()
+		clientset := k8sfake.NewClientset()
 		clientset.PrependReactor("get", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
 			return true, nil, apierrors.NewInternalError(errors.New("boom"))
 		})
@@ -542,7 +543,7 @@ func TestRenderMpsControlDaemonDeployment(t *testing.T) {
 }
 
 func TestMpsControlDaemonGetCDIContainerEdits(t *testing.T) {
-	m := NewMpsManager(testConfig(k8sfake.NewSimpleClientset(), "/plugins"), nil, "/", "")
+	m := NewMpsManager(testConfig(k8sfake.NewClientset(), "/plugins"), nil, "/", "")
 	d := m.NewMpsControlDaemon("claim-uid", fakeUUIDProvider{gpus: []string{"GPU-1"}})
 
 	edits := d.GetCDIContainerEdits()
@@ -564,6 +565,9 @@ func TestMpsControlDaemonGetCDIContainerEdits(t *testing.T) {
 	}, edits.Mounts)
 }
 
+// TestMpsControlDaemonStart covers the Start failures that happen before the
+// shm tmpfs is mounted. The success path needs a real tmpfs mount and root;
+// the GPU sharing bats tests cover it (tests/bats/test_gpu_sharing.bats).
 func TestMpsControlDaemonStart(t *testing.T) {
 	devices := fakeUUIDProvider{gpus: []string{"GPU-1"}}
 
@@ -574,7 +578,7 @@ func TestMpsControlDaemonStart(t *testing.T) {
 	}
 
 	t.Run("an already started daemon is left alone", func(t *testing.T) {
-		clientset := k8sfake.NewSimpleClientset()
+		clientset := k8sfake.NewClientset()
 		// An unusable template path proves no rendering is attempted.
 		d := newDaemon(t, clientset, nil, "/nonexistent.tmpl.yaml")
 		_, err := clientset.AppsV1().Deployments(d.namespace).Create(
@@ -588,7 +592,7 @@ func TestMpsControlDaemonStart(t *testing.T) {
 	})
 
 	t.Run("a failing lookup of the existing deployment is reported", func(t *testing.T) {
-		clientset := k8sfake.NewSimpleClientset()
+		clientset := k8sfake.NewClientset()
 		clientset.PrependReactor("get", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
 			return true, nil, apierrors.NewInternalError(errors.New("boom"))
 		})
@@ -600,7 +604,7 @@ func TestMpsControlDaemonStart(t *testing.T) {
 	})
 
 	t.Run("an unresolvable per-device memory limit is reported", func(t *testing.T) {
-		d := newDaemon(t, k8sfake.NewSimpleClientset(), nil, templatePath())
+		d := newDaemon(t, k8sfake.NewClientset(), nil, templatePath())
 
 		err := d.Start(context.Background(), &configapi.MpsConfig{
 			DefaultPerDevicePinnedMemoryLimit: configapi.MpsPerDevicePinnedMemoryLimit{
@@ -616,7 +620,7 @@ func TestMpsControlDaemonStart(t *testing.T) {
 		l := &deviceLib{gpuInfosByUUID: map[string]*GpuInfo{
 			"GPU-1": {UUID: "GPU-1", cudaComputeCapability: "6.1"},
 		}}
-		d := newDaemon(t, k8sfake.NewSimpleClientset(), l, templatePath())
+		d := newDaemon(t, k8sfake.NewClientset(), l, templatePath())
 
 		err := d.Start(context.Background(), &configapi.MpsConfig{MultiUser: ptr.To(true)})
 
@@ -628,7 +632,7 @@ func TestMpsControlDaemonStart(t *testing.T) {
 		l := &deviceLib{gpuInfosByUUID: map[string]*GpuInfo{
 			"GPU-1": {UUID: "GPU-1", cudaComputeCapability: "7.5"},
 		}}
-		d := newDaemon(t, k8sfake.NewSimpleClientset(), l, filepath.Join(t.TempDir(), "absent.tmpl.yaml"))
+		d := newDaemon(t, k8sfake.NewClientset(), l, filepath.Join(t.TempDir(), "absent.tmpl.yaml"))
 
 		err := d.Start(context.Background(), &configapi.MpsConfig{MultiUser: ptr.To(true)})
 
@@ -642,7 +646,7 @@ func TestMpsControlDaemonAssertReady(t *testing.T) {
 	selector := map[string]string{"app": "mps"}
 
 	newDaemon := func(objects ...runtime.Object) *MpsControlDaemon {
-		m := NewMpsManager(testConfig(k8sfake.NewSimpleClientset(objects...), "/plugins"), nil, "/", "")
+		m := NewMpsManager(testConfig(k8sfake.NewClientset(objects...), "/plugins"), nil, "/", "")
 		return m.NewMpsControlDaemon("claim-uid", fakeUUIDProvider{gpus: []string{"GPU-1"}})
 	}
 
@@ -725,7 +729,7 @@ func TestMpsControlDaemonStop(t *testing.T) {
 	devices := fakeUUIDProvider{gpus: []string{"GPU-1"}}
 
 	t.Run("stopping a daemon that was never started is a no-op", func(t *testing.T) {
-		clientset := k8sfake.NewSimpleClientset()
+		clientset := k8sfake.NewClientset()
 		// The control files root is an empty temp dir, so rootDir does not exist.
 		m := NewMpsManager(testConfig(clientset, t.TempDir()), nil, "/", "")
 		d := m.NewMpsControlDaemon("claim-uid", devices)
@@ -748,7 +752,7 @@ func TestMpsControlDaemonStop(t *testing.T) {
 		t.Setenv("LD_PRELOAD", "")
 
 		smi := newFakeSMI(t, 0)
-		clientset := k8sfake.NewSimpleClientset()
+		clientset := k8sfake.NewClientset()
 		m := NewMpsManager(
 			testConfig(clientset, t.TempDir()),
 			&deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath},
@@ -777,10 +781,11 @@ func TestMpsControlDaemonStop(t *testing.T) {
 		if _, err := exec.LookPath("mount"); err != nil {
 			t.Skip("the 'mount' executable is required to unmount the shm directory")
 		}
+		t.Setenv("LD_PRELOAD", "")
 
 		smi := newFakeSMI(t, 0)
 		m := NewMpsManager(
-			testConfig(k8sfake.NewSimpleClientset(), t.TempDir()),
+			testConfig(k8sfake.NewClientset(), t.TempDir()),
 			&deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath},
 			"/", "",
 		)
@@ -793,7 +798,7 @@ func TestMpsControlDaemonStop(t *testing.T) {
 	})
 
 	t.Run("a failing deployment deletion is reported", func(t *testing.T) {
-		clientset := k8sfake.NewSimpleClientset()
+		clientset := k8sfake.NewClientset()
 		clientset.PrependReactor("delete", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
 			return true, nil, apierrors.NewInternalError(errors.New("boom"))
 		})
@@ -808,9 +813,10 @@ func TestMpsControlDaemonStop(t *testing.T) {
 	})
 
 	t.Run("a failing compute mode reset is reported", func(t *testing.T) {
+		t.Setenv("LD_PRELOAD", "")
 		smi := newFakeSMI(t, 1)
 		m := NewMpsManager(
-			testConfig(k8sfake.NewSimpleClientset(), t.TempDir()),
+			testConfig(k8sfake.NewClientset(), t.TempDir()),
 			&deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath},
 			"/", "",
 		)
