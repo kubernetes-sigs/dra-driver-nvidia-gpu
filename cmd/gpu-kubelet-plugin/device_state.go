@@ -66,6 +66,7 @@ type DeviceConfigState struct {
 	Config             configapi.Interface `json:"-"` // don't serialize this.
 	containerEdits     *cdiapi.ContainerEdits
 	TimeSliceApplied   *bool `json:"timeSliceApplied,omitempty"`
+	ClockLockApplied   *bool `json:"clockLockApplied,omitempty"`
 }
 
 type DeviceState struct {
@@ -73,6 +74,7 @@ type DeviceState struct {
 	cdi                      *CDIHandler
 	tsManager                *TimeSlicingManager
 	mpsManager               *MpsManager
+	ckManager                *ClockManager
 	vfioPciManager           *VfioPciManager
 	checkpointCleanupManager *CheckpointCleanupManager
 	config                   *Config
@@ -194,6 +196,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	if featuregates.Enabled(featuregates.MPSSupport) {
 		mpsManager = NewMpsManager(config, nvdevlib, hostDriverRoot, MpsControlDaemonTemplatePath)
 	}
+	clockManager := NewClockManager(nvdevlib)
 
 	var vfioPciManager *VfioPciManager
 	if featuregates.Enabled(featuregates.PassthroughSupport) && nvdevlib.IsVfioEnabled() {
@@ -220,6 +223,7 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		cdi:               cdi,
 		tsManager:         tsManager,
 		mpsManager:        mpsManager,
+		ckManager:         clockManager,
 		vfioPciManager:    vfioPciManager,
 		perGPUAllocatable: perGPUAllocatable,
 		config:            config,
@@ -1269,7 +1273,23 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 				}
 			}
 		}
-
+		// Older checkpoints don't contain ClockLockApplied, which means no
+		// clock lock was recorded for the claim.
+		if ptr.Deref(group.ConfigState.ClockLockApplied, false) {
+			var gpuUUIDsToReset []string
+			for _, gpuUUID := range group.Devices.GpuUUIDs() {
+				if isConsumableSharesEnabled(s.config) && isGpuUUIDInUseByOtherClaims(checkpoint, claimUID, gpuUUID) {
+					klog.V(4).Infof("Unprepare: GPU %s still in use by other claims, skipping GPU clock lock reset", gpuUUID)
+				} else {
+					gpuUUIDsToReset = append(gpuUUIDsToReset, gpuUUID)
+				}
+			}
+			if len(gpuUUIDsToReset) > 0 {
+				if err := s.ckManager.ResetGpuClockSpeed(gpuUUIDsToReset); err != nil {
+					return false, fmt.Errorf("error resetting GPU clock speeds for devices: %w", err)
+				}
+			}
+		}
 	}
 	return taintRemoved, nil
 }
@@ -1391,8 +1411,24 @@ func (s *DeviceState) validateClaimCDIDeviceNodes(claim *resourceapi.ResourceCla
 func (s *DeviceState) applyConfig(ctx context.Context, config configapi.Interface, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult, cp *Checkpoint) (*DeviceConfigState, error) {
 	switch castConfig := config.(type) {
 	case *configapi.GpuConfig:
-		klog.V(7).Infof("applySharingConfig() for GpuConfig")
-		return s.applySharingConfig(ctx, castConfig.Sharing, claim, results, cp)
+		klog.V(7).Infof("applyConfig() for GpuConfig")
+		gpuconfig, err := s.applySharingConfig(ctx, castConfig.Sharing, claim, results, cp)
+		if err != nil {
+			return nil, fmt.Errorf("failed to apply sharing config: %w", err)
+		}
+		if castConfig.Clocks != nil && castConfig.Clocks.SMLockedMHz != nil {
+			clockstate, err := s.applyClockConfig(ctx, castConfig.Clocks, claim, results, cp)
+			if err != nil {
+				if castConfig.Sharing != nil {
+					if rollbackErr := s.rollbackSharingConfig(ctx, castConfig.Sharing, claim, results, cp); rollbackErr != nil {
+						return nil, fmt.Errorf("failed to apply clock config: %w; failed to roll back sharing config: %w", err, rollbackErr)
+					}
+				}
+				return nil, fmt.Errorf("failed to apply clock config: %w", err)
+			}
+			gpuconfig.ClockLockApplied = clockstate
+		}
+		return gpuconfig, nil
 	case *configapi.MigDeviceConfig:
 		klog.V(7).Infof("applySharingConfig() for MigDeviceConfig")
 		return s.applySharingConfig(ctx, castConfig.Sharing, claim, results, cp)
@@ -1405,6 +1441,34 @@ func (s *DeviceState) applyConfig(ctx context.Context, config configapi.Interfac
 	default:
 		return nil, fmt.Errorf("unknown config type: %T", castConfig)
 	}
+}
+
+func (s *DeviceState) applyClockConfig(ctx context.Context, config *configapi.GpuClocks, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult, cp *Checkpoint) (*bool, error) {
+	// Get the list of claim requests this config is being applied over.
+	var requests []string
+	for _, r := range results {
+		requests = append(requests, r.Request)
+	}
+
+	// Get the list of allocatable devices this config is being applied over.
+	requestedDevices := make(AllocatableDevices)
+	for _, r := range results {
+		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
+		if device == nil {
+			return ptr.To(false), fmt.Errorf("allocatable not found for device %q", r.Device)
+		}
+		requestedDevices[r.Device] = device
+	}
+
+	// Declare a device group state object to populate.
+	uuids := requestedDevices.GpuUUIDs()
+	klog.V(6).Infof("SetClocks() for GPUs with UUIDs: %s", uuids)
+	err := s.ckManager.SetClock(uuids, *config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set GPU clocks for requests %v in claim %s: %w", requests, claim.UID, err)
+	}
+	// Return a pointer to true indicating the clock lock was successfully applied
+	return ptr.To(true), nil
 }
 
 func (s *DeviceState) applySharingConfig(ctx context.Context, config configapi.Sharing, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult, cp *Checkpoint) (*DeviceConfigState, error) {
@@ -1477,6 +1541,54 @@ func (s *DeviceState) applySharingConfig(ctx context.Context, config configapi.S
 	}
 
 	return &configState, nil
+}
+
+func (s *DeviceState) rollbackSharingConfig(ctx context.Context, config configapi.Sharing, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult, cp *Checkpoint) error {
+	claimUID := string(claim.UID)
+	var requests []string
+	for _, r := range results {
+		requests = append(requests, r.Request)
+	}
+
+	requestedDevices := make(AllocatableDevices)
+	for _, r := range results {
+		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
+		if device == nil {
+			return fmt.Errorf("failed to resolve allocated device %q while rolling back sharing config", r.Device)
+		}
+		requestedDevices[r.Device] = device
+	}
+	uuids := requestedDevices.GpuUUIDs()
+	gpuUUIDsToRollback := make([]string, 0, len(uuids))
+	if featuregates.Enabled(featuregates.TimeSlicingSettings) && config.IsTimeSlicing() {
+		for _, uuid := range uuids {
+			if isConsumableSharesEnabled(s.config) && isGpuUUIDInUseByOtherClaims(cp, claimUID, uuid) {
+				klog.V(4).Infof("rollbackSharingConfig: GPU %s still in use by other claims, skipping time-slice rollback", uuid)
+			} else {
+				gpuUUIDsToRollback = append(gpuUUIDsToRollback, uuid)
+			}
+		}
+		defaultInterval := configapi.DefaultTimeSlice
+		tsc := &configapi.TimeSlicingConfig{Interval: &defaultInterval}
+		klog.V(6).Infof("Resetting time-slicing for full GPUs with UUIDs: %s", gpuUUIDsToRollback)
+		if err := s.tsManager.SetTimeSlice(gpuUUIDsToRollback, tsc); err != nil {
+			return fmt.Errorf("failed to reset time-slicing for claim %s (requests %v): %w", claim.UID, requests, err)
+		}
+	}
+
+	if featuregates.Enabled(featuregates.MPSSupport) && config.IsMps() {
+		if isConsumableSharesEnabled(s.config) {
+			return fmt.Errorf("cannot roll back MPS sharing for claim %s: consumable shares is enabled", claim.UID)
+		}
+		if featuregates.Enabled(featuregates.DynamicMIG) {
+			return fmt.Errorf("cannot roll back MPS sharing for claim %s while DynamicMIG is enabled", claim.UID)
+		}
+		mpsControlDaemon := s.mpsManager.NewMpsControlDaemon(string(claim.UID), requestedDevices)
+		if err := mpsControlDaemon.Stop(ctx); err != nil {
+			return fmt.Errorf("failed to stop MPS control daemon for claim %s: %w", claim.UID, err)
+		}
+	}
+	return nil
 }
 
 func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configapi.VfioDeviceConfig, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult) (*DeviceConfigState, error) {

@@ -25,15 +25,18 @@ import (
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/fabricmanager"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 )
 
 func TestValidateNoOverlappingPreparedDevices(t *testing.T) {
@@ -310,6 +313,242 @@ func TestApplySharingConfigMpsDisallowedWithConsumableShares(t *testing.T) {
 			require.NotContains(t, err.Error(), "MPS sharing is not supported when consumable shares is enabled")
 		}
 	})
+}
+
+func TestApplyConfigRollsBackTimeSlicingWhenClockSetupFails(t *testing.T) {
+	oldTimeSlicing := featuregates.Enabled(featuregates.TimeSlicingSettings)
+	oldConsumableShares := featuregates.Enabled(featuregates.ConsumableShares)
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+			string(featuregates.TimeSlicingSettings): oldTimeSlicing,
+			string(featuregates.ConsumableShares):    oldConsumableShares,
+		}))
+	})
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+		string(featuregates.TimeSlicingSettings): true,
+		string(featuregates.ConsumableShares):    true,
+	}))
+
+	for _, tc := range []struct {
+		name               string
+		otherClaimUsesGPU  bool
+		wantTimeSliceCalls int
+	}{
+		{name: "reset when no other claim uses the GPU", wantTimeSliceCalls: 2},
+		{name: "preserve settings while another claim uses the GPU", otherClaimUsesGPU: true, wantTimeSliceCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LD_PRELOAD", "")
+			smi := newFakeSMI(t, 0)
+			clockDevice := &clockTestNVMLDevice{setReturn: nvml.ERROR_UNKNOWN}
+			clockLibrary := &clockTestNVML{
+				devices: map[string]*clockTestNVMLDevice{"GPU-0": clockDevice},
+			}
+			gpu := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0"}}
+			state := &DeviceState{
+				config: &Config{flags: &Flags{consumableShares: "unlimited"}},
+				tsManager: NewTimeSlicingManager(&deviceLib{
+					nvidiaSMIPath:     smi.path,
+					driverLibraryPath: smi.libPath,
+				}),
+				ckManager: NewClockManager(&deviceLib{nvmllib: clockLibrary}),
+				perGPUAllocatable: &PerGPUAllocatableDevices{allocatablesMap: map[PCIBusID]AllocatableDevices{
+					"0000:00:00.0": {"gpu-0": gpu},
+				}},
+			}
+
+			checkpoint := &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}}
+			if tc.otherClaimUsesGPU {
+				checkpoint.V2.PreparedClaims["other-claim"] = PreparedClaim{
+					CheckpointState: ClaimCheckpointStatePrepareCompleted,
+					PreparedDevices: PreparedDevices{
+						&PreparedDeviceGroup{Devices: PreparedDeviceList{{
+							Gpu: &PreparedGpu{
+								Info:   &GpuInfo{UUID: "GPU-0"},
+								Device: &CheckpointedDevice{DeviceName: "gpu-0"},
+							},
+						}}},
+					},
+				}
+			}
+
+			clockMHz := int32(1200)
+			interval := configapi.ShortTimeSlice
+			config := &configapi.GpuConfig{
+				Sharing: &configapi.GpuSharing{
+					Strategy:          configapi.TimeSlicingStrategy,
+					TimeSlicingConfig: &configapi.TimeSlicingConfig{Interval: &interval},
+				},
+				Clocks: &configapi.GpuClocks{SMLockedMHz: &clockMHz},
+			}
+			claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{UID: "current-claim"}}
+			results := []*resourceapi.DeviceRequestAllocationResult{{Request: "gpu", Device: "gpu-0"}}
+
+			_, err := state.applyConfig(context.Background(), config, claim, results, checkpoint)
+
+			require.ErrorContains(t, err, "failed to apply clock config")
+			invocations := smi.invocations(t)
+			var timeSliceCalls []string
+			for _, invocation := range invocations {
+				if strings.Contains(invocation, "--set-timeslice") {
+					timeSliceCalls = append(timeSliceCalls, invocation)
+				}
+			}
+			require.Len(t, timeSliceCalls, tc.wantTimeSliceCalls)
+			require.Contains(t, timeSliceCalls[0], "--set-timeslice 1")
+			if !tc.otherClaimUsesGPU {
+				require.Contains(t, timeSliceCalls[1], "--set-timeslice 0")
+			}
+		})
+	}
+}
+
+func TestApplyConfigAppliesClockLockAfterAllocationIsResolved(t *testing.T) {
+	clockDevice := &clockTestNVMLDevice{}
+	clockLibrary := &clockTestNVML{devices: map[string]*clockTestNVMLDevice{"GPU-0": clockDevice}}
+	state := &DeviceState{
+		ckManager: NewClockManager(&deviceLib{nvmllib: clockLibrary}),
+		perGPUAllocatable: &PerGPUAllocatableDevices{allocatablesMap: map[PCIBusID]AllocatableDevices{
+			"0000:00:00.0": {"gpu-0": &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0"}}},
+		}},
+	}
+	clockMHz := int32(1200)
+	config := &configapi.GpuConfig{Clocks: &configapi.GpuClocks{SMLockedMHz: &clockMHz}}
+	claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{UID: "claim-1"}}
+	results := []*resourceapi.DeviceRequestAllocationResult{{Request: "gpu", Device: "gpu-0"}}
+
+	configState, err := state.applyConfig(context.Background(), config, claim, results, nil)
+
+	require.NoError(t, err)
+	require.NotNil(t, configState.ClockLockApplied)
+	require.True(t, *configState.ClockLockApplied)
+	require.Equal(t, [][2]uint32{{1200, 1200}}, clockDevice.setCalls)
+	require.Zero(t, clockDevice.resetCalls)
+}
+
+func TestUnprepareDevicesResetsRecordedClockLocks(t *testing.T) {
+	oldTimeSlicing := featuregates.Enabled(featuregates.TimeSlicingSettings)
+	oldMPSSupport := featuregates.Enabled(featuregates.MPSSupport)
+	oldPassthroughSupport := featuregates.Enabled(featuregates.PassthroughSupport)
+	oldDynamicMIG := featuregates.Enabled(featuregates.DynamicMIG)
+	oldConsumableShares := featuregates.Enabled(featuregates.ConsumableShares)
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+			string(featuregates.TimeSlicingSettings): oldTimeSlicing,
+			string(featuregates.MPSSupport):          oldMPSSupport,
+			string(featuregates.PassthroughSupport):  oldPassthroughSupport,
+			string(featuregates.DynamicMIG):          oldDynamicMIG,
+			string(featuregates.ConsumableShares):    oldConsumableShares,
+		}))
+	})
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+		string(featuregates.TimeSlicingSettings): false,
+		string(featuregates.MPSSupport):          false,
+		string(featuregates.PassthroughSupport):  false,
+		string(featuregates.DynamicMIG):          false,
+		string(featuregates.ConsumableShares):    false,
+	}))
+
+	for _, tc := range []struct {
+		name             string
+		clockLockApplied *bool
+		wantResetCalls   int
+	}{
+		{name: "recorded clock lock", clockLockApplied: ptr.To(true), wantResetCalls: 1},
+		{name: "legacy or unconfigured state", clockLockApplied: nil, wantResetCalls: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clockDevice := &clockTestNVMLDevice{}
+			state := &DeviceState{
+				config: &Config{flags: &Flags{consumableShares: "disabled"}},
+				ckManager: NewClockManager(&deviceLib{nvmllib: &clockTestNVML{
+					devices: map[string]*clockTestNVMLDevice{"GPU-0": clockDevice},
+				}}),
+			}
+			devices := PreparedDevices{&PreparedDeviceGroup{
+				ConfigState: DeviceConfigState{ClockLockApplied: tc.clockLockApplied},
+				Devices: PreparedDeviceList{{
+					Gpu: &PreparedGpu{
+						Info:   &GpuInfo{UUID: "GPU-0"},
+						Device: &CheckpointedDevice{DeviceName: "gpu-0"},
+					},
+				}},
+			}}
+			checkpoint := &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}}
+
+			_, err := state.unprepareDevices(context.Background(), "claim-1", devices, checkpoint)
+
+			require.NoError(t, err)
+			require.Equal(t, tc.wantResetCalls, clockDevice.resetCalls)
+		})
+	}
+}
+
+func TestRollbackSharingConfigStopsMpsDaemon(t *testing.T) {
+	previousGates := map[string]bool{
+		string(featuregates.MPSSupport):       featuregates.Enabled(featuregates.MPSSupport),
+		string(featuregates.DynamicMIG):       featuregates.Enabled(featuregates.DynamicMIG),
+		string(featuregates.ConsumableShares): featuregates.Enabled(featuregates.ConsumableShares),
+	}
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(previousGates))
+	})
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
+		string(featuregates.MPSSupport):       true,
+		string(featuregates.DynamicMIG):       false,
+		string(featuregates.ConsumableShares): false,
+	}))
+
+	t.Setenv("LD_PRELOAD", "")
+	smi := newFakeSMI(t, 0)
+	coreClient := k8sfake.NewSimpleClientset()
+	config := &Config{
+		flags: &Flags{
+			namespace:                   "driver-system",
+			kubeletPluginsDirectoryPath: t.TempDir(),
+			consumableShares:            "disabled",
+		},
+		clientsets: flags.ClientSets{Core: coreClient},
+	}
+	devices := AllocatableDevices{"gpu-0": &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0"}}}
+	perGPU := &PerGPUAllocatableDevices{allocatablesMap: map[PCIBusID]AllocatableDevices{
+		"0000:00:00.0": devices,
+	}}
+	mpsManager := NewMpsManager(config, &deviceLib{
+		nvidiaSMIPath:     smi.path,
+		driverLibraryPath: smi.libPath,
+	}, "/", "")
+	claim := &resourceapi.ResourceClaim{ObjectMeta: metav1.ObjectMeta{UID: "claim-1"}}
+	daemon := mpsManager.NewMpsControlDaemon(string(claim.UID), devices)
+	require.NoError(t, os.MkdirAll(daemon.rootDir, 0o755))
+	_, err := coreClient.AppsV1().Deployments(daemon.namespace).Create(
+		context.Background(),
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: daemon.name, Namespace: daemon.namespace}},
+		metav1.CreateOptions{},
+	)
+	require.NoError(t, err)
+
+	state := &DeviceState{config: config, mpsManager: mpsManager, perGPUAllocatable: perGPU}
+	err = state.rollbackSharingConfig(
+		context.Background(),
+		&configapi.GpuSharing{Strategy: configapi.MpsStrategy},
+		claim,
+		[]*resourceapi.DeviceRequestAllocationResult{{Request: "gpu", Device: "gpu-0"}},
+		nil,
+	)
+	require.NoError(t, err)
+
+	deletedDeployment := false
+	for _, action := range coreClient.Actions() {
+		if action.GetVerb() == "delete" {
+			deletedDeployment = true
+		}
+	}
+	require.True(t, deletedDeployment)
+	_, err = coreClient.AppsV1().Deployments(daemon.namespace).Get(context.Background(), daemon.name, metav1.GetOptions{})
+	require.Error(t, err)
+	require.Equal(t, []string{smi.libPath + "|-i GPU-0 -c DEFAULT"}, smi.invocations(t))
+	require.NoDirExists(t, daemon.rootDir)
 }
 
 func TestSharingReferenceCountingHelpers(t *testing.T) {
