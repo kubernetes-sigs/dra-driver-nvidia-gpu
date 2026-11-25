@@ -27,6 +27,24 @@ setup_file() {
   iupgrade_wait "${TEST_CHART_REPO}" "${TEST_CHART_VERSION}" _iargs
 }
 
+# /driver-root is a hostPath, so the control file outlives the plugin pod.
+# The last test also leaves ADDITIONAL_XIDS_TO_IGNORE=79 installed. Clear the
+# file before reinstalling with the suite's default args. Otherwise the next
+# file's upgrade restarts the plugin with an empty delivered-ID map, replays
+# that XID as fatal, and leaves a NoSchedule taint on gpu-0.
+teardown_file() {
+  load 'helpers.sh'
+  if [ "${MOCK_NVML:-}" != "true" ]; then
+    return 0
+  fi
+  clear_health_control
+  local _iargs=("--set" "logVerbosity=6")
+  if [ "${DISABLE_COMPUTE_DOMAINS:-}" = "true" ]; then
+    _iargs+=("--set" "resources.computeDomains.enabled=false")
+  fi
+  iupgrade_wait "${TEST_CHART_REPO}" "${TEST_CHART_VERSION}" _iargs
+}
+
 setup() {
   load 'helpers.sh'
   _common_setup
