@@ -27,7 +27,8 @@ var (
 	computeDomainClusterMetricsOnce sync.Once
 	computeDomains                  *metrics.GaugeVec
 
-	computeDomainLastStatus map[string]string // ComputeDomain UID -> last published status label
+	computeDomainLastStatusMu sync.Mutex
+	computeDomainLastStatus   map[string]string // ComputeDomain UID -> last published status label
 )
 
 func initComputeDomainClusterMetrics() {
@@ -51,13 +52,17 @@ func registerComputeDomainClusterMetrics() {
 }
 
 // ObserveComputeDomainStatus updates gauges for a single ComputeDomain when its global
-// status label changes. It is safe to call repeatedly with the same uid and statusLabel (no-op).
+// status label changes. It is safe to call concurrently from multiple goroutines (CDs are
+// synced in parallel), including repeatedly with the same uid and statusLabel (no-op).
 // uid must be non-empty.
 func ObserveComputeDomainStatus(uid, statusLabel string) {
 	if uid == "" {
 		return
 	}
 	registerComputeDomainClusterMetrics()
+
+	computeDomainLastStatusMu.Lock()
+	defer computeDomainLastStatusMu.Unlock()
 
 	if computeDomainLastStatus == nil {
 		computeDomainLastStatus = make(map[string]string)
@@ -77,11 +82,15 @@ func ObserveComputeDomainStatus(uid, statusLabel string) {
 }
 
 // ForgetComputeDomain removes a ComputeDomain UID from metrics (e.g. on informer Delete).
+// It is safe to call concurrently with ObserveComputeDomainStatus.
 func ForgetComputeDomain(uid string) {
 	if uid == "" {
 		return
 	}
 	registerComputeDomainClusterMetrics()
+
+	computeDomainLastStatusMu.Lock()
+	defer computeDomainLastStatusMu.Unlock()
 
 	if computeDomainLastStatus == nil {
 		return

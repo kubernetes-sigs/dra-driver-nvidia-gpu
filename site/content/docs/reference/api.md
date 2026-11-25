@@ -100,22 +100,64 @@ Configures a VFIO passthrough device. Target DeviceClass: `vfio.gpu.nvidia.com`.
 ```yaml
 apiVersion: resource.nvidia.com/v1beta1
 kind: VfioDeviceConfig
+driverOverride: null          # optional
 iommu:
   backendPolicy: LegacyOnly   # LegacyOnly | PreferIommuFD
-  enableAPIDevice: false       # optional
+  enableAPIDevice: true       # optional, defaults to true
 ```
 
 #### Fields
 
 | Field | Type | Description |
 |---|---|---|
-| `iommu` | object | Optional. IOMMU backend configuration. Omit to use defaults (`LegacyOnly`, API device disabled). |
+| `driverOverride` | string | Optional. Override the GPU's default passthrough driver that it binds to. Supported Values:<br>- `vfio-pci` |
+| `iommu` | object | Optional. IOMMU backend configuration. Omit to use defaults (`LegacyOnly`, API device enabled). |
 | `iommu.backendPolicy` | string | `LegacyOnly` (default) or `PreferIommuFD`. Selects the IOMMU backend used for device passthrough. |
-| `iommu.enableAPIDevice` | bool | Optional. Expose `/dev/iommu` or `/dev/vfio/vfio` to the workload. Defaults to `false`. Requires the [`DeviceMetadata`](feature-gates.md) feature gate. |
+| `iommu.enableAPIDevice` | bool | Optional. Expose `/dev/iommu` or `/dev/vfio/vfio` to the workload. Defaults to `true`; set to `false` to opt out (for example, for Kata). Requires the [`DeviceMetadata`](feature-gates.md) feature gate. |
 
 {{% alert title="Note" %}}
 Requires [`PassthroughSupport`](feature-gates.md) (Alpha, default: false). `iommu.enableAPIDevice` additionally requires [`DeviceMetadata`](feature-gates.md) (Alpha, default: false).
 {{% /alert %}}
+
+### LocalIPCConfig
+
+Exposes a writable directory for same-node IPC, such as UNIX domain sockets, shared by every container that consumes a GPU device from the ResourceClaim. It must not specify `requests`. For cross-Pod IPC, all Pods must reference the same ResourceClaim; a ResourceClaimTemplate creates a separate claim and directory for each Pod.
+
+The directory is backed by a per-claim tmpfs limited to 64 KiB and 1024 inodes. It is created when the claim is prepared and removed when the claim is unprepared. Use it for sockets and other small rendezvous files, not for bulk data.
+
+```yaml
+apiVersion: resource.nvidia.com/v1beta1
+kind: LocalIPCConfig
+enabled: true
+```
+
+#### Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | bool | When `true`, mounts the directory at `/run/nvidia-dra/local-ipc` and sets `NVIDIA_DRA_LOCAL_IPC_DIR` to that path. Defaults to `false`. |
+
+{{% alert title="Note" %}}
+Requires [`LocalIPCDirectory`](feature-gates.md) (Alpha, default: false).
+{{% /alert %}}
+
+#### Trust boundary
+
+The ResourceClaim is the trust boundary. Any container that consumes the claim can create entries in the directory. The sticky bit prevents a container from removing entries it does not own, but it does not prevent a container from binding the expected socket name before the real server does. A client that connects by name alone may then pass its memory handles to the wrong process.
+
+The driver only provides the directory. Applications are responsible for their socket protocol and file permissions, and must authenticate the peer before passing file descriptors or other handles. For example, check the peer's credentials with `SO_PEERCRED`, or have both sides prove they hold a secret mounted from the same Kubernetes Secret.
+
+A client finds the directory through `NVIDIA_DRA_LOCAL_IPC_DIR`:
+
+```python
+import os
+import socket
+
+path = os.path.join(os.environ["NVIDIA_DRA_LOCAL_IPC_DIR"], "server.sock")
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(path)
+# Authenticate the server before sending any handles over sock.
+```
 
 ## ComputeDomain CRDs
 
@@ -184,6 +226,34 @@ Requires [`ComputeDomainCliques`](feature-gates.md) (Beta, default: true), which
 | `daemons[].index` | integer | Deterministic index for the node within its clique. Maps to a DNS name. |
 | `daemons[].status` | string | Daemon readiness: `Ready` or `NotReady`. Defaults to `NotReady`. |
 
+
+### ComputeDomainDaemonSet
+
+A cluster-scoped resource, named `default`, that describes the static IMEX daemons used with `resources.computeDomains.imex.daemonLifecycle=static`. You create and update it, Helm does not. See [Static IMEX daemons](../guides/static-imex-daemons.md).
+
+{{% alert title="Note" %}}
+Requires [`ComputeDomainDaemonSet`](feature-gates.md) (Alpha, default: false).
+{{% /alert %}}
+
+#### Fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `spec.image` | string | | Daemon image. When empty, the driver image at creation is kept. |
+| `spec.imagePullSecrets` | list | | Pull secrets in the driver namespace. |
+| `spec.nodeSelector` | map | | Restricts daemons to matching nodes of a clique. |
+| `spec.priorityClassName` | string | | Priority class of the daemon pods. |
+| `spec.resources` | object | | Requests and limits of the daemon container. |
+| `spec.maxNodesPerClique` | integer | `18` | Maximum daemons per clique. Immutable. |
+| `spec.imexConfig` | map | | `nvidia-imex` config file settings to override or add. |
+| `spec.logVerbosity` | integer | `1` | Daemon log verbosity. |
+| `spec.updateStrategy.type` | string | `OnDelete` | `OnDelete` or `RollingUpdate`. |
+| `spec.updateStrategy.rollingUpdate.maxUnavailableCliques` | int or string | `1` | Cliques restarted at a time, a number or a percentage. `"100%"` restarts all cliques at once. |
+| `spec.updateStrategy.rollingUpdate.minReadySeconds` | integer | `30` | How long updated daemons must be ready before the next batch. |
+| `spec.updateStrategy.rollingUpdate.paused` | boolean | `false` | Stops new batches. |
+| `spec.updateStrategy.rollingUpdate.progressDeadlineSeconds` | integer | `1200` | How long the daemons of a clique may take to become available before the clique is reported as stalled. Must be greater than `minReadySeconds`. |
+| `status.cliques[]` | list | | Nodes, ready daemons, updated daemons and `state` (`Ready`, `NotReady` or `Stalled`) per clique, for up to 1024 cliques. |
+| `status.conditions[]` | list | | `Ready`, `RolloutInProgress`, `TemplateOutdated`, `UpdateBlocked`, `DeletionBlocked` and `Degraded`. See [Conditions](../guides/static-imex-daemons.md#conditions). |
 
 ## ComputeDomain opaque configuration types
 

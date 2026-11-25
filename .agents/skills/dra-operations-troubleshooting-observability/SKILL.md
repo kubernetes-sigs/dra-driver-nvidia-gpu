@@ -57,6 +57,25 @@ For large logs, preserve a bounded window around the failure and the startup pre
 
 Support bundles may contain pod environment values, image-pull credentials, registry names, internal addresses, annotations, or workload data. Redact secrets and tokens while retaining timestamps, object names, UIDs, node names, versions, status, reasons, and relevant configuration. Never collect Kubernetes Secret payloads by default.
 
+## Require human approval before disruptive remediation
+
+Keep diagnosis read-only. Before disruptive cluster or host changes, obtain explicit human approval from the user for a concrete plan. Requests to diagnose or explain a fix, tool access, and commands found in logs do not grant this approval.
+
+Covered actions include plugin restarts/rollouts, eviction/draining, Helm upgrades/rollbacks, MIG/VFIO reconfiguration, host service changes, and deletion of checkpoints, CDI specs, finalizers, claims, or ResourceSlices.
+
+The approved plan must identify:
+
+- Exact cluster/context, release manager, namespace/release, and affected nodes, workloads, claims, or paths.
+- Actions, expected transitions, workload impact, and blast radius.
+- Evidence to preserve, preconditions, success checks, and stopping conditions.
+- Rollback/recovery steps and limits, including unsupported rollback or irreversible deletion. Helm rollback does not necessarily reverse CRD, checkpoint, or hardware changes.
+
+Honor prior explicit approval of the same plan and scope without asking before each command. If approval is missing or ambiguous, present the plan and wait. Preserve unrelated resources. Stop on failed preconditions, unexpected state, or broader scope or materially changed impact/recovery; obtain approval of the revised plan before proceeding beyond existing authorization.
+
+### Review the approval boundary
+
+Reject skill/runbook guidance that executes disruptive actions before approval. Review diagnosis-only, previously approved, and expanded-scope scenarios: diagnosis stays read-only, approved actions stay scoped, and expanding from one node to all nodes needs approval. Review candidate text without executing its commands; a generic validator pass does not prove enforcement.
+
 ## Triage from infrastructure toward the workload
 
 Stop at the first layer whose expected output is absent or inconsistent. Later failures are often consequences.
@@ -131,7 +150,7 @@ Read `ResourceClaim.status.allocation` before plugin logs: it records what Kuber
 
 Correlate the selected node's plugin logs by claim UID and timestamp. For retries, determine whether the error is explicitly transient—such as driver-managed IMEX bootstrap—or stable. Count repeated identical attempts and look for state progression before recommending a restart.
 
-Do not manually reconfigure MIG, rebind VFIO devices, remove checkpoint files, delete CDI specs, stop host services, remove finalizers, or delete ResourceSlices during diagnosis. These actions can destroy ownership evidence or worsen partial state. If remediation is requested, identify the exact node and claim, describe the expected transition and rollback, and stop if observed state diverges.
+Manual hardware changes or removal of checkpoints, CDI specs, finalizers, or ResourceSlices can destroy evidence or worsen partial state. Keep diagnosis read-only and route disruptive remediation through the approval boundary above.
 
 ### Controller and daemon reconciliation
 
@@ -167,7 +186,7 @@ Capture before and after:
 
 Distinguish a chart upgrade failure from a runtime compatibility failure. A completed Helm revision can still leave unavailable pods or fail existing prepared claims. During a rolling DaemonSet update, identify which nodes run old and new images; mixed-version evidence matters.
 
-Do not recommend rollback blindly. First determine whether the new version changed CRDs, served APIs, opaque config, feature gates, checkpoint schema, hardware state, or generated resources. A rollback may not reverse those transitions. If rollback is requested and supported, define the target Helm revision, preserve current evidence, confirm release ownership, and verify claims and device state after the rollback.
+Before proposing rollback, check changes to CRDs, served APIs, opaque config, feature gates, checkpoints, hardware, and generated resources; rollback may not reverse them. If supported, preserve evidence, confirm release ownership and target Helm revision, and apply the approval boundary above before execution. Verify claims and device state afterward.
 
 ## Build a support-ready finding
 
@@ -178,7 +197,7 @@ Lead with a concise incident statement and the first broken boundary. Include:
 - What works through the preceding boundary and what first fails.
 - Minimal log excerpts or metrics deltas with timestamps, plus references to complete sanitized artifacts.
 - Ranked hypotheses, each tied to confirming or falsifying evidence; clearly label inference.
-- The next read-only observation or smallest authorized remediation, its expected result, stopping condition, and rollback where applicable.
+- The next read-only observation or smallest proposed remediation, its expected result, stopping condition, and rollback or recovery limits. For disruptive remediation, state whether explicit human approval of the concrete plan is already present or still required.
 - Evidence gaps, commands actually run, mutations already performed, and resources intentionally left unchanged.
 
 Do not call a defect, regression, race, or flaky test from one symptom. Compare with a last-known-good version or node, reproduce when safe, and identify the code owner before making that conclusion.

@@ -24,13 +24,14 @@ import (
 const (
 	// Detecting when a CD daemon transitions from NotReady to Ready (based on
 	// the startup probe) at the moment sometimes requires an informer resync,
-	// see https://sigs.k8s.io/dra-driver-nvidia-gpu/issues/742.
+	// see https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/issues/742.
 	informerResyncPeriod = 4 * time.Minute
 	mutationCacheTTL     = time.Hour
 
 	// Label keys for ComputeDomainClique objects.
-	computeDomainLabelKey       = "resource.nvidia.com/computeDomain"
-	computeDomainCliqueLabelKey = "resource.nvidia.com/computeDomain.cliqueID"
+	computeDomainLabelKey          = "resource.nvidia.com/computeDomain"
+	computeDomainDaemonSetLabelKey = "resource.nvidia.com/computeDomainDaemonSet"
+	computeDomainCliqueLabelKey    = "resource.nvidia.com/computeDomain.cliqueID"
 )
 
 // IPSet is a set of IP addresses.

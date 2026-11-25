@@ -17,6 +17,8 @@ limitations under the License.
 package v1beta1
 
 import (
+	"fmt"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
@@ -28,7 +30,13 @@ import (
 // VfioDeviceConfig holds the set of parameters for configuring a VFIO device.
 type VfioDeviceConfig struct {
 	metav1.TypeMeta `json:",inline"`
-	Iommu           *IOMMUConfig `json:"iommu,omitempty"`
+	// DriverOverride specifies the passthrough driver to use for the VFIO device.
+	// This is relevant in systems like the NVIDIA Grace where we may want to
+	// override the default `nvgrace_gpu_vfio_pci` passthrough driver variant
+	// Supported values are:
+	// - vfio-pci: Use the plain `vfio-pci` driver.
+	DriverOverride *PassthroughDriver `json:"driverOverride,omitempty"`
+	Iommu          *IOMMUConfig       `json:"iommu,omitempty"`
 }
 
 // DefaultVfioDeviceConfig provides the default configuration of a VFIO device.
@@ -43,7 +51,7 @@ func DefaultVfioDeviceConfig() *VfioDeviceConfig {
 		},
 		Iommu: &IOMMUConfig{
 			BackendPolicy:   IOMMUBackendPolicyLegacyOnly,
-			EnableAPIDevice: ptr.To(false),
+			EnableAPIDevice: ptr.To(true),
 		},
 	}
 }
@@ -53,7 +61,7 @@ func (c *VfioDeviceConfig) Normalize() error {
 	if c.Iommu == nil {
 		c.Iommu = &IOMMUConfig{
 			BackendPolicy:   IOMMUBackendPolicyLegacyOnly,
-			EnableAPIDevice: ptr.To(false),
+			EnableAPIDevice: ptr.To(true),
 		}
 		return nil
 	}
@@ -63,17 +71,43 @@ func (c *VfioDeviceConfig) Normalize() error {
 		c.Iommu.BackendPolicy = IOMMUBackendPolicyLegacyOnly
 	}
 
-	// Don't enable API device if not specified.
+	// Enable the IOMMU API device by default if not specified, since KubeVirt
+	// (the primary vfio consumer) requires it. Explicitly setting it to false
+	// opts out.
 	if c.Iommu.EnableAPIDevice == nil {
-		c.Iommu.EnableAPIDevice = ptr.To(false)
+		c.Iommu.EnableAPIDevice = ptr.To(true)
 	}
 	return nil
 }
 
 // Validate ensures that VfioDeviceConfig has a valid set of values.
 func (c *VfioDeviceConfig) Validate() error {
+	if c.DriverOverride != nil {
+		if err := c.DriverOverride.Validate(); err != nil {
+			return err
+		}
+	}
 	if c.Iommu == nil {
 		return nil
 	}
 	return c.Iommu.Validate()
+}
+
+// PassthroughDriver is the gpu driver to use for passthrough.
+type PassthroughDriver string
+
+const (
+	// PassthroughDriverVfioPci is the vfio-pci driver.
+	PassthroughDriverVfioPci PassthroughDriver = "vfio-pci"
+)
+
+// Validate ensures the passthrough driver is valid.
+// Only vfio-pci is supported.
+func (d PassthroughDriver) Validate() error {
+	switch d {
+	case PassthroughDriverVfioPci:
+		return nil
+	default:
+		return fmt.Errorf("invalid passthrough driver: %q", d)
+	}
 }

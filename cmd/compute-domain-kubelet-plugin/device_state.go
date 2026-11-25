@@ -58,6 +58,8 @@ type DeviceConfigState struct {
 	Type           string
 	ComputeDomain  string
 	containerEdits *cdiapi.ContainerEdits
+	// channelID is the channel prepared for the shared channel device.
+	channelID int
 }
 
 type DeviceState struct {
@@ -201,11 +203,20 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		// Associated device(s) has/ave been prepared by us. Prepare() must be
 		// idempotent, as it may be invoked more than once per claim (and actual
 		// device preparation must happen at most once).
-		klog.V(4).Infof("Skip prepare: claim already in PrepareCompleted state: %s", ResourceClaimToString(claim))
+		klog.V(2).Infof("Skip prepare: claim already in PrepareCompleted state: %s", ResourceClaimToString(claim))
 		return preparedClaim.PreparedDevices.GetDevices(), nil
 	}
 	if exists && preparedClaim.CheckpointState == ClaimCheckpointStatePrepareAborted && claimMatchesPreparedClaim(preparedClaim, claim) {
 		return nil, permanentError{fmt.Errorf("stale prepare for claim %s: claim prepare was already aborted", ResourceClaimToString(claim))}
+	}
+
+	// The preflight reads only the claim and state fixed for this process, so a
+	// claim it rejects can never succeed. Fail it permanently before the
+	// retryable overlap check, and before checkpointing an entry that Unprepare
+	// may be unable to clear.
+	plan, err := s.buildPreparePlan(claim)
+	if err != nil {
+		return nil, fmt.Errorf("prepare preflight failed: %w", err)
 	}
 
 	// In certain scenarios, the same device can be prepared/allocated more than once for different claims
@@ -231,7 +242,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	}
 	klog.V(6).Infof("checkpoint updated for claim %v", claimUID)
 
-	preparedDevices, err := s.prepareDevices(ctx, claim)
+	preparedDevices, err := s.applyPreparePlan(ctx, claim, plan)
 	if err != nil {
 		return nil, fmt.Errorf("prepare devices failed: %w", err)
 	}
@@ -311,14 +322,14 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 
 	switch pc.CheckpointState {
 	case ClaimCheckpointStatePrepareCompleted:
-		if err := s.unprepareDevices(ctx, &pc.Status); err != nil {
+		if err := s.unprepareDevices(ctx, claimUID, &pc.Status, checkpoint); err != nil {
 			return fmt.Errorf("unprepare devices failed: %w", err)
 		}
 		if err := s.deleteClaimFromCheckpoint(claimRef); err != nil {
 			return fmt.Errorf("error deleting completed claim from checkpoint: %w", err)
 		}
 	case ClaimCheckpointStatePrepareStarted:
-		if err := s.unprepareDevices(ctx, &pc.Status); err != nil {
+		if err := s.unprepareDevices(ctx, claimUID, &pc.Status, checkpoint); err != nil {
 			return fmt.Errorf("unprepare devices failed: %w", err)
 		}
 		// Keep a short-lived PrepareAborted entry so stale prepare retries for the
@@ -488,21 +499,12 @@ func expiredPrepareAbortedClaimEntries(cp *Checkpoint, now time.Time, ttl time.D
 	return expired
 }
 
-func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.ResourceClaim) (PreparedDevices, error) {
-	// Generate a mapping of each OpaqueDeviceConfigs to the Device.Results it
-	// applies to. Strict-decode: data is provided by user and may be completely
-	// unvalidated so far (in absence of validating webhook).
-	configResultsMap, err := s.getConfigResultsMap(&claim.Status, configapi.StrictDecoder)
-	if err != nil {
-		return nil, fmt.Errorf("error generating configResultsMap: %w", err)
-	}
-
-	// Normalize, validate, and apply all configs associated with devices that
-	// need to be prepared. Track device group configs generated from applying the
-	// config to the set of device allocation results.
-	preparedDeviceGroupConfigState := make(map[runtime.Object]*DeviceConfigState)
-	for c, results := range configResultsMap {
-		// Cast the opaque config to a configapi.Interface type
+// validateConfigs normalizes and validates every config selected for the claim
+// and returns them keyed as configResultsMap keys them. Nothing is applied until
+// this returns, so one bad config cannot land after a good one has taken effect.
+func validateConfigs(configResultsMap map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult) (map[runtime.Object]configapi.Interface, error) {
+	validated := make(map[runtime.Object]configapi.Interface, len(configResultsMap))
+	for c := range configResultsMap {
 		var config configapi.Interface
 		switch castConfig := c.(type) {
 		case *configapi.ComputeDomainChannelConfig:
@@ -510,26 +512,57 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		case *configapi.ComputeDomainDaemonConfig:
 			config = castConfig
 		default:
-			return nil, fmt.Errorf("runtime object is not a recognized configuration")
+			return nil, permanentError{fmt.Errorf("runtime object is not a recognized configuration")}
 		}
 
-		// Normalize the config to set any implied defaults.
+		// These failures are deterministic, so spending the prepare deadline on
+		// retries cannot help.
 		if err := config.Normalize(); err != nil {
-			return nil, fmt.Errorf("error normalizing config: %w", err)
+			return nil, permanentError{fmt.Errorf("error normalizing config: %w", err)}
 		}
-
-		// Validate the config to ensure its integrity.
 		if err := config.Validate(); err != nil {
-			return nil, fmt.Errorf("error validating config: %w", err)
+			return nil, permanentError{fmt.Errorf("error validating config: %w", err)}
 		}
 
-		// Apply the config to the list of results associated with it.
-		configState, err := s.applyConfig(ctx, config, claim, results)
+		validated[c] = config
+	}
+	return validated, nil
+}
+
+// preparePlan is everything Prepare can work out about a claim without touching
+// anything outside this process.
+type preparePlan struct {
+	configResultsMap map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult
+	validatedConfigs map[runtime.Object]configapi.Interface
+}
+
+// buildPreparePlan decodes and validates the claim's configs. It writes nothing
+// and touches no device, so a claim it rejects leaves no trace for Unprepare to
+// have to undo. Decoding is strict because the config may not have passed a
+// validating webhook.
+func (s *DeviceState) buildPreparePlan(claim *resourceapi.ResourceClaim) (*preparePlan, error) {
+	configResultsMap, err := s.getConfigResultsMap(&claim.Status, configapi.StrictDecoder)
+	if err != nil {
+		return nil, permanentError{fmt.Errorf("error generating configResultsMap: %w", err)}
+	}
+
+	validatedConfigs, err := validateConfigs(configResultsMap)
+	if err != nil {
+		return nil, err
+	}
+
+	return &preparePlan{configResultsMap: configResultsMap, validatedConfigs: validatedConfigs}, nil
+}
+
+func (s *DeviceState) applyPreparePlan(ctx context.Context, claim *resourceapi.ResourceClaim, plan *preparePlan) (PreparedDevices, error) {
+	configResultsMap, validatedConfigs := plan.configResultsMap, plan.validatedConfigs
+
+	preparedDeviceGroupConfigState := make(map[runtime.Object]*DeviceConfigState)
+	for c, results := range configResultsMap {
+		configState, err := s.applyConfig(ctx, validatedConfigs[c], claim, results)
 		if err != nil {
 			return nil, fmt.Errorf("error applying config: %w", err)
 		}
-
-		// Capture the prepared device group config in the map.
 		preparedDeviceGroupConfigState[c] = configState
 	}
 
@@ -560,8 +593,13 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 			var preparedDevice PreparedDevice
 			switch s.allocatable[result.Device].Type() {
 			case ComputeDomainChannelType:
+				info := s.allocatable[result.Device].Channel
+				// Claims share the channel device, so record their own channel.
+				if info.Shared() {
+					info = &ComputeDomainChannelInfo{ID: preparedDeviceGroupConfigState[c].channelID}
+				}
 				preparedDevice.Channel = &PreparedComputeDomainChannel{
-					Info:   s.allocatable[result.Device].Channel,
+					Info:   info,
 					Device: device,
 				}
 			case ComputeDomainDaemonType:
@@ -579,7 +617,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 	return preparedDevices, nil
 }
 
-func (s *DeviceState) unprepareDevices(ctx context.Context, cs *resourceapi.ResourceClaimStatus) error {
+func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, cs *resourceapi.ResourceClaimStatus, checkpoint *Checkpoint) error {
 	// Generate a mapping of each OpaqueDeviceConfigs to the Device.Results it
 	// applies to. Non-strict decoding: do not error out on unknown fields (data
 	// source is checkpointed JSON written by potentially newer versions of this
@@ -593,9 +631,14 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, cs *resourceapi.Reso
 	for c := range configResultsMap {
 		switch config := c.(type) {
 		case *configapi.ComputeDomainChannelConfig:
-			// Host-managed mode never adds the ComputeDomain node label, so
-			// there is nothing to remove here.
+			// Host-managed mode never adds the ComputeDomain node label. Claims
+			// prepared before switching to static IMEX daemons did.
 			if s.config.imexConfig.EffectiveHostManaged() {
+				continue
+			}
+			// Keep the IMEX daemon for the ComputeDomain's other claims.
+			if s.isComputeDomainChannelInUseByOtherClaims(checkpoint, claimUID, config.DomainID) {
+				klog.V(4).Infof("Unprepare: ComputeDomain %s still in use by other claims, keeping Node label", config.DomainID)
 				continue
 			}
 			// If a channel type, remove the ComputeDomain label from the node
@@ -603,10 +646,12 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, cs *resourceapi.Reso
 				return fmt.Errorf("error removing Node label for ComputeDomain: %w", err)
 			}
 		case *configapi.ComputeDomainDaemonConfig:
-			// If a daemon type, unprepare the new ComputeDomain daemon.
+			// An old checkpoint can hold a DomainID this now rejects. Skip it:
+			// failing would strand the claim, and its path must not be used.
 			computeDomainDaemonSettings, err := s.computeDomainManager.NewSettings(config.DomainID)
 			if err != nil {
-				return fmt.Errorf("error creating ComputeDomain daemon settings: %w", err)
+				klog.Warningf("skipping ComputeDomain daemon unprepare: %v", err)
+				continue
 			}
 			if err := computeDomainDaemonSettings.Unprepare(ctx); err != nil {
 				return fmt.Errorf("error unpreparing ComputeDomain daemon settings: %w", err)
@@ -634,28 +679,62 @@ func (s *DeviceState) applyComputeDomainChannelConfig(ctx context.Context, confi
 		return nil, fmt.Errorf("applyComputeDomainChannelConfig: unexpected results %v", results)
 	}
 
-	// Host-managed IMEX skips daemon bootstrap and readiness bookkeeping entirely,
-	// so the two modes are handled by separate functions instead of threading
-	// hostManaged checks through a shared code path.
-	if s.config.imexConfig.EffectiveHostManaged() {
-		return s.applyComputeDomainChannelConfigHostManaged(ctx, config, claim, results[0])
+	// A shared IMEX domain skips daemon bootstrap and readiness bookkeeping
+	// entirely, so it is handled by separate functions instead of threading
+	// mode checks through a shared code path.
+	switch {
+	case s.config.imexConfig.EffectiveHostManaged():
+		return s.applyComputeDomainChannelConfigSharedDomain(ctx, config, claim, results[0], func(context.Context) error {
+			if err := s.nvdevlib.checkHostIMEXReady(s.config.flags.imexHostSocketPath); err != nil {
+				return fmt.Errorf("host nvidia-imex daemon readiness check failed: %w", err)
+			}
+			return nil
+		})
+	case s.config.imexConfig.StaticDaemon():
+		return s.applyComputeDomainChannelConfigSharedDomain(ctx, config, claim, results[0], s.computeDomainManager.AssertStaticIMEXDaemonReady)
 	}
-	return s.applyComputeDomainChannelConfigDriverManaged(ctx, config, claim)
+	return s.applyComputeDomainChannelConfigDriverManaged(ctx, config, claim, results[0])
 }
 
-// applyComputeDomainChannelConfigHostManaged handles a channel claim when the
-// cluster admin (not the driver) owns the host nvidia-imex daemon. It skips
-// the driver-managed IMEX daemon management entirely, but on fabric nodes
-// still validates that the operator's host nvidia-imex daemon is actually
-// ready before handing out a channel, via checkHostIMEXReady.
-func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Context, config *configapi.ComputeDomainChannelConfig, claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult) (*DeviceConfigState, error) {
+// allocatedChannelID returns the IMEX channel of an allocated channel
+// device: the one the controller assigned at admission for the shared
+// channel device, or the device's own for a per-channel device.
+func (s *DeviceState) allocatedChannelID(ctx context.Context, claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult) (int, error) {
 	device, ok := s.allocatable[result.Device]
 	if !ok || device.Channel == nil {
-		return nil, fmt.Errorf("applyComputeDomainChannelConfigHostManaged: %q is not an allocatable IMEX channel device", result.Device)
+		return 0, fmt.Errorf("%q is not an allocatable IMEX channel device", result.Device)
 	}
-	channelID := device.Channel.ID
+	if !device.Channel.Shared() {
+		return device.Channel.ID, nil
+	}
+	allocation, err := s.assignedChannel(ctx, claim, result)
+	if err != nil {
+		return 0, fmt.Errorf("no channel for %q: %w", result.Device, err)
+	}
+	if allocation.Channel >= len(s.nvdevlib.nvCapImexChanDevInfos) {
+		return 0, permanentError{fmt.Errorf("channel %d out of range (node has %d IMEX channels)", allocation.Channel, len(s.nvdevlib.nvCapImexChanDevInfos))}
+	}
+	// The controller may have assigned the channel before seeing a new
+	// partition of this node. It is still unique on this node, which
+	// assertChannelAvailable checks.
+	if clique := s.computeDomainManager.CliqueID(); clique != "" && allocation.IMEXDomain != clique {
+		klog.Warningf("Channel %d of claim %s/%s is unique in %s, but the node is in clique %s", allocation.Channel, claim.Namespace, claim.Name, allocation.IMEXDomain, clique)
+	}
+	return allocation.Channel, nil
+}
 
-	if err := s.assertImexChannelNotAllocated(channelID); err != nil {
+// applyComputeDomainChannelConfigSharedDomain handles a channel claim when
+// ComputeDomains share an IMEX domain, run by the host (host-managed) or by
+// the static ComputeDomainDaemonSet. It skips per-ComputeDomain IMEX daemon
+// management entirely, but on fabric nodes still validates that the IMEX
+// daemon is actually ready before handing out a channel, via assertIMEXReady.
+func (s *DeviceState) applyComputeDomainChannelConfigSharedDomain(ctx context.Context, config *configapi.ComputeDomainChannelConfig, claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult, assertIMEXReady func(context.Context) error) (*DeviceConfigState, error) {
+	channelID, err := s.allocatedChannelID(ctx, claim, result)
+	if err != nil {
+		return nil, fmt.Errorf("applyComputeDomainChannelConfigSharedDomain: %w", err)
+	}
+
+	if err := s.assertChannelAvailable(channelID, config.DomainID); err != nil {
 		return nil, fmt.Errorf("allocation failed: %w", err)
 	}
 
@@ -666,6 +745,7 @@ func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Con
 	configState := DeviceConfigState{
 		Type:          ComputeDomainChannelType,
 		ComputeDomain: config.DomainID,
+		channelID:     channelID,
 	}
 
 	if s.computeDomainManager.CliqueID() == "" {
@@ -674,12 +754,18 @@ func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Con
 		return &configState, nil
 	}
 
-	if err := s.nvdevlib.checkHostIMEXReady(s.config.flags.imexHostSocketPath); err != nil {
-		return nil, fmt.Errorf("host nvidia-imex daemon readiness check failed: %w", err)
+	preparedOnNode, err := s.isComputeDomainPreparedOnNode(config.DomainID)
+	if err != nil {
+		return nil, err
+	}
+	if preparedOnNode {
+		klog.V(4).Infof("ComputeDomain %s already prepared on this node, skipping IMEX readiness check", config.DomainID)
+	} else if err := assertIMEXReady(ctx); err != nil {
+		return nil, err
 	}
 
 	if channelID < 0 || channelID >= len(s.nvdevlib.nvCapImexChanDevInfos) {
-		return nil, fmt.Errorf("applyComputeDomainChannelConfigHostManaged: channel %d out of range (node has %d IMEX channels)",
+		return nil, fmt.Errorf("applyComputeDomainChannelConfigSharedDomain: channel %d out of range (node has %d IMEX channels)",
 			channelID, len(s.nvdevlib.nvCapImexChanDevInfos))
 	}
 	edits := s.computeDomainManager.GetComputeDomainChannelContainerEdits(s.cdi.devRoot, s.nvdevlib.nvCapImexChanDevInfos[channelID])
@@ -691,22 +777,23 @@ func (s *DeviceState) applyComputeDomainChannelConfigHostManaged(ctx context.Con
 // applyComputeDomainChannelConfigDriverManaged handles a channel claim under
 // the default, driver-managed model where it adds necessary node labels and checks
 // the the IMEX daemon readiness.
-func (s *DeviceState) applyComputeDomainChannelConfigDriverManaged(ctx context.Context, config *configapi.ComputeDomainChannelConfig, claim *resourceapi.ResourceClaim) (*DeviceConfigState, error) {
-	// If explicitly requested, inject all channels instead of just one.
-	chancount := 1
-	if config.AllocationMode == configapi.ComputeDomainChannelAllocationModeAll {
-		chancount = s.nvdevlib.maxImexChannelCount
+func (s *DeviceState) applyComputeDomainChannelConfigDriverManaged(ctx context.Context, config *configapi.ComputeDomainChannelConfig, claim *resourceapi.ResourceClaim, result *resourceapi.DeviceRequestAllocationResult) (*DeviceConfigState, error) {
+	// Without channel reservations only channel 0 is published, which is
+	// also used for AllocationModeAll. With them, the controller assigned
+	// the channel at admission.
+	channelID, err := s.allocatedChannelID(ctx, claim, result)
+	if err != nil {
+		return nil, fmt.Errorf("applyComputeDomainChannelConfigDriverManaged: %w", err)
 	}
 
 	// Declare a device group state object to populate.
 	configState := DeviceConfigState{
 		Type:          ComputeDomainChannelType,
 		ComputeDomain: config.DomainID,
+		channelID:     channelID,
 	}
 
-	// Treat each request as a request for channel zero, even if
-	// AllocationModeAll.
-	if err := s.assertImexChannelNotAllocated(0); err != nil {
+	if err := s.assertChannelAvailable(channelID, config.DomainID); err != nil {
 		return nil, fmt.Errorf("allocation failed: %w", err)
 	}
 
@@ -715,12 +802,23 @@ func (s *DeviceState) applyComputeDomainChannelConfigDriverManaged(ctx context.C
 		return nil, permanentError{fmt.Errorf("error asserting ComputeDomain's namespace: %w", err)}
 	}
 
-	if err := s.computeDomainManager.AddNodeLabel(ctx, config.DomainID); err != nil {
-		return nil, fmt.Errorf("error adding Node label for ComputeDomain: %w", err)
+	// Only the first claim of a ComputeDomain on this node starts the IMEX
+	// daemon (node label) and waits for it, while later claims only need
+	// their channel.
+	preparedOnNode, err := s.isComputeDomainPreparedOnNode(config.DomainID)
+	if err != nil {
+		return nil, err
 	}
+	if preparedOnNode {
+		klog.V(4).Infof("ComputeDomain %s already prepared on this node, skipping IMEX daemon bootstrap", config.DomainID)
+	} else {
+		if err := s.computeDomainManager.AddNodeLabel(ctx, config.DomainID); err != nil {
+			return nil, fmt.Errorf("error adding Node label for ComputeDomain: %w", err)
+		}
 
-	if err := s.computeDomainManager.AssertComputeDomainReady(ctx, config.DomainID); err != nil {
-		return nil, fmt.Errorf("error asserting ComputeDomain Ready: %w", err)
+		if err := s.computeDomainManager.AssertComputeDomainReady(ctx, config.DomainID); err != nil {
+			return nil, fmt.Errorf("error asserting ComputeDomain Ready: %w", err)
+		}
 	}
 
 	if s.computeDomainManager.CliqueID() == "" {
@@ -728,7 +826,15 @@ func (s *DeviceState) applyComputeDomainChannelConfigDriverManaged(ctx context.C
 		return &configState, nil
 	}
 
-	for _, info := range s.nvdevlib.nvCapImexChanDevInfos[:chancount] {
+	// If explicitly requested, inject all channels instead of just one.
+	channels := s.nvdevlib.nvCapImexChanDevInfos
+	if config.AllocationMode != configapi.ComputeDomainChannelAllocationModeAll {
+		if channelID < 0 || channelID >= len(channels) {
+			return nil, fmt.Errorf("applyComputeDomainChannelConfigDriverManaged: channel %d out of range (node has %d IMEX channels)", channelID, len(channels))
+		}
+		channels = channels[channelID : channelID+1]
+	}
+	for _, info := range channels {
 		edits := s.computeDomainManager.GetComputeDomainChannelContainerEdits(s.cdi.devRoot, info)
 		configState.containerEdits = configState.containerEdits.Append(edits)
 	}
@@ -742,7 +848,7 @@ func (s *DeviceState) applyComputeDomainDaemonConfig(ctx context.Context, config
 	// reaching Prepare means a stale or hand-crafted object; reject it
 	// permanently.
 	if s.config.imexConfig.EffectiveHostManaged() {
-		return nil, permanentError{fmt.Errorf("ComputeDomain daemon claims are not supported when imex.mode=hostManaged")}
+		return nil, permanentError{fmt.Errorf("ComputeDomain daemon claims are not supported when imex.daemonLifecycle=hostManaged")}
 	}
 
 	// Get the list of claim requests this config is being applied over.
@@ -759,6 +865,13 @@ func (s *DeviceState) applyComputeDomainDaemonConfig(ctx context.Context, config
 
 	if len(allocatableDevices) != 1 {
 		return nil, fmt.Errorf("only expected 1 device for requests '%v' in claim '%v'", requests, claim.UID)
+	}
+
+	// Static IMEX daemons serve the ComputeDomainDaemonSet, not ComputeDomains.
+	if s.config.imexConfig.StaticDaemon() {
+		if err := s.computeDomainManager.AssertComputeDomainDaemonSetUID(config.DomainID); err != nil {
+			return nil, err
+		}
 	}
 
 	// Declare a device group state object to populate.
@@ -880,8 +993,8 @@ func (s *DeviceState) getConfigResultsMap(rcs *resourceapi.ResourceClaimStatus, 
 // resource are processed in the correct order (this prevents for example
 // unprepare-after-prepare, cf. issue 641).
 //
-// The implementation may become more involved when the same IMEX channel may be
-// shared across pods on the same node).
+// With channel reservations, assertImexChannelSharableByComputeDomain() is
+// used instead.
 func (s *DeviceState) assertImexChannelNotAllocated(id int) error {
 	cp, err := s.getCheckpoint()
 	if err != nil {
@@ -1055,6 +1168,13 @@ func (s *DeviceState) validateNoOverlappingPreparedDevices(checkpoint *Checkpoin
 		// Check for overlaps between requested devices from the current claim and others.
 		for device := range requestedDevices {
 			if _, found := preparedDevices[device]; found {
+				// Claims share the channel device, and a channel is only shared
+				// within one ComputeDomain. That is enforced by
+				// assertImexChannelSharableByComputeDomain() once the claim's
+				// config has been resolved.
+				if dev, ok := s.allocatable[device]; ok && dev.Channel.Shared() {
+					continue
+				}
 				return fmt.Errorf(
 					"requested device %s is already allocated to different claim %s",
 					device, existingClaimUID,

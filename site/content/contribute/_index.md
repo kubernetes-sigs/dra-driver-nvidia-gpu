@@ -12,8 +12,9 @@ GitHub PRs and follow the upstream Kubernetes contribution model.
 
 - [Development](/contribute/development/) — local build, test, and cluster
   loop.
-- [Documentation site](/contribute/site/) — build and preview this site
-  locally; how it gets deployed.
+- [Documentation](/contribute/docs/) — build and preview this site locally.
+- [Documentation style guide](/contribute/style-guide/) — write clear pages,
+  procedures, and examples.
 - [Proposals](/contribute/proposals/) — when and how to file a design
   proposal before writing code.
 

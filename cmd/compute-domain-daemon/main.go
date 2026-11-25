@@ -25,6 +25,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"text/template"
@@ -39,6 +41,7 @@ import (
 	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/common"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
+	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 )
 
 const (
@@ -55,12 +58,14 @@ type Flags struct {
 	computeDomainUUID      string
 	computeDomainName      string
 	computeDomainNamespace string
+	computeDomainDaemonSet string
 	nodeName               string
 	podIP                  string
 	podUID                 string
 	podName                string
 	podNamespace           string
 	maxNodesPerIMEXDomain  int
+	imexConfigOverrides    string
 	httpEndpoint           string
 	metricsPath            string
 	klogVerbosity          int
@@ -128,6 +133,12 @@ func newApp() *cli.App {
 			Destination: &flags.computeDomainNamespace,
 		},
 		&cli.StringFlag{
+			Name:        "compute-domain-daemonset-uid",
+			Usage:       "The UID of the ComputeDomainDaemonSet whose static IMEX daemon to run, instead of a ComputeDomain's.",
+			EnvVars:     []string{"COMPUTE_DOMAIN_DAEMONSET_UID"},
+			Destination: &flags.computeDomainDaemonSet,
+		},
+		&cli.StringFlag{
 			Name:        "node-name",
 			Usage:       "The name of this Kubernetes node.",
 			EnvVars:     []string{"NODE_NAME"},
@@ -162,6 +173,12 @@ func newApp() *cli.App {
 			Usage:       "The maximum number of possible nodes per IMEX domain",
 			EnvVars:     []string{"MAX_NODES_PER_IMEX_DOMAIN"},
 			Destination: &flags.maxNodesPerIMEXDomain,
+		},
+		&cli.StringFlag{
+			Name:        "imex-config-overrides",
+			Usage:       "Comma-separated KEY=VALUE overrides for arbitrary nvidia-imex daemon config file settings generated with the perComputeDomain IMEX daemon lifecycle.",
+			Destination: &flags.imexConfigOverrides,
+			EnvVars:     []string{"IMEX_CONFIG_OVERRIDES"},
 		},
 	}
 	cliFlags = append(cliFlags, featureGateConfig.Flags()...)
@@ -211,10 +228,11 @@ func newApp() *cli.App {
 // Run invokes the IMEX daemon and manages its lifecycle.
 func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	// Verify that CDI container edits were applied by the container runtime by
-	// checking for COMPUTE_DOMAIN_UUID, which is always injected as part of the
-	// CDI edits. If it is missing, CDI is likely disabled and the daemon cannot
-	// function correctly (e.g. the /imexd mount will be missing).
-	if flags.computeDomainUUID == "" {
+	// checking for COMPUTE_DOMAIN_UUID or COMPUTE_DOMAIN_DAEMONSET_UID, one of
+	// which is always injected as part of the CDI edits. If both are missing,
+	// CDI is likely disabled and the daemon cannot function correctly (e.g. the
+	// /imexd mount will be missing).
+	if flags.computeDomainUUID == "" && flags.computeDomainDaemonSet == "" {
 		return fmt.Errorf("CDI container edits did not apply -- is CDI enabled in your container runtime?")
 	}
 
@@ -223,6 +241,21 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	// Validate feature gate dependencies
 	if err := featuregates.ValidateFeatureGates(); err != nil {
 		return fmt.Errorf("feature gate validation failed: %w", err)
+	}
+
+	// A static IMEX daemon forms its IMEX domain per clique from the
+	// cliques of the ComputeDomainDaemonSet, with no ComputeDomain.
+	domainUID, domainLabelKey := flags.computeDomainUUID, computeDomainLabelKey
+	if flags.computeDomainDaemonSet != "" {
+		if !featuregates.Enabled(featuregates.ComputeDomainCliques) {
+			return fmt.Errorf("static IMEX daemons require the %s feature gate", featuregates.ComputeDomainCliques)
+		}
+		domainUID, domainLabelKey = flags.computeDomainDaemonSet, computeDomainDaemonSetLabelKey
+	}
+
+	imexConfigOverrides, err := imex.ParseConfigOverrides(flags.imexConfigOverrides)
+	if err != nil {
+		return fmt.Errorf("invalid imex-config-overrides: %w", err)
 	}
 
 	// Create clientsets for Kubernetes API access
@@ -254,7 +287,7 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 		metricsPath:            flags.metricsPath,
 		clientsets:             clientsets,
 		cliqueID:               flags.cliqueID,
-		computeDomainUUID:      flags.computeDomainUUID,
+		computeDomainUUID:      domainUID,
 		computeDomainName:      flags.computeDomainName,
 		computeDomainNamespace: flags.computeDomainNamespace,
 		nodeName:               flags.nodeName,
@@ -263,10 +296,11 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 		podName:                flags.podName,
 		podNamespace:           flags.podNamespace,
 		maxNodesPerIMEXDomain:  flags.maxNodesPerIMEXDomain,
+		domainLabelKey:         domainLabelKey,
 	}
 
 	// Render and write the IMEX daemon config with the current pod IP
-	if err := writeIMEXConfig(flags.podIP); err != nil {
+	if err := writeIMEXConfig(flags.podIP, imexConfigOverrides); err != nil {
 		return fmt.Errorf("failed to write IMEX daemon config: %w", err)
 	}
 
@@ -274,7 +308,7 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	var dnsNameManager *DNSNameManager
 	if featuregates.Enabled(featuregates.IMEXDaemonsWithDNSNames) {
 		// Prepare DNS name manager
-		dnsNameManager = NewDNSNameManager(flags.cliqueID, flags.maxNodesPerIMEXDomain, imexDaemonNodesConfigPath, flags.computeDomainUUID)
+		dnsNameManager = NewDNSNameManager(flags.cliqueID, flags.maxNodesPerIMEXDomain, imexDaemonNodesConfigPath, domainUID)
 
 		// Create static nodes config file with DNS names
 		if err := dnsNameManager.WriteNodesConfig(); err != nil {
@@ -447,7 +481,7 @@ func check(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	// Spawn child, collect standard streams.
 	outerr, err := cmd.CombinedOutput()
 	if err != nil {
-		klog.Errorf("%s failed (%s), stdout/err: %s", imexCtlBinaryName, err, outerr)
+		klog.V(1).Infof("%s failed (%s), stdout/err: %s", imexCtlBinaryName, err, outerr)
 		return fmt.Errorf("IMEX daemon check failed: error running %s: %w", imexCtlBinaryName, err)
 	}
 
@@ -458,8 +492,11 @@ func check(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	return nil
 }
 
-// writeIMEXConfig renders the config template with the pod IP and writes it to the final config file.
-func writeIMEXConfig(podIP string) error {
+// writeIMEXConfig renders the config template with the pod IP, applies any
+// admin-supplied config overrides (resources.computeDomains.imex.config Helm
+// value, threaded through as IMEX_CONFIG_OVERRIDES) on top, and writes the
+// result to the final config file.
+func writeIMEXConfig(podIP string, configOverrides map[string]string) error {
 	configTemplateData := IMEXConfigTemplateData{
 		IMEXCmdBindInterfaceIP:    podIP,
 		IMEXDaemonNodesConfigPath: imexDaemonNodesConfigPath,
@@ -475,18 +512,61 @@ func writeIMEXConfig(podIP string) error {
 		return fmt.Errorf("error executing template: %w", err)
 	}
 
+	finalConfig := applyIMEXConfigOverrides(configFile.Bytes(), configOverrides)
+
 	// Ensure the directory exists
 	dir := filepath.Dir(imexDaemonConfigPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
-	if err := os.WriteFile(imexDaemonConfigPath, configFile.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(imexDaemonConfigPath, finalConfig, 0644); err != nil {
 		return fmt.Errorf("error writing config file %s: %w", imexDaemonConfigPath, err)
 	}
 
-	klog.Infof("Rendered IMEX daemon config file with: %v", configTemplateData)
+	klog.Infof("Rendered IMEX daemon config file with: %v, overrides: %v", configTemplateData, configOverrides)
 	return nil
+}
+
+// applyIMEXConfigOverrides overrides, or appends, KEY=VALUE settings in a
+// rendered nvidia-imex config file's contents.
+func applyIMEXConfigOverrides(config []byte, overrides map[string]string) []byte {
+	if len(overrides) == 0 {
+		return config
+	}
+
+	remaining := make(map[string]string, len(overrides))
+	for k, v := range overrides {
+		remaining[k] = v
+	}
+
+	lines := strings.Split(string(config), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		key, _, found := strings.Cut(line, "=")
+		if !found {
+			continue
+		}
+		if value, ok := remaining[key]; ok {
+			lines[i] = key + "=" + value
+			delete(remaining, key)
+		}
+	}
+
+	// Anything left in `remaining` didn't match an existing "KEY=" line, so
+	// append it as a new setting. Sorted for deterministic output.
+	newKeys := make([]string, 0, len(remaining))
+	for k := range remaining {
+		newKeys = append(newKeys, k)
+	}
+	sort.Strings(newKeys)
+	for _, key := range newKeys {
+		lines = append(lines, key+"="+remaining[key])
+	}
+
+	return []byte(strings.Join(lines, "\n"))
 }
 
 // writeNodesConfig creates a nodesConfig file with IPs for nodes in the same clique.
@@ -529,7 +609,7 @@ func logNodesConfig() error {
 	if err != nil {
 		return fmt.Errorf("failed to read nodes config: %w", err)
 	}
-	klog.Infof("Current %s:\n%s", imexDaemonNodesConfigPath, string(content))
+	klog.V(2).Infof("Current %s:\n%s", imexDaemonNodesConfigPath, string(content))
 	return nil
 }
 

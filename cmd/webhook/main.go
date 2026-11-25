@@ -150,7 +150,7 @@ func serve(w http.ResponseWriter, r *http.Request, admit func(admissionv1.Admiss
 		return
 	}
 
-	klog.V(2).Infof("handling request: %s", body)
+	klog.V(6).Infof("handling request: %s", body)
 
 	requestedAdmissionReview, err := readAdmissionReview(body)
 	if err != nil {
@@ -164,7 +164,7 @@ func serve(w http.ResponseWriter, r *http.Request, admit func(admissionv1.Admiss
 	responseAdmissionReview.Response = admit(*requestedAdmissionReview)
 	responseAdmissionReview.Response.UID = requestedAdmissionReview.Request.UID
 
-	klog.V(2).Infof("sending response: %v", responseAdmissionReview)
+	klog.V(6).Infof("sending response: %v", responseAdmissionReview)
 	respBytes, err := json.Marshal(responseAdmissionReview)
 	if err != nil {
 		klog.Error(err)
@@ -199,7 +199,7 @@ func readAdmissionReview(data []byte) (*admissionv1.AdmissionReview, error) {
 // admitResourceClaimParameters accepts both ResourceClaims and ResourceClaimTemplates and validates their
 // opaque device configuration parameters for both gpu and compute-domain drivers.
 func admitResourceClaimParameters(ar admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
-	klog.V(2).Info("admitting resource claim parameters")
+	klog.V(6).Info("admitting resource claim parameters")
 
 	var deviceConfigs []resourceapi.DeviceClaimConfiguration
 	var specPath string
@@ -266,12 +266,22 @@ func admitResourceClaimParameters(ar admissionv1.AdmissionReview) *admissionv1.A
 			configInterface = castConfig
 		case *nvapi.VfioDeviceConfig:
 			configInterface = castConfig
+		case *nvapi.LocalIPCConfig:
+			configInterface = castConfig
 		case *nvapi.ComputeDomainChannelConfig:
 			configInterface = castConfig
 		case *nvapi.ComputeDomainDaemonConfig:
 			configInterface = castConfig
 		default:
 			errs = append(errs, fmt.Errorf("expected a recognized configuration type at %s but got: %T", fieldPath, decodedConfig))
+			continue
+		}
+
+		// LocalIPCConfig is claim-scoped, but Requests is outside the opaque
+		// object and cannot be checked by LocalIPCConfig.Validate.
+		if _, ok := decodedConfig.(*nvapi.LocalIPCConfig); ok && len(config.Requests) != 0 {
+			requestsPath := fmt.Sprintf("%s.devices.config[%d].requests", specPath, configIndex)
+			errs = append(errs, fmt.Errorf("local IPC config at %s must not select individual requests", requestsPath))
 			continue
 		}
 

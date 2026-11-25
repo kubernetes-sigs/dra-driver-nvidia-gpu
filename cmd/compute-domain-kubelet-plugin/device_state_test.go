@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strconv"
 	"sync"
 	"testing"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/dynamic-resource-allocation/kubeletplugin"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	"k8s.io/utils/ptr"
+	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,9 +47,12 @@ import (
 type fakeCheckpointManager struct {
 	checkpoint *Checkpoint
 	list       []string
+	// creates counts writes; an entry written and then deleted leaves no trace.
+	creates int
 }
 
 func (m *fakeCheckpointManager) CreateCheckpoint(_ string, checkpoint checkpointmanager.Checkpoint) error {
+	m.creates++
 	cp, ok := checkpoint.(*Checkpoint)
 	if ok {
 		m.checkpoint = cp.ToLatestVersion()
@@ -214,6 +219,276 @@ func TestGetConfigResultsMap(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot apply ComputeDomainDaemonConfig")
 	})
+}
+
+// v0.5.0 checkpointed a claim before it validated the config, so an entry whose
+// daemon DomainID this build rejects can already be on disk. Unprepare has to be
+// able to clear it from either state without touching the unvalidated path.
+func TestUnprepareClearsALegacyCheckpointWithARejectedDomainID(t *testing.T) {
+	status := claimStatus(
+		[]resourceapi.DeviceRequestAllocationResult{
+			allocationResult("daemon-request", DriverName, "daemon-0", nil),
+		},
+		opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"daemon-request"}, daemonConfig("../x")),
+	)
+
+	cases := map[string]struct {
+		state       ClaimCheckpointState
+		wantCleared bool
+	}{
+		"left mid-prepare":  {state: ClaimCheckpointStatePrepareStarted},
+		"already completed": {state: ClaimCheckpointStatePrepareCompleted, wantCleared: true},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(t.TempDir()), cdiapi.WithAutoRefresh(false))
+			require.NoError(t, err)
+
+			state := testDeviceState()
+			state.checkpointManager = &fakeCheckpointManager{checkpoint: checkpointWithClaims(map[string]PreparedClaim{
+				"claim-uid": {
+					CheckpointState: tc.state,
+					Status:          status,
+					Name:            "claim-uid",
+					Namespace:       "default",
+				},
+			})}
+			state.computeDomainManager = &ComputeDomainManager{configFilesRoot: t.TempDir()}
+			state.cdi = &CDIHandler{cache: cache, vendor: cdiVendor, claimClass: cdiClaimClass}
+			state.config = &Config{flags: &Flags{nodeName: "test-node"}}
+
+			claimRef := kubeletplugin.NamespacedObject{
+				NamespacedName: types.NamespacedName{Namespace: "default", Name: "claim-uid"},
+				UID:            types.UID("claim-uid"),
+			}
+			require.NoError(t, state.Unprepare(context.Background(), claimRef))
+
+			manager := requireFakeCheckpointManager(t, state)
+			require.Equal(t, 1, manager.creates, "the cleared entry must be written back")
+			pc, stillThere := manager.checkpoint.V2.PreparedClaims["claim-uid"]
+			if tc.wantCleared {
+				require.False(t, stillThere, "a completed claim should be dropped from the checkpoint")
+				return
+			}
+			require.True(t, stillThere)
+			require.Equal(t, ClaimCheckpointStatePrepareAborted, pc.CheckpointState)
+			require.NotNil(t, pc.AbortedAt)
+		})
+	}
+}
+
+// One bad config must leave nothing to apply, whatever order the map yields.
+func TestValidateConfigsReturnsNothingWhenAnyConfigIsInvalid(t *testing.T) {
+	good := daemonConfig("d3b07384-d9a7-4e2b-8f1a-2c1e6b5a9f00")
+	bad := channelConfig("../x")
+
+	validated, err := validateConfigs(map[runtime.Object][]*resourceapi.DeviceRequestAllocationResult{
+		good: nil,
+		bad:  nil,
+	})
+
+	require.Error(t, err)
+	require.True(t, isPermanentError(err), "an invalid config cannot become valid on a retry, got %v", err)
+	require.Nil(t, validated, "returning the configs it did accept would let the caller apply them")
+}
+
+// A claim the preflight rejects must leave no checkpoint entry.
+func TestPrepareLeavesNoCheckpointForARejectedClaim(t *testing.T) {
+	daemon := opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"request"}, daemonConfig("d3b07384-d9a7-4e2b-8f1a-2c1e6b5a9f00"))
+	unknownSource := daemon
+	unknownSource.Source = "FromNowhere"
+	noOpaque := daemon
+	noOpaque.Opaque = nil
+
+	cases := map[string]struct {
+		device string
+		config resourceapi.DeviceAllocationConfiguration
+		want   string
+	}{
+		"a kind this build does not know": {
+			device: "daemon-0",
+			config: rawOpaqueConfig([]string{"request"}, `{"apiVersion":"resource.nvidia.com/v1beta1","kind":"FutureComputeDomainDaemonConfig","domainID":"d3b07384-d9a7-4e2b-8f1a-2c1e6b5a9f00"}`),
+			want:   "error decoding config parameters",
+		},
+		"a field of the wrong type": {
+			device: "daemon-0",
+			config: rawOpaqueConfig([]string{"request"}, `{"apiVersion":"resource.nvidia.com/v1beta1","kind":"ComputeDomainDaemonConfig","domainID":123}`),
+			want:   "error decoding config parameters",
+		},
+		"a domainID that is not a path segment": {
+			device: "daemon-0",
+			config: rawOpaqueConfig([]string{"request"}, `{"apiVersion":"resource.nvidia.com/v1beta1","kind":"ComputeDomainDaemonConfig","domainID":"../x"}`),
+			want:   "error validating config",
+		},
+		"a kind that belongs to another plugin": {
+			device: "daemon-0",
+			config: rawOpaqueConfig([]string{"request"}, `{"apiVersion":"resource.nvidia.com/v1beta1","kind":"GpuConfig"}`),
+			want:   "not a recognized configuration",
+		},
+		"a device that is not allocatable": {
+			device: "daemon-1",
+			config: daemon,
+			want:   "requested device is not allocatable",
+		},
+		"a channel config on a daemon device": {
+			device: "daemon-0",
+			config: opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"request"}, channelConfig("d3b07384-d9a7-4e2b-8f1a-2c1e6b5a9f00")),
+			want:   "cannot apply ComputeDomainChannelConfig",
+		},
+		"a daemon config on a channel device": {
+			device: "channel-0",
+			config: daemon,
+			want:   "cannot apply ComputeDomainDaemonConfig",
+		},
+		// API validation rejects these two; the plugin does not rely on it.
+		"an unknown config source": {
+			device: "daemon-0",
+			config: unknownSource,
+			want:   "invalid config source",
+		},
+		"no opaque parameters": {
+			device: "daemon-0",
+			config: noOpaque,
+			want:   "only opaque parameters are supported",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			claim := &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim-uid", Namespace: "default", UID: types.UID("claim-uid")},
+				Status:     claimStatus([]resourceapi.DeviceRequestAllocationResult{allocationResult("request", DriverName, tc.device, nil)}, tc.config),
+			}
+			state := testDeviceState()
+			state.checkpointManager = &fakeCheckpointManager{checkpoint: checkpointWithClaims(map[string]PreparedClaim{})}
+			state.computeDomainManager = &ComputeDomainManager{configFilesRoot: t.TempDir()}
+			state.config = &Config{flags: &Flags{nodeName: "test-node"}}
+
+			_, err := state.Prepare(t.Context(), claim)
+
+			require.ErrorContains(t, err, tc.want)
+			require.True(t, isPermanentError(err), "a claim rejected on its contents cannot become valid on a retry, got %v", err)
+			manager := requireFakeCheckpointManager(t, state)
+			require.Zero(t, manager.creates, "the claim was checkpointed even though nothing was applied for it")
+			require.Empty(t, manager.checkpoint.V2.PreparedClaims)
+		})
+	}
+}
+
+// Overlap is retryable, so checking it first would retry a claim that can
+// never succeed for the whole prepare deadline.
+func TestPrepareRejectsAnInvalidClaimBeforeCheckingOverlap(t *testing.T) {
+	cases := map[string]struct {
+		domainID  string
+		want      string
+		permanent bool
+	}{
+		"invalid config fails permanently": {
+			domainID:  "../x",
+			want:      "error validating config",
+			permanent: true,
+		},
+		"valid config keeps overlap retryable": {
+			domainID: "d3b07384-d9a7-4e2b-8f1a-2c1e6b5a9f00",
+			want:     "already allocated to different claim",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			owner := preparedClaim(ClaimCheckpointStatePrepareCompleted, allocationResult("request", DriverName, "channel-0", nil))
+			state := testDeviceState()
+			state.config = &Config{flags: &Flags{nodeName: "test-node"}}
+			state.checkpointManager = &fakeCheckpointManager{checkpoint: checkpointWithClaims(map[string]PreparedClaim{"owner-uid": owner})}
+			claim := &resourceapi.ResourceClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "incoming", Namespace: "default", UID: types.UID("incoming-uid")},
+				Status: claimStatus(
+					[]resourceapi.DeviceRequestAllocationResult{allocationResult("request", DriverName, "channel-0", nil)},
+					opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"request"}, channelConfig(tc.domainID)),
+				),
+			}
+
+			_, err := state.Prepare(t.Context(), claim)
+
+			require.ErrorContains(t, err, tc.want)
+			require.Equal(t, tc.permanent, isPermanentError(err), "got %v", err)
+			manager := requireFakeCheckpointManager(t, state)
+			require.Zero(t, manager.creates)
+			require.Equal(t, PreparedClaimsByUID{"owner-uid": owner}, manager.checkpoint.V2.PreparedClaims)
+		})
+	}
+}
+
+// Prepare must finish the preflight before applying anything: with a good and a
+// bad config it fails validation and writes nothing.
+func TestPrepareRejectsAMixedClaimBeforeApplying(t *testing.T) {
+	// A known ComputeDomain lets a daemon config that is applied first write its
+	// directory, whether or not the apply step looks the ComputeDomain up first.
+	factory := nvinformers.NewSharedInformerFactory(nvfake.NewSimpleClientset(), 0)
+	informer := factory.Resource().V1beta1().ComputeDomains().Informer()
+	require.NoError(t, informer.AddIndexers(cache.Indexers{"computeDomainUID": uidIndexer[*configapi.ComputeDomain]}))
+	require.NoError(t, informer.GetIndexer().Add(&configapi.ComputeDomain{
+		ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "d3b07384-d9a7-4e2b-8f1a-2c1e6b5a9f00"},
+	}))
+
+	configFilesRoot := t.TempDir()
+	cdiSpecDir := t.TempDir()
+	cache, err := cdiapi.NewCache(cdiapi.WithSpecDirs(cdiSpecDir), cdiapi.WithAutoRefresh(false))
+	require.NoError(t, err)
+
+	state := testDeviceState()
+	state.config = &Config{flags: &Flags{nodeName: "test-node"}}
+	state.computeDomainManager = &ComputeDomainManager{informer: informer, configFilesRoot: configFilesRoot}
+	state.checkpointManager = &fakeCheckpointManager{checkpoint: checkpointWithClaims(map[string]PreparedClaim{})}
+	state.cdi = &CDIHandler{cache: cache, vendor: cdiVendor, claimClass: cdiClaimClass}
+	claim := &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "mixed", Namespace: "default", UID: types.UID("mixed-uid")},
+		Status: claimStatus(
+			[]resourceapi.DeviceRequestAllocationResult{
+				allocationResult("daemon-request", DriverName, "daemon-0", nil),
+				allocationResult("channel-request", DriverName, "channel-0", nil),
+			},
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"daemon-request"}, daemonConfig("d3b07384-d9a7-4e2b-8f1a-2c1e6b5a9f00")),
+			opaqueConfig(t, resourceapi.AllocationConfigSourceClaim, DriverName, []string{"channel-request"}, channelConfig("../x")),
+		),
+	}
+
+	// Repeat so that map order puts the valid daemon config first at least once.
+	for range 10 {
+		_, err := state.Prepare(context.Background(), claim)
+
+		require.Error(t, err)
+		require.True(t, isPermanentError(err), "applying before validating would surface an apply error instead, got %v", err)
+		require.Contains(t, err.Error(), "error validating config")
+	}
+
+	cpManager := requireFakeCheckpointManager(t, state)
+	require.Zero(t, cpManager.creates, "a claim rejected on its own contents must not reach the checkpoint")
+	require.Empty(t, cpManager.checkpoint.V2.PreparedClaims)
+
+	// Applying the valid daemon config first would have created its directory.
+	entries, err := os.ReadDir(configFilesRoot)
+	require.NoError(t, err)
+	require.Empty(t, entries, "nothing was applied, so no config file belongs here")
+
+	specs, err := os.ReadDir(cdiSpecDir)
+	require.NoError(t, err)
+	require.Empty(t, specs, "nothing was prepared, so no CDI spec belongs here")
+}
+
+// rawOpaqueConfig takes literal JSON, for configs that no Go type marshals to.
+func rawOpaqueConfig(requests []string, raw string) resourceapi.DeviceAllocationConfiguration {
+	return resourceapi.DeviceAllocationConfiguration{
+		Source:   resourceapi.AllocationConfigSourceClaim,
+		Requests: requests,
+		DeviceConfiguration: resourceapi.DeviceConfiguration{
+			Opaque: &resourceapi.OpaqueDeviceConfiguration{
+				Driver:     DriverName,
+				Parameters: runtime.RawExtension{Raw: []byte(raw)},
+			},
+		},
+	}
 }
 
 func TestRequestedNonAdminDevices(t *testing.T) {
@@ -553,7 +828,7 @@ func TestUnprepareMissingClaimIsNoop(t *testing.T) {
 func hostManagedConfig() *Config {
 	return &Config{
 		flags:      &Flags{imexHostSocketPath: defaultIMEXHostSocketPath},
-		imexConfig: imex.Config{Mode: imex.ModeHostManaged, Isolation: imex.IsolationIMEXDomain},
+		imexConfig: imex.Config{DaemonLifecycle: imex.DaemonLifecycleHostManaged},
 	}
 }
 
@@ -828,7 +1103,7 @@ func TestUnprepareDevicesHostManagedSkipsRemoveNodeLabel(t *testing.T) {
 		allocationResult("channel-request", DriverName, "channel-0", nil),
 	})
 
-	require.NoError(t, state.unprepareDevices(context.Background(), &status))
+	require.NoError(t, state.unprepareDevices(context.Background(), "claim-uid", &status, checkpointWithClaims(nil)))
 }
 
 func testDeviceState() *DeviceState {

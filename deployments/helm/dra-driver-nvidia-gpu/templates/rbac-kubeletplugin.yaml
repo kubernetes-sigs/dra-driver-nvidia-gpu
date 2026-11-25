@@ -6,7 +6,7 @@ metadata:
   name: {{ include "dra-driver-nvidia-gpu.name" . }}-clusterrole-kubeletplugin
 rules:
 - apiGroups: ["resource.nvidia.com"]
-  resources: ["computedomains"]
+  resources: ["computedomains", "computedomaindaemonsets"]
   verbs: ["get", "list", "watch"]
 - apiGroups: ["resource.k8s.io"]
   resources: ["resourceclaims"]

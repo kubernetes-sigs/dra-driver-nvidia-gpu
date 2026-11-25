@@ -200,6 +200,37 @@ dra-driver-nvidia-gpu-kubelet-plugin-5qhc7          2/2     Running   0         
 dra-driver-nvidia-gpu-webhook-6c9dd4956d-r4r7z      1/1     Running   0          25s
 ```
 
+## Optional: Install a development build
+
+Release builds land at `registry.k8s.io/dra-driver-nvidia`. Between releases, every merge to `main` (and to `release-*` branches) is also built and pushed to the staging registry `us-central1-docker.pkg.dev/k8s-staging-images/dra-driver-nvidia`, tagged `<VERSION>-<short-SHA>` (for example `v0.5.0-dev-a1b2c3d4`), where `<VERSION>` comes from the repository's [`VERSION`](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/blob/main/VERSION) file at that commit.
+
+{{% alert title="Note" %}}
+Staging images and charts are unversioned, unsupported builds meant for testing a specific commit. Do not run them in production.
+{{% /alert %}}
+
+1. Find the short SHA of the commit you want to test, and read the `VERSION` file at that commit:
+
+```bash
+COMMIT="$(git ls-remote https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu.git refs/heads/main | cut -c1-8)"
+VERSION="$(curl -sSfL https://raw.githubusercontent.com/kubernetes-sigs/dra-driver-nvidia-gpu/main/VERSION)"
+TAG="${VERSION}-${COMMIT}"
+echo "installing: ${TAG}"
+```
+
+2. Install (or upgrade) using the staging chart at that tag:
+
+```bash
+helm upgrade -i dra-driver-nvidia-gpu \
+    oci://us-central1-docker.pkg.dev/k8s-staging-images/dra-driver-nvidia/charts/dra-driver-nvidia-gpu \
+    --version "${TAG#v}" \
+    --namespace dra-driver-nvidia-gpu \
+    --create-namespace \
+    --set gpuResourcesEnabledOverride=true \
+    --wait
+```
+
+Append any other `--set` flags you'd normally use (`nvidiaDriverRoot`, `resources.computeDomains.enabled=false`, and so on).
+
 ## Run a sample GPU allocation workload
 
 Deploy a sample workload that allocates a GPU through the DRA Driver and verifies it is shared correctly between containers. For additional examples, see the [`demo/` folder](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/tree/main/demo) in the repository.

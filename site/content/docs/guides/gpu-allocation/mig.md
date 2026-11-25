@@ -119,10 +119,14 @@ no action is required.
   `mig-parted` or `nvidia-smi mig` while the GPU kubelet plugin is running, because
   manual changes can conflict with the driver's partition state and cause pod
   preparation or cleanup to fail.
-- On Ampere GPUs (for example, A100), enable MIG mode on the GPU before the
-  DRA Driver starts. Ampere cannot toggle MIG mode without a GPU reset. If MIG
-  mode is off, the driver falls back to full-GPU allocation and advertises no
-  MIG partitions. Hopper and later architectures enable MIG mode on demand.
+- On Ampere GPUs, such as A100, enable MIG mode on the GPU before the DRA Driver starts.
+  Ampere cannot toggle MIG mode without a GPU reset:
+
+  - If MIG mode is off, the driver falls back to full-GPU allocation and advertises no MIG partitions.
+  - if MIG mode is on and you enable `DynamicMIG`, the driver advertises the MIG partitions only and does not advertise the full GPU.
+    The scheduler cannot allocate a claim that requests a full GPU on that GPU, including management claims from monitoring or validation components.
+
+  Hopper and later architectures enable MIG mode on demand.
 - Dynamic MIG is not supported on vGPU guests.
 
 ## Examples

@@ -17,6 +17,9 @@ spec:
       labels:
         {{ .ComputeDomainLabelKey }}: {{ .ComputeDomainLabelValue }}
     spec:
+      {{- if .PriorityClassName }}
+      priorityClassName: {{ .PriorityClassName }}
+      {{- end }}
       serviceAccountName: compute-domain-daemon-service-account
       {{- if .ImagePullSecretNames }}
       imagePullSecrets:
@@ -26,6 +29,11 @@ spec:
       {{- end }} 
       nodeSelector:
         {{ .ComputeDomainLabelKey }}: {{ .ComputeDomainLabelValue }}
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
       containers:
       # Run the compute domain daemon
       - name: compute-domain-daemon
@@ -38,6 +46,10 @@ spec:
           value: "{{ .LogVerbosity }}"
         - name: MAX_NODES_PER_IMEX_DOMAIN
           value: "{{ .MaxNodesPerIMEXDomain }}"
+        {{- if .IMEXConfigOverrides }}
+        - name: IMEX_CONFIG_OVERRIDES
+          value: "{{ range $key, $value := .IMEXConfigOverrides }}{{ $key }}={{ $value }},{{ end }}"
+        {{- end }}
         - name: NODE_NAME
           valueFrom:
             fieldRef:

@@ -53,6 +53,11 @@ type ComputeDomainChannelConfig struct {
 	metav1.TypeMeta `json:",inline"`
 	DomainID        string `json:"domainID"`
 	AllocationMode  string `json:"allocationMode,omitempty"`
+	// ChannelRef identifies the channel of the claim. With channel
+	// reservations, the controller sets it to the name of the workload
+	// ResourceClaimTemplate, so that claims of one template share a channel
+	// in each NVLink clique.
+	ChannelRef string `json:"channelRef,omitempty"`
 }
 
 // DefaultComputeDomainChannelConfig provides the default ComputeDomainChannel configuration.
@@ -72,6 +77,11 @@ func (c *ComputeDomainChannelConfig) Normalize() error {
 
 // Validate ensures that ComputeDomainChannelConfig has a valid set of values.
 func (c *ComputeDomainChannelConfig) Validate() error {
+	if c.ChannelRef != "" {
+		if errs := validation.IsDNS1123Subdomain(c.ChannelRef); len(errs) > 0 {
+			return fmt.Errorf("invalid channelRef %q: %s", c.ChannelRef, strings.Join(errs, ", "))
+		}
+	}
 	return ValidateDomainID(c.DomainID)
 }
 

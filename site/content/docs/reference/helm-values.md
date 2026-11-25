@@ -48,12 +48,14 @@ When GPU allocation is enabled, the chart also creates DeviceClass resources for
 
 | Value | Default | Description |
 |---|---|---|
-| `resources.computeDomains.imex.mode` | `driverManaged` | Selects who manages the `nvidia-imex` daemon lifecycle: `driverManaged` creates a per-ComputeDomain daemon DaemonSet, while `hostManaged` uses a host service that you manage and requires the [`HostManagedIMEXDaemon`](feature-gates.md) feature gate. |
-| `resources.computeDomains.imex.isolation` | `domain` | Selects IMEX isolation, where `domain` shares channel 0 among workloads in the same IMEX domain and `channel` is reserved but unsupported. |
+| `resources.computeDomains.imex.daemonLifecycle` | `""` (`perComputeDomain`) | Selects who runs the `nvidia-imex` daemons: `perComputeDomain` creates a daemon DaemonSet for each ComputeDomain, `static` runs one daemon per node from the [`ComputeDomainDaemonSet`](../guides/static-imex-daemons.md) and requires the `ComputeDomainDaemonSet` and `ComputeDomainChannelReservations` feature gates, while `hostManaged` uses a host service that you manage, shared by all ComputeDomains, and requires the [`HostManagedIMEXDaemon`](feature-gates.md) feature gate. When empty, the deprecated `imex.mode` decides. |
+| `resources.computeDomains.imex.mode` | `""` | Deprecated, use `daemonLifecycle`. `hostManaged` selects `daemonLifecycle=hostManaged`, and `driverManaged` selects `perComputeDomain`. Setting it to `hostManaged` with a different `daemonLifecycle` fails. |
+| `resources.computeDomains.imex.isolation` | `""` | Deprecated and ignored. IMEX channels follow the [`ComputeDomainChannelReservations`](feature-gates.md) feature gate and the ComputeDomain spec. |
 | `resources.computeDomains.imex.hostSocketPath` | `/etc/nvidia-imex/imex_ctrl.sock` | Sets the path under `nvidiaDriverRoot` to the host IMEX command socket that the ComputeDomain kubelet plugin queries for a `READY` response during claim preparation in `hostManaged` mode. |
+| `resources.computeDomains.imex.config` | `{}` | A map of arbitrary `nvidia-imex` daemon config file setting names to values, overriding or adding to the defaults rendered by dynamically launched compute-domain-daemon pods. Only applies with `perComputeDomain`; ignored with `hostManaged`. See [NVIDIA's IMEX documentation](https://docs.nvidia.com/multi-node-nvlink-systems/imex-guide/) for the full list of settings. |
+| `resources.computeDomains.imex.maxChannels` | `2048` | The number of IMEX channels of each NVLink clique, starting at channel 0, at most 2048, that the controller assigns to workload templates. Only used with the [`ComputeDomainChannelReservations`](feature-gates.md) feature gate. |
 
-Drain ComputeDomain workload pods and delete existing `ComputeDomain` resources before you change `resources.computeDomains.imex.mode` or `resources.computeDomains.imex.isolation`.
-
+Drain ComputeDomain workload pods and delete existing `ComputeDomain` resources before you change `resources.computeDomains.imex.daemonLifecycle`.
 
 ## Kubernetes API version
 
@@ -122,16 +124,39 @@ Deployed when `resources.computeDomains.enabled=true`.
 
 | Value | Default | Description |
 |---|---|---|
-| `controller.replicas` | `1` | Number of controller pod replicas. |
-| `controller.leaderElection.enabled` | `false` | Enable leader election when running multiple replicas. |
+| `controller.replicas` | `1` | Number of controller pod replicas. Values greater than `1` require `controller.leaderElection.enabled=true` when ComputeDomains are enabled. |
+| `controller.pdb.enabled` | `false` | Create a PodDisruptionBudget (PDB) for the controller when ComputeDomains are enabled and `controller.replicas > 1`. |
+| `controller.pdb.minAvailable` | Unset (effective default: `1`) | Minimum number or percentage of controller pods that must remain available during voluntary disruptions. Used only when the PDB is rendered and `maxUnavailable` is unset. |
+| `controller.pdb.maxUnavailable` | Unset | Maximum number or percentage of controller pods that may be unavailable during voluntary disruptions. Takes precedence over `minAvailable` when set. |
+| `controller.leaderElection.enabled` | `false` | Enable leader election. Required when ComputeDomains are enabled and `controller.replicas > 1`; otherwise, Helm rejects the configuration. Without it, the controller is updated without a surge pod (`maxSurge: 0`). |
+| `controller.kubeAPI.qps` | `100` | Rate limit of the controller's Kubernetes API client. Admitting ComputeDomain channels writes once per pod. |
+| `controller.kubeAPI.burst` | `200` | Burst of the controller's Kubernetes API client. |
 | `controller.leaderElection.leaseDuration` | `15s` | How long the leader holds the lease before renewal is required. |
 | `controller.leaderElection.renewDeadline` | `10s` | How long the leader retries renewal before giving up. |
 | `controller.leaderElection.retryPeriod` | `2s` | Interval between leader-election retries. |
 | `controller.metrics.enabled` | `true` | Expose Prometheus metrics on the controller pod. |
 | `controller.metrics.httpEndpoint` | `:8080` | Metrics listen address. |
 | `controller.metrics.profilePath` | `""` | Optional pprof profile path. Empty disables profiling. |
-| `controller.priorityClassName` | `system-node-critical` | Priority class for the controller pod. |
+| `controller.priorityClassName` | `system-node-critical` | Priority class for the controller pod. Also applied to dynamically rendered `compute-domain-daemon` DaemonSet pods. |
 | `controller.networkPolicy.enabled` | `false` | Create a NetworkPolicy for the controller. |
+
+For multiple controller replicas with a PDB, add the following to your Helm values file:
+
+```yaml
+resources:
+  computeDomains:
+    enabled: true
+controller:
+  replicas: 2
+  leaderElection:
+    enabled: true
+  pdb:
+    enabled: true
+    minAvailable: 1
+```
+
+If you enable the PDB without setting `minAvailable` or `maxUnavailable`, the chart renders `minAvailable: 1`.
+The chart does not create a controller PDB when `controller.replicas` is `1` or ComputeDomains are disabled.
 
 The controller schedules onto control-plane nodes by default (`nodeSelector`, `tolerations`, and `affinity` are configurable). Additional `controller.*` values set pod annotations, security contexts, and container resource limits.
 

@@ -42,8 +42,10 @@ func newPartTestGpu(maxCapacities PartCapacityMap, memSliceCount int) *GpuInfo {
 // nvdev.MigProfile interface, so no fake is needed.
 func newPartTestMigSpec(parent *GpuInfo, start, size uint32) *MigSpec {
 	return &MigSpec{
-		Parent:  parent,
-		Profile: &nvdev.MigProfileInfo{C: 1, G: 1, GB: 10, GIProfileID: 19},
+		Parent: parent,
+		CandidateProfiles: []nvdev.MigProfile{
+			&nvdev.MigProfileInfo{C: 1, G: 1, GB: 10, GIProfileID: 19},
+		},
 		GIProfileInfo: nvml.GpuInstanceProfileInfo{
 			Id: 19, MultiprocessorCount: 28, CopyEngineCount: 1,
 			DecoderCount: 1, JpegCount: 1, MemorySizeMB: 10240,

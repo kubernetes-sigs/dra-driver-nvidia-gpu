@@ -56,7 +56,7 @@ are illustrative — confirm them on your own cluster.
     driverVersion:
       version: 580.126.20          # NVIDIA driver version
     gpuModuleID:
-      int: 1                        # Fabric Manager GPU module ID, when enabled
+      int: 1                        # NVML GPU module ID, when FM partitioning is enabled
     partition2:
       int: 4                        # ID of a reported size-2 FM partition
     productName:
@@ -137,7 +137,7 @@ are illustrative — confirm them on your own cluster.
     deviceID:
       string: "0x20b0"              # PCI device ID
     gpuModuleID:
-      int: 1                         # Fabric Manager GPU module ID, when enabled
+      int: 1                         # NVML GPU module ID, when FM partitioning is enabled
     iommuFDEnabled:
       bool: true                    # whether the IOMMUFD backend is enabled
     partition1:
@@ -271,7 +271,7 @@ MIG devices do not receive these attributes.
 
 | Attribute | Meaning |
 |---|---|
-| `gpuModuleID` | Physical GPU module identifier reported by NVML and used by Fabric Manager. |
+| `gpuModuleID` | GPU module identifier reported by NVML. May differ from the FM physical GPU ID; partition membership is resolved by UUID or PCI address, with module-ID matching when FM omits identity information. |
 | `partitionN` | Fabric Manager partition ID for the N-GPU partition that contains this GPU; for example, `partition2` identifies a reported two-GPU partition. |
 
 The GPU kubelet plugin emits each `partitionN` attribute only when Fabric

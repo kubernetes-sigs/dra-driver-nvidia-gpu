@@ -97,6 +97,16 @@ func (l *Flock) Acquire(ctx context.Context, opts ...AcquireOption) (func(), err
 	// - con: lock acquisition time after a release is not immediate, but may
 	//   take up to PollPeriod amount of time. Not an issue in this context.
 	for {
+		// Honor cancellation before every attempt, so that a caller whose
+		// context is already done never acquires the lock (and never starts
+		// the work the lock protects). Checking here, rather than only in the
+		// select below, also covers the case where ctx.Done() and the ticker
+		// are ready at the same time and select picks the ticker.
+		if err := ctx.Err(); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("error acquiring lock (%s): %w", l.path, err)
+		}
+
 		flerr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if flerr == nil {
 			// Lock acquired. Return release function. An exclusive flock() lock

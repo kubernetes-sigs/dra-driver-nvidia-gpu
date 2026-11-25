@@ -18,12 +18,17 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/component-base/featuregate"
 	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
@@ -407,6 +412,7 @@ func TestSharingReferenceCountingHelpers(t *testing.T) {
 
 type testFMClient struct {
 	partitions     []fabricmanager.Partition
+	activatedIDs   []int
 	deactivatedIDs []int
 }
 
@@ -415,9 +421,22 @@ func (c *testFMClient) Shutdown() error { return nil }
 func (c *testFMClient) GetSupportedFabricPartitions() ([]fabricmanager.Partition, error) {
 	return c.partitions, nil
 }
-func (c *testFMClient) ActivateFabricPartition(id int) error { return nil }
+func (c *testFMClient) ActivateFabricPartition(id int) error {
+	c.activatedIDs = append(c.activatedIDs, id)
+	for i := range c.partitions {
+		if c.partitions[i].ID == id {
+			c.partitions[i].IsActive = true
+		}
+	}
+	return nil
+}
 func (c *testFMClient) DeactivateFabricPartition(id int) error {
 	c.deactivatedIDs = append(c.deactivatedIDs, id)
+	for i := range c.partitions {
+		if c.partitions[i].ID == id {
+			c.partitions[i].IsActive = false
+		}
+	}
 	return nil
 }
 func (c *testFMClient) IsFabricPartitionActive(id int) (bool, error) {
@@ -519,6 +538,8 @@ func TestDeactivateFabricPartitionRefCounting(t *testing.T) {
 		},
 	}
 
+	smi := newFakePersistenceSMI(t, 0)
+	state.nvdevlib = smi.lib
 	pc1 := checkpoint.V2.PreparedClaims["claim-1"]
 
 	// Case 1: Unpreparing claim-1 while claim-2 is still active on GPU-0000.
@@ -526,6 +547,7 @@ func TestDeactivateFabricPartitionRefCounting(t *testing.T) {
 	err = state.deactivateFabricPartition("claim-1", &pc1, checkpoint)
 	require.NoError(t, err)
 	require.Empty(t, fmClient.deactivatedIDs, "FM partition deactivation MUST NOT be called while claim-2 is active")
+	require.Empty(t, smi.nvml.enabledPCI, "persistence must not change while claim-2 is active")
 
 	// Case 2: Remove claim-2 from checkpoint so claim-1 is the sole claim.
 	// Now deactivateFabricPartition calls FM DeactivatePartition(1).
@@ -534,6 +556,7 @@ func TestDeactivateFabricPartitionRefCounting(t *testing.T) {
 	err = state.deactivateFabricPartition("claim-1", &pc1, checkpoint)
 	require.NoError(t, err)
 	require.Equal(t, []int{1}, fmClient.deactivatedIDs, "FM partition deactivation MUST be called when no active claims remain")
+	require.Len(t, smi.nvml.enabledPCI, 1)
 }
 
 func TestValidateAdminAccessRequest(t *testing.T) {
@@ -850,4 +873,371 @@ func TestNormalizeAndValidateConfig(t *testing.T) {
 
 	_, err = normalizeAndValidateConfig(&resourceapi.ResourceClaim{})
 	require.Error(t, err)
+}
+
+// Prepare() checkpoints the claim status whole, so a mixed-driver claim leaves
+// results here that this driver did not place.
+func TestRollbackPartiallyPreparedMIGDevicesIgnoresOtherDrivers(t *testing.T) {
+	enableDynamicMIGForTest(t)
+
+	const ownedMIG = "gpu-0-mig-1g10gb-19-0"
+	parent := &GpuInfo{UUID: "GPU-0", minor: 0, pciBusID: "0000:01:00.0"}
+
+	// The parent lookup is the first NVML call MIG teardown makes, so its count
+	// tells which results got that far. The parent holds one MIG device, on a
+	// placement no case names.
+	newState := func() (*DeviceState, *mockNVMLLibrary) {
+		gpu := &fakeNVMLGPU{
+			migDevice: &fakeNVMLMigDevice{giID: 3},
+			gi:        &fakeNVMLGpuInstance{info: nvml.GpuInstanceInfo{Id: 3, ProfileId: 9, Placement: nvml.GpuInstancePlacement{Start: 4, Size: 3}}},
+		}
+		nvmllib := &mockNVMLLibrary{
+			deviceGetHandleByUUIDFunc: func(string) (nvml.Device, nvml.Return) { return gpu, nvml.SUCCESS },
+		}
+		state := &DeviceState{nvdevlib: &deviceLib{
+			nvmllib:           nvmllib,
+			gpuInfosByUUID:    map[string]*GpuInfo{parent.UUID: parent},
+			gpuUUIDbyPCIBusID: map[PCIBusID]string{parent.pciBusID: parent.UUID},
+			devhandleByUUID:   map[string]nvml.Device{},
+		}}
+		return state, nvmllib
+	}
+
+	claimWith := func(results ...resourceapi.DeviceRequestAllocationResult) PreparedClaim {
+		return PreparedClaim{Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{Results: results},
+			},
+		}}
+	}
+
+	completedWith := func(results ...resourceapi.DeviceRequestAllocationResult) *Checkpoint {
+		completed := claimWith(results...)
+		completed.CheckpointState = ClaimCheckpointStatePrepareCompleted
+		return &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{"completed": completed}}}
+	}
+
+	// The foreign name is on another GPU and placement, so a guard comparing
+	// placements instead of names could not hold it back on ownedMIG's behalf.
+	t.Run("another driver's MIG-shaped name", func(t *testing.T) {
+		state, nvmllib := newState()
+
+		pc := claimWith(
+			resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: "gpu-1-mig-foreign-14-4"},
+			resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: ownedMIG},
+		)
+
+		err := state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
+			completedWith(resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: ownedMIG}))
+
+		require.NoError(t, err)
+		require.Zero(t, nvmllib.deviceGetHandleByUUIDCalls, "another driver's result must not reach MIG teardown")
+	})
+
+	// Without this the case above would also pass if the loop skipped everything.
+	t.Run("our own MIG name", func(t *testing.T) {
+		state, nvmllib := newState()
+
+		pc := claimWith(resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: ownedMIG})
+
+		err := state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
+			&Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
+
+		require.NoError(t, err)
+		require.Equal(t, 1, nvmllib.deviceGetHandleByUUIDCalls, "our own result must still reach MIG teardown")
+	})
+
+	// The completed claim is what keeps ownedMIG out of the first case.
+	t.Run("our own MIG name held by a completed claim", func(t *testing.T) {
+		state, nvmllib := newState()
+
+		pc := claimWith(resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: ownedMIG})
+
+		err := state.rollbackPartiallyPreparedMIGDevices(context.Background(), "claim-uid", pc,
+			completedWith(resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: ownedMIG}))
+
+		require.NoError(t, err)
+		require.Zero(t, nvmllib.deviceGetHandleByUUIDCalls, "a device held by a completed claim must not reach MIG teardown")
+	})
+
+	// Same name, but the completed claim got it from another driver.
+	t.Run("our own MIG name in another driver's result of a completed claim", func(t *testing.T) {
+		state, nvmllib := newState()
+
+		pc := claimWith(resourceapi.DeviceRequestAllocationResult{Driver: DriverName, Device: ownedMIG})
+
+		err := state.rollbackPartiallyPreparedMIGDevices(t.Context(), "claim-uid", pc,
+			completedWith(resourceapi.DeviceRequestAllocationResult{Driver: "other.driver.com", Device: ownedMIG}))
+
+		require.NoError(t, err)
+		require.Equal(t, 1, nvmllib.deviceGetHandleByUUIDCalls, "another driver's result must not keep our device")
+	})
+}
+
+// The startup keep-list, walked over a GPU that holds one MIG device.
+func TestDestroyUnknownMIGDevicesIgnoresOtherDrivers(t *testing.T) {
+	enableDynamicMIGForTest(t)
+
+	const live = "gpu-0-mig-1g5gb-19-2"
+
+	tests := map[string]struct {
+		driver       string
+		wantTeardown bool
+	}{
+		"a completed claim of ours holds the device": {
+			driver: DriverName,
+		},
+		"another driver's result names the device": {
+			driver:       "other.driver.com",
+			wantTeardown: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			var events []string
+			gi := &fakeNVMLGpuInstance{
+				info:      nvml.GpuInstanceInfo{Id: 3, ProfileId: 19, Placement: nvml.GpuInstancePlacement{Start: 2, Size: 1}},
+				ci:        &fakeNVMLComputeInstance{info: nvml.ComputeInstanceInfo{Id: 4, ProfileId: 7}, events: &events},
+				ciProfile: nvml.ComputeInstanceProfileInfo{Id: 7},
+				events:    &events,
+			}
+			gpu := &fakeNVMLGPU{
+				migDevice: &fakeNVMLMigDevice{giID: 3, ciID: 4, uuid: "MIG-0"},
+				gi:        gi,
+				giProfile: nvml.GpuInstanceProfileInfo{Id: 19},
+				events:    &events,
+			}
+			parent := &GpuInfo{UUID: "GPU-0", migEnabled: true, migProfiles: []*MigProfileInfo{{profile: testMigProfile()}}}
+
+			state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{
+				"completed": {
+					CheckpointState: ClaimCheckpointStatePrepareCompleted,
+					Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
+						Devices: resourceapi.DeviceAllocationResult{Results: []resourceapi.DeviceRequestAllocationResult{
+							{Driver: DriverName, Device: "gpu-1"},
+							{Driver: tc.driver, Device: live},
+						}},
+					}},
+				},
+			}}})
+			state.nvdevlib = &deviceLib{
+				Interface:       fakeNVMLDeviceLib{device: fakeNVDevice{uuid: parent.UUID, migEnabled: true}},
+				nvmllib:         &mockNVMLLibrary{},
+				gpuInfosByUUID:  map[string]*GpuInfo{parent.UUID: parent},
+				devhandleByUUID: map[string]nvml.Device{parent.UUID: gpu},
+			}
+
+			state.DestroyUnknownMIGDevices(t.Context())
+
+			if tc.wantTeardown {
+				require.Equal(t, []string{"destroy-ci", "destroy-gi"}, events)
+			} else {
+				require.Empty(t, events)
+			}
+		})
+	}
+}
+
+// A completed claim whose allocation is missing from the checkpoint still
+// holds whatever it was prepared with, so nothing may be torn down on its
+// behalf until that can be told apart from holding nothing.
+func TestCheckpointedClaimThatCannotBeAccountedFor(t *testing.T) {
+	enableDynamicMIGForTest(t)
+
+	const owned = "gpu-0-mig-1g10gb-19-0"
+	preparedWith := func(name DeviceName) PreparedDevices {
+		return PreparedDevices{{Devices: PreparedDeviceList{newPreparedMigDevice(name, "MIG-0000")}}}
+	}
+	completed := func(claim PreparedClaim) PreparedClaimsByUID {
+		claim.CheckpointState = ClaimCheckpointStatePrepareCompleted
+		return PreparedClaimsByUID{"completed": claim}
+	}
+
+	// The device under test sits on GPU-0, whose parent resolves by PCI bus ID
+	// as well as by minor. The UUID that reaches NVML is then the evidence for
+	// how far the scan got, and it is a specific one.
+	target := &MigSpecTuple{ParentMinor: 0, ParentPCIBusID: "0000:01:00.0", ProfileID: 19}
+	lookingUp := func() (*DeviceState, *mockNVMLLibrary) {
+		nvmllib := &mockNVMLLibrary{deviceGetHandleByUUIDFunc: func(string) (nvml.Device, nvml.Return) {
+			return nil, nvml.ERROR_NOT_FOUND
+		}}
+		return &DeviceState{nvdevlib: &deviceLib{
+			nvmllib: nvmllib,
+			gpuInfosByUUID: map[string]*GpuInfo{
+				"GPU-0": {UUID: "GPU-0", minor: 0, pciBusID: "0000:01:00.0"},
+				"GPU-1": {UUID: "GPU-1", minor: 1, pciBusID: "0000:02:00.0"},
+			},
+			gpuUUIDbyPCIBusID: map[PCIBusID]string{"0000:01:00.0": "GPU-0", "0000:02:00.0": "GPU-1"},
+			devhandleByUUID:   map[string]nvml.Device{},
+		}}, nvmllib
+	}
+
+	t.Run("the teardown routine leaves the GPUs alone", func(t *testing.T) {
+		visited := 0
+		state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{
+			PreparedClaims: completed(PreparedClaim{}),
+		}})
+		state.nvdevlib = &deviceLib{Interface: fakeNVMLDeviceLib{visited: &visited}}
+
+		state.DestroyUnknownMIGDevices(t.Context())
+
+		require.Zero(t, visited, "a keep-list that cannot be completed MUST NOT reach the device walk")
+	})
+
+	t.Run("the device stays when the claim holding it cannot be read", func(t *testing.T) {
+		state, nvmllib := lookingUp()
+
+		err := state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(target, owned, completed(PreparedClaim{}))
+
+		require.NoError(t, err)
+		require.Empty(t, nvmllib.deviceGetHandleByUUIDArgs, "teardown MUST NOT be attempted")
+	})
+
+	t.Run("prepared devices answer for a claim with no allocation", func(t *testing.T) {
+		state, nvmllib := lookingUp()
+
+		err := state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(
+			target, owned, completed(PreparedClaim{PreparedDevices: preparedWith(owned)}))
+
+		require.NoError(t, err)
+		require.Empty(t, nvmllib.deviceGetHandleByUUIDArgs, "the device is in use, teardown MUST NOT be attempted")
+	})
+
+	// Without this the two cases above would pass just as well if the scan
+	// never told the two apart and kept every device.
+	t.Run("a device no prepared claim names reaches the teardown lookup", func(t *testing.T) {
+		state, nvmllib := lookingUp()
+
+		err := state.deleteMigDevIfExistsAndNotUsedByCompletedClaim(
+			target, owned, completed(PreparedClaim{PreparedDevices: preparedWith("gpu-1-mig-1g10gb-19-0")}))
+
+		require.Error(t, err, "the lookup is attempted and the stubbed NVML refuses it")
+		require.Equal(t, []string{"GPU-0"}, nvmllib.deviceGetHandleByUUIDArgs, "the parent of the device under test")
+	})
+
+	// Reading a prepared device through CanonicalName() would panic on an entry
+	// this malformed, and the readable device beside it is what let a partial
+	// keep-list pass for a complete one.
+	t.Run("a readable device beside an unreadable one", func(t *testing.T) {
+		visited := 0
+		state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{
+			PreparedClaims: completed(PreparedClaim{PreparedDevices: PreparedDevices{
+				{Devices: PreparedDeviceList{newPreparedMigDevice(owned, "MIG-0000"), {}, {Mig: &PreparedMigDevice{}}}},
+			}}),
+		}})
+		state.nvdevlib = &deviceLib{Interface: fakeNVMLDeviceLib{visited: &visited}}
+
+		require.NotPanics(t, func() { state.DestroyUnknownMIGDevices(t.Context()) })
+		require.Zero(t, visited, "a claim we still cannot read MUST NOT reach the device walk")
+	})
+
+	// Without this the teardown cases above would pass if the routine never ran.
+	t.Run("prepared devices let the teardown routine run", func(t *testing.T) {
+		visited := 0
+		state := newCleanupTestDeviceState(t, &Checkpoint{V2: &CheckpointV2{
+			PreparedClaims: completed(PreparedClaim{PreparedDevices: preparedWith(owned)}),
+		}})
+		state.nvdevlib = &deviceLib{Interface: fakeNVMLDeviceLib{visited: &visited}}
+
+		state.DestroyUnknownMIGDevices(t.Context())
+
+		require.Equal(t, 1, visited, "a claim its prepared devices answer for MUST reach the device walk")
+	})
+
+	t.Run("partial rollback has nothing left to derive", func(t *testing.T) {
+		state := &DeviceState{}
+
+		err := state.rollbackPartiallyPreparedMIGDevices(t.Context(), "claim-uid", PreparedClaim{},
+			&Checkpoint{V2: &CheckpointV2{PreparedClaims: PreparedClaimsByUID{}}})
+
+		require.NoError(t, err)
+	})
+}
+
+func TestUnprepareDevicesTimeSliceReset(t *testing.T) {
+	gates := map[string]bool{
+		string(featuregates.TimeSlicingSettings): true,
+		string(featuregates.MPSSupport):          false,
+		string(featuregates.PassthroughSupport):  false,
+	}
+	original := map[string]bool{}
+	for gate := range gates {
+		original[gate] = featuregates.Enabled(featuregate.Feature(gate))
+	}
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(gates))
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(original))
+	})
+
+	newState := func(smi fakeSMI) *DeviceState {
+		l := &deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath}
+		return &DeviceState{nvdevlib: l, tsManager: NewTimeSlicingManager(l)}
+	}
+	devices := PreparedDevices{
+		&PreparedDeviceGroup{Devices: PreparedDeviceList{newPreparedGpu("gpu-0", "GPU-0000")}},
+	}
+
+	t.Run("resets the GPU to the default time slice", func(t *testing.T) {
+		smi := newFakeSMI(t, 0)
+
+		_, err := newState(smi).unprepareDevices(context.Background(), "claim-uid", devices, &Checkpoint{})
+		require.NoError(t, err)
+
+		invocations := smi.invocations(t)
+		require.Len(t, invocations, 2)
+		require.Contains(t, invocations[1], "compute-policy -i GPU-0000 --set-timeslice 0")
+	})
+
+	t.Run("an unsupported time-slice reset does not fail unprepare", func(t *testing.T) {
+		// nvidia-smi exits with 3 when the operation is not available on the
+		// target device.
+		smi := newFakeSMI(t, 3)
+
+		_, err := newState(smi).unprepareDevices(context.Background(), "claim-uid", devices, &Checkpoint{})
+		require.NoError(t, err)
+	})
+
+	t.Run("an unsupported GPU does not stop the reset of the other GPUs", func(t *testing.T) {
+		// The stub exits with 3 only for the time-slice call on GPU-0000.
+		smi := newFakeSMI(t, 0)
+		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s|%%s\\n' \"$LD_PRELOAD\" \"$*\" >> %q\ncase \"$*\" in *\"-i GPU-0000 --set-timeslice\"*) exit 3;; esac\nexit 0\n", smi.logPath)
+		require.NoError(t, os.WriteFile(smi.path, []byte(script), 0o755))
+		group := PreparedDevices{
+			&PreparedDeviceGroup{Devices: PreparedDeviceList{
+				newPreparedGpu("gpu-0", "GPU-0000"),
+				newPreparedGpu("gpu-1", "GPU-0001"),
+			}},
+		}
+
+		_, err := newState(smi).unprepareDevices(context.Background(), "claim-uid", group, &Checkpoint{})
+		require.NoError(t, err)
+
+		invocations := strings.Join(smi.invocations(t), "\n")
+		require.Contains(t, invocations, "compute-policy -i GPU-0000 --set-timeslice 0")
+		require.Contains(t, invocations, "compute-policy -i GPU-0001 --set-timeslice 0")
+	})
+
+	t.Run("a failure on a later GPU still fails unprepare", func(t *testing.T) {
+		// GPU-0000 is unsupported; GPU-0001 fails with a different error.
+		smi := newFakeSMI(t, 0)
+		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s|%%s\\n' \"$LD_PRELOAD\" \"$*\" >> %q\ncase \"$*\" in *\"-i GPU-0000 --set-timeslice\"*) exit 3;; *\"-i GPU-0001 --set-timeslice\"*) exit 4;; esac\nexit 0\n", smi.logPath)
+		require.NoError(t, os.WriteFile(smi.path, []byte(script), 0o755))
+		group := PreparedDevices{
+			&PreparedDeviceGroup{Devices: PreparedDeviceList{
+				newPreparedGpu("gpu-0", "GPU-0000"),
+				newPreparedGpu("gpu-1", "GPU-0001"),
+			}},
+		}
+
+		_, err := newState(smi).unprepareDevices(context.Background(), "claim-uid", group, &Checkpoint{})
+		require.Error(t, err)
+	})
+
+	t.Run("other nvidia-smi failures still fail unprepare", func(t *testing.T) {
+		smi := newFakeSMI(t, 4)
+
+		_, err := newState(smi).unprepareDevices(context.Background(), "claim-uid", devices, &Checkpoint{})
+		require.Error(t, err)
+	})
 }

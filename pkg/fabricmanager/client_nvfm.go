@@ -121,7 +121,7 @@ func toError(ret nvfm.Return, op string) error {
 // backing array. A count that exceeds the array capacity means the runtime
 // libnvfm and the vendored headers disagree (an ABI mismatch) or FM returned a
 // malformed count. Silently clamping such a count would record a truncated,
-// incomplete partition that FindPartitionByModuleIDs could then match against a
+// incomplete partition that FindPartitionByPhysicalIDs could then match against a
 // requested GPU subset and activate a partition containing additional GPUs, so
 // we fail loudly instead.
 func checkCount(n uint32, max int) (int, error) {

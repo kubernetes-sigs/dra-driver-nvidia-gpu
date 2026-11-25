@@ -35,7 +35,7 @@ type ConnectParams struct {
 // partition. The fields correspond to fmFabricPartitionGpuInfo_t.
 
 type PartitionGPU struct {
-	// PhysicalID is the GPU's physical/module ID
+	// PhysicalID is FM's physical ID, which need not equal NVML's module ID.
 	PhysicalID          int
 	UUID                string
 	PCIBusID            string
@@ -52,9 +52,9 @@ type Partition struct {
 	GPUs     []PartitionGPU
 }
 
-// GPUModuleIDs returns the PhysicalIDs/ModuleIDs of all
+// GPUPhysicalIDs returns the FM physical IDs of all
 // GPUs in the partition, in the order FM reported them.
-func (p Partition) GPUModuleIDs() []int {
+func (p Partition) GPUPhysicalIDs() []int {
 	ids := make([]int, len(p.GPUs))
 	for i, g := range p.GPUs {
 		ids[i] = g.PhysicalID

@@ -32,7 +32,7 @@ CMD_TARGETS := $(patsubst %,cmd-%, $(CMDS))
 
 CHECK_TARGETS := golangci-lint check-generate
 
-MAKE_TARGETS := binaries build build-image check clean fmt lint-internal test examples cmds coverage generate vendor check-modules helm-lint helm-package $(CHECK_TARGETS)
+MAKE_TARGETS := binaries build build-image check clean fmt lint-internal test examples cmds coverage generate vendor check-modules helm-lint helm-test helm-package $(CHECK_TARGETS)
 
 TARGETS := $(MAKE_TARGETS) $(CMD_TARGETS)
 
@@ -92,8 +92,11 @@ golangci-lint:
 
 lint-internal: golangci-lint
 
-helm-lint:
+helm-lint: helm-test
 	helm lint deployments/helm/dra-driver-nvidia-gpu
+
+helm-test:
+	hack/test-helm-policy-service-account.sh
 
 helm-package:
 	helm package deployments/helm/dra-driver-nvidia-gpu
@@ -237,13 +240,17 @@ PHONY: .shell
 		--user $$(id -u):$$(id -g) \
 		$(BUILDIMAGE)
 
-.PHONY: bats bats-cd bats-gpu
+.PHONY: bats bats-cd bats-cd-modes bats-gpu
 bats:
 	make -f tests/bats/Makefile tests
 
 # Run compute domain specific tests
 bats-cd:
 	make -f tests/bats/Makefile tests-cd
+
+# Run compute domain tests once per IMEX mode
+bats-cd-modes:
+	make -f tests/bats/Makefile tests-cd-modes
 
 # Run GPU plugin specific tests
 bats-gpu:
@@ -264,8 +271,15 @@ e2e-gcp-nvkind:
 # Run the Go/Ginkgo e2e suite against the current kubectl context. Assumes
 # the cluster already has GPU Operator (minimal mode) + the DRA driver
 # installed. The -tags=e2e build tag keeps this out of `make test`.
+E2E_LABEL_FILTER ?= !vfio
 .PHONY: test-e2e
 test-e2e:
 	ARTIFACTS=$${ARTIFACTS:-/tmp/test-e2e-artifacts}; mkdir -p $$ARTIFACTS; \
 	go test -mod=vendor -tags=e2e -v -timeout=30m ./test/e2e/... \
-	  -ginkgo.v -ginkgo.junit-report=$$ARTIFACTS/junit_01.xml
+	  -ginkgo.v -ginkgo.label-filter='$(E2E_LABEL_FILTER)' -ginkgo.junit-report=$$ARTIFACTS/junit_01.xml
+
+# Run only the VFIO passthrough e2e specs (requires IOMMU-capable GPUs and the
+# PassthroughSupport feature gate enabled on the driver).
+.PHONY: test-e2e-vfio
+test-e2e-vfio:
+	$(MAKE) test-e2e E2E_LABEL_FILTER=vfio

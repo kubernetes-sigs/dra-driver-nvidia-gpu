@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"k8s.io/klog/v2"
+
+	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 )
 
 const (
@@ -60,15 +62,7 @@ type VfioPciManager struct {
 	inflightDriverSwitches map[string]struct{}
 }
 
-func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib *deviceLib, nvidiaEnabled bool) (*VfioPciManager, error) {
-	iommuEnabled, err := checkIommuEnabled(nvlib.hostRoot)
-	if err != nil {
-		return nil, fmt.Errorf("error checking if IOMMU is enabled: %w", err)
-	}
-	if !iommuEnabled {
-		return nil, fmt.Errorf("IOMMU is not enabled in the kernel")
-	}
-
+func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib *deviceLib, nvidiaEnabled bool) *VfioPciManager {
 	vm := &VfioPciManager{
 		containerDriverRoot:    containerDriverRoot,
 		hostDriverRoot:         hostDriverRoot,
@@ -77,19 +71,26 @@ func NewVfioPciManager(containerDriverRoot string, hostDriverRoot string, nvlib 
 		inflightDriverSwitches: make(map[string]struct{}),
 	}
 
-	return vm, nil
+	return vm
 }
 
 // Configure binds the GPU to the vfio-pci driver.
-func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) error {
-	loaded, err := vm.checkKernelModuleLoaded(info.vfioModule)
+func (vm *VfioPciManager) Configure(ctx context.Context, config *configapi.VfioDeviceConfig, info *VfioDeviceInfo) error {
+	vfioModule := info.vfioModule
+	// Use driver override if specified in the config.
+	if config != nil && config.DriverOverride != nil {
+		vfioDriver := string(*config.DriverOverride)
+		vfioModule = getVfioModuleName(vfioDriver)
+	}
+
+	loaded, err := vm.checkKernelModuleLoaded(vfioModule)
 	if err != nil {
-		return fmt.Errorf("error checking if module %q is loaded: %w", info.vfioModule, err)
+		return fmt.Errorf("error checking if module %q is loaded: %w", vfioModule, err)
 	}
 	if !loaded {
-		err := vm.loadKernelModule(info.vfioModule)
+		err := vm.loadKernelModule(vfioModule)
 		if err != nil {
-			return fmt.Errorf("failed to load module %q: %w", info.vfioModule, err)
+			return fmt.Errorf("failed to load module %q: %w", vfioModule, err)
 		}
 	}
 
@@ -98,14 +99,14 @@ func (vm *VfioPciManager) Configure(ctx context.Context, info *VfioDeviceInfo) e
 		return fmt.Errorf("a driver switch is inflight for GPU %q, please check the kernel logs for more details", info.PciBusID)
 	}
 
-	vfioDriver, err := getVfioDriverName(info.vfioModule)
-	if err != nil {
-		return fmt.Errorf("error getting vfio driver for GPU %q: %w", info.PciBusID, err)
-	}
-
 	driver, err := getDriver(pciDevicesPath, info.PciBusID)
 	if err != nil {
 		return fmt.Errorf("error getting driver details for GPU %q: %w", info.PciBusID, err)
+	}
+
+	vfioDriver, err := getVfioDriverName(vfioModule)
+	if err != nil {
+		return fmt.Errorf("error getting vfio driver for GPU %q: %w", info.PciBusID, err)
 	}
 
 	// Skip if the GPU is already bound to the vfio-pci (or variant) driver.
@@ -190,11 +191,11 @@ func (vm *VfioPciManager) WaitForGPUFree(ctx context.Context, info *VfioDeviceIn
 					return nil
 				}
 				err = fmt.Errorf("unexpected error checking if gpu device %q is free: %w", info.PciBusID, cmdErr)
-				klog.V(6).Infof("[DEBUG] %s", err.Error())
+				klog.V(6).Infof("%v", err)
 				continue
 			}
 			err = fmt.Errorf("gpu device %q has open fds by process(es): %q", info.PciBusID, string(out))
-			klog.V(6).Infof("[DEBUG] %s", err.Error())
+			klog.V(6).Infof("%v", err)
 		}
 	}
 }
@@ -252,6 +253,11 @@ func getVfioDriverName(vfioModule string) (string, error) {
 		vfioDriver = vfioDriverNormalized
 	}
 	return vfioDriver, nil
+}
+
+// Module names will only ever contain underscore characters and not dashes.
+func getVfioModuleName(vfioDriver string) string {
+	return strings.ReplaceAll(vfioDriver, "-", "_")
 }
 
 // Get the current driver the GPU is bound to.

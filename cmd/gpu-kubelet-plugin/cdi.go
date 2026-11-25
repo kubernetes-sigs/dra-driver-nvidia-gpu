@@ -21,6 +21,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -45,8 +47,9 @@ const (
 	cdiVendor      = "k8s." + DriverName
 	cdiClaimClass  = "claim"
 	defaultCDIRoot = "/var/run/cdi"
-	procNvCapsPath = "/proc/driver/nvidia/capabilities"
 )
+
+var nvidiaGPUDeviceNodePattern = regexp.MustCompile(`^/dev/nvidia(0|[1-9]\d?)$`)
 
 type CDIHandler struct {
 	logger            *logrus.Logger
@@ -125,8 +128,10 @@ func (cdi *CDIHandler) GetCommonEditsCached() (*cdiapi.ContainerEdits, error) {
 	t0 := time.Now()
 	v, err := cdi.nvcdiClaim.GetCommonEdits()
 	klog.V(7).Infof("t_cdi_get_common_edits %.3f s", time.Since(t0).Seconds())
-
 	if err != nil {
+		return nil, err
+	}
+	if err := validateCommonDeviceNodes(v); err != nil {
 		return nil, err
 	}
 	cdi.specCache.Set(key, v, time.Duration(5*time.Minute))
@@ -158,14 +163,103 @@ func (cdi *CDIHandler) GetDeviceSpecsByUUIDCached(uuid string) ([]cdispec.Device
 
 	t0 := time.Now()
 	devs, err := cdi.nvcdiClaim.GetDeviceSpecsByID(uuid)
-	klog.V(1).Infof("GetDeviceSpecsByID() called for %s, t_cdi_get_device_specs_by_id %.3f s", uuid, time.Since(t0).Seconds())
+	klog.V(6).Infof("GetDeviceSpecsByID() called for %s, t_cdi_get_device_specs_by_id %.3f s", uuid, time.Since(t0).Seconds())
 	if err != nil {
+		return nil, err
+	}
+	if err := validateGPUDeviceNodes(uuid, devs); err != nil {
 		return nil, err
 	}
 	cdi.specCache.Set(key, devs, time.Duration(5*time.Minute))
 	clone := make([]cdispec.Device, len(devs))
 	copy(clone, devs)
 	return clone, nil
+}
+
+// InvalidateDeviceSpec removes cached CDI data for a GPU whose device minor
+// may have changed after rebinding it to the NVIDIA driver.
+func (cdi *CDIHandler) InvalidateDeviceSpec(uuid string) {
+	cdi.specCache.Delete(uuid)
+}
+
+func (cdi *CDIHandler) getDeviceSpecsByUUIDAndMinor(uuid string, minor int) ([]cdispec.Device, error) {
+	devices, err := cdi.GetDeviceSpecsByUUIDCached(uuid)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateGPUDeviceMinor(uuid, minor, devices); err == nil {
+		return devices, nil
+	}
+
+	// The GPU minor may have changed after a driver rebind or MIG mode change.
+	cdi.InvalidateDeviceSpec(uuid)
+	devices, err = cdi.GetDeviceSpecsByUUIDCached(uuid)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateGPUDeviceMinor(uuid, minor, devices); err != nil {
+		return nil, err
+	}
+	return devices, nil
+}
+
+// validateCommonDeviceNodes verifies that nvcdi emitted the global NVIDIA
+// control and UVM device nodes required by GPU and MIG workloads. nvcdi's
+// character-device discoverer resolves these paths against its configured
+// devRoot and omits nodes that do not exist there.
+func validateCommonDeviceNodes(edits *cdiapi.ContainerEdits) error {
+	requiredPaths := []string{
+		"/dev/nvidiactl",
+		"/dev/nvidia-uvm",
+		"/dev/nvidia-uvm-tools",
+	}
+	foundPaths := make(map[string]struct{}, len(requiredPaths))
+	if edits != nil && edits.ContainerEdits != nil {
+		for _, node := range edits.DeviceNodes {
+			if node != nil {
+				foundPaths[node.Path] = struct{}{}
+			}
+		}
+	}
+
+	var missingPaths []string
+	for _, path := range requiredPaths {
+		if _, found := foundPaths[path]; !found {
+			missingPaths = append(missingPaths, path)
+		}
+	}
+	if len(missingPaths) > 0 {
+		return fmt.Errorf("failed to validate NVIDIA CDI common edits: missing required device nodes %s; NVIDIA driver installation may be incomplete", strings.Join(missingPaths, ", "))
+	}
+	return nil
+}
+
+// validateGPUDeviceNodes verifies that nvcdi found a per-GPU device node.
+func validateGPUDeviceNodes(uuid string, devices []cdispec.Device) error {
+	for _, device := range devices {
+		for _, node := range device.ContainerEdits.DeviceNodes {
+			if node != nil && nvidiaGPUDeviceNodePattern.MatchString(node.Path) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("failed to validate NVIDIA CDI device spec for GPU %q: missing /dev/nvidia<minor> device node; NVIDIA driver installation may be incomplete", uuid)
+}
+
+func validateGPUDeviceMinor(uuid string, minor int, devices []cdispec.Device) error {
+	if err := validateGPUDeviceNodes(uuid, devices); err != nil {
+		return err
+	}
+
+	expectedPath := fmt.Sprintf("/dev/nvidia%d", minor)
+	for _, device := range devices {
+		for _, node := range device.ContainerEdits.DeviceNodes {
+			if node != nil && node.Path == expectedPath {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("failed to validate NVIDIA CDI device spec for GPU %q: expected device node %s", uuid, expectedPath)
 }
 
 // Note(JP): for a regular GPU, this canonical name is for example `gpu-0`, with
@@ -178,15 +272,19 @@ func (cdi *CDIHandler) GetDeviceSpecsByUUIDCached(uuid string) ([]cdispec.Device
 // with that name. That is an argument for always dynamically generating also
 // full-GPU CDI spec during prepare() (or: to cache it, and re-generate it every
 // now and then during this program's lifetime).
-func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices PreparedDevices) error {
-	// Generate those parts of the container spec that are not device-specific
-	// (to inject e.g. driver library mounts and meta devices). Note that
-	// `nvcdiDevice.GetCommonEdits()` may usually initialize nvsandboxutilslib
-	// under the hood -- we now prevent that from happening by using
-	// `nvcdi.FeatureDisableNvsandboxUtils` above.
-	commonEdits, err := cdi.GetCommonEditsCached()
-	if err != nil {
-		return fmt.Errorf("failed to get common CDI spec edits: %w", err)
+func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices PreparedDevices, claimContainerEdits *cdiapi.ContainerEdits) error {
+	commonEdits := &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{}}
+	if requiresNVIDIADeviceNodes(preparedDevices) {
+		// Generate those parts of the container spec that are not device-specific
+		// (to inject e.g. driver library mounts and meta devices). Note that
+		// `nvcdiDevice.GetCommonEdits()` may usually initialize nvsandboxutilslib
+		// under the hood -- we now prevent that from happening by using
+		// `nvcdi.FeatureDisableNvsandboxUtils` above.
+		var err error
+		commonEdits, err = cdi.GetCommonEditsCached()
+		if err != nil {
+			return fmt.Errorf("failed to get common CDI spec edits: %w", err)
+		}
 	}
 
 	var deviceSpecs []cdispec.Device
@@ -205,7 +303,7 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 				uuid = dev.Gpu.Info.UUID
 				// Get (copy of) cached CDI spec (is safe to be mutated below,
 				// w/o compromising cache).
-				dspecsgpu, err := cdi.GetDeviceSpecsByUUIDCached(uuid)
+				dspecsgpu, err := cdi.getDeviceSpecsByUUIDAndMinor(uuid, dev.Gpu.Info.minor)
 				if err != nil {
 					return fmt.Errorf("unable to get device spec for %s: %w", dname, err)
 				}
@@ -230,11 +328,11 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 				// generated further below. One reason for doing things this way
 				// is that `nvcdiDevice.GetDeviceSpecsByID(MIG_UUID)` may yield
 				// an incomplete spec for MIG devices, see
-				// https://sigs.k8s.io/dra-driver-nvidia-gpu/issues/787.
+				// https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/issues/787.
 				uuid = dev.Mig.Concrete.ParentUUID
 				// Get (copy of) cached device spec (is safe to be mutated below,
 				// w/o compromising cache).
-				dspecsmig, err := cdi.GetDeviceSpecsByUUIDCached(uuid)
+				dspecsmig, err := cdi.getDeviceSpecsByUUIDAndMinor(uuid, int(dev.Mig.Concrete.ParentMinor))
 				if err != nil {
 					return fmt.Errorf("unable to get device spec for %s: %w", dname, err)
 				}
@@ -283,6 +381,12 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 		}
 	}
 
+	if claimContainerEdits != nil {
+		// Claim-level edits apply whenever any device from this claim-specific
+		// CDI spec is injected.
+		commonEdits = (&cdiapi.ContainerEdits{}).Append(commonEdits).Append(claimContainerEdits)
+	}
+
 	tws0 := time.Now()
 	spec, err := spec.New(
 		spec.WithVendor(cdiVendor),
@@ -303,6 +407,19 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 
 	klog.V(7).Infof("t_gen_write_cdi_spec %.3f s", time.Since(tws0).Seconds())
 	return result
+}
+
+// requiresNVIDIADeviceNodes reports whether the claim needs NVIDIA control and
+// GPU device nodes. VFIO-only claims use /dev/vfio devices instead.
+func requiresNVIDIADeviceNodes(preparedDevices PreparedDevices) bool {
+	for _, group := range preparedDevices {
+		for _, device := range group.Devices {
+			if device.Type() == GpuDeviceType || device.Type() == PreparedMigDeviceType {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (cdi *CDIHandler) DeleteClaimSpecFile(claimUID string) error {
@@ -342,8 +459,7 @@ func (cdi *CDIHandler) GetClaimDeviceName(claimUID string, device *AllocatableDe
 // the host. That is what is achieved below with the structure created in
 // cdiDevNodeFromNVCapDevInfo().
 func (cdi *CDIHandler) GetDevNodesForMigDevice(mlt *MigLiveTuple) ([]*cdispec.DeviceNode, error) {
-	gipath := fmt.Sprintf("%s/gpu%d/mig/gi%d/access", procNvCapsPath, mlt.ParentMinor, mlt.GIID)
-	cipath := fmt.Sprintf("%s/gpu%d/mig/gi%d/ci%d/access", procNvCapsPath, mlt.ParentMinor, mlt.GIID, mlt.CIID)
+	gipath, cipath := common.MigCapsPaths(mlt.ParentMinor, mlt.GIID, mlt.CIID)
 
 	giCapsInfo, err := common.ParseNVCapDeviceInfo(gipath)
 	if err != nil {

@@ -50,6 +50,9 @@ type ManagerConfig struct {
 	podName                string
 	podNamespace           string
 	maxNodesPerIMEXDomain  int
+	// domainLabelKey labels cliques with the UID of their ComputeDomain, or
+	// of the ComputeDomainDaemonSet for static IMEX daemons.
+	domainLabelKey string
 }
 
 // ControllerConfig holds the configuration for the controller.
@@ -67,6 +70,7 @@ type ControllerConfig struct {
 	podName                string
 	podNamespace           string
 	maxNodesPerIMEXDomain  int
+	domainLabelKey         string
 }
 
 // Controller manages the lifecycle of compute domain operations.
@@ -94,6 +98,7 @@ func NewController(config *ControllerConfig) (*Controller, error) {
 		podName:                config.podName,
 		podNamespace:           config.podNamespace,
 		maxNodesPerIMEXDomain:  config.maxNodesPerIMEXDomain,
+		domainLabelKey:         config.domainLabelKey,
 	}
 
 	// Choose the appropriate daemon info manager based on the feature gate

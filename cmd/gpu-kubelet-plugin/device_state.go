@@ -39,6 +39,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
 	cperrors "k8s.io/kubernetes/pkg/kubelet/checkpointmanager/errors"
+	"k8s.io/mount-utils"
 	"k8s.io/utils/ptr"
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
 
@@ -83,6 +84,7 @@ type DeviceState struct {
 
 	nvdevlib          *deviceLib
 	checkpointManager checkpointmanager.CheckpointManager
+	localIPCManager   *LocalIPCManager
 
 	fmManager *fabricmanager.Manager
 
@@ -159,9 +161,8 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		WithCDIRoot(config.flags.cdiRoot),
 		WithLogger(cdilogger),
 	}
-	var vfioCDIHandler *vfioCDIHandler
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		vfioCDIHandler, err = NewVfioCDIHandler(nvdevlib)
+	if featuregates.Enabled(featuregates.PassthroughSupport) && nvdevlib.IsVfioEnabled() {
+		vfioCDIHandler, err := NewVfioCDIHandler(nvdevlib)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create vfio CDI handler: %w", err)
 		}
@@ -195,11 +196,8 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	}
 
 	var vfioPciManager *VfioPciManager
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
-		vfioPciManager, err = NewVfioPciManager(driver.Root, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
-		if err != nil {
-			return nil, fmt.Errorf("unable to create vfio pci manager: %w", err)
-		}
+	if featuregates.Enabled(featuregates.PassthroughSupport) && nvdevlib.IsVfioEnabled() {
+		vfioPciManager = NewVfioPciManager(driver.Root, hostDriverRoot, nvdevlib, true /* nvidiaEnabled */)
 	}
 
 	fmManager, err := newFabricManager(nvdevlib, driver)
@@ -212,6 +210,10 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		return nil, fmt.Errorf("unable to create checkpoint manager: %w", err)
 	}
 
+	// Keep the manager available when the gate is disabled so previously
+	// prepared claims can still be restored and removed.
+	localIPCManager := NewLocalIPCManager(config.DriverPluginPath(), mount.New(""))
+
 	cpLockPath := filepath.Join(config.DriverPluginPath(), "cp.lock")
 
 	state := &DeviceState{
@@ -223,15 +225,15 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 		config:            config,
 		nvdevlib:          nvdevlib,
 		checkpointManager: checkpointManager,
+		localIPCManager:   localIPCManager,
 		fmManager:         fmManager,
 		cplock:            flock.NewFlock(cpLockPath),
 	}
 	state.checkpointCleanupManager = NewCheckpointCleanupManager(state, config.clientsets.Resource)
 
 	// Attach Fabric Manager partition mappings to every discovered GPU. The
-	// gpuModuleID was resolved from NVML during GPU discovery; the FM Manager
-	// (owned by DeviceState) turns it into the size->partitionId mapping that
-	// VFIO devices publish via their parent GpuInfo.
+	// FM Manager (owned by DeviceState) matches GPU identities to the partition
+	// members. VFIO devices publish the mapping via their parent GpuInfo.
 	if state.fabricManagerPartitioningEnabled() {
 		for _, gpu := range nvdevlib.gpuInfosByUUID {
 			if err := state.attachFabricManagerPartitions(gpu); err != nil {
@@ -268,10 +270,14 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 				if err != nil {
 					return nil, fmt.Errorf("unable to update checkpoint: %w", err)
 				}
-				syncPreparedDevicesGaugeFromCheckpoint(config.flags.nodeName, cp)
+				if err := state.reconcileCheckpointState(cp); err != nil {
+					return nil, err
+				}
 				return state, nil
 			} else if storedBootID == currentBootID {
-				syncPreparedDevicesGaugeFromCheckpoint(config.flags.nodeName, cp)
+				if err := state.reconcileCheckpointState(cp); err != nil {
+					return nil, err
+				}
 				return state, nil
 			} else {
 				klog.Infof("Invalidating checkpoint: checkpoint nodeBootID %q != current %q", storedBootID, currentBootID)
@@ -283,6 +289,9 @@ func NewDeviceState(ctx context.Context, config *Config) (*DeviceState, error) {
 	newCheckpoint := &Checkpoint{V2: &CheckpointV2{NodeBootID: currentBootID}}
 	if err := state.createCheckpoint(ctx, newCheckpoint); err != nil {
 		return nil, fmt.Errorf("unable to create fresh checkpoint: %w", err)
+	}
+	if err := state.reconcileCheckpointState(newCheckpoint); err != nil {
+		return nil, err
 	}
 
 	return state, nil
@@ -319,6 +328,9 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		// Prepare() must be idempotent, as it may be invoked more than once per
 		// claim (and actual device preparation must happen at most once).
 		klog.V(4).Infof("Skip prepare: claim already in PrepareCompleted state: %s", ResourceClaimToString(claim))
+		if err := s.localIPCManager.Restore(claimUID, preparedClaim.Status.Allocation); err != nil {
+			return nil, fmt.Errorf("unable to restore local IPC directory for prepared claim: %w", err)
+		}
 		return preparedClaim.PreparedDevices.GetDevices(), nil
 	}
 
@@ -343,6 +355,13 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 		}
 	}
 
+	// Check host device-node readiness before prepareDevices can mutate MIG,
+	// sharing, passthrough, or Fabric Manager state. A retry first rolls back
+	// mutations left by its prior incomplete attempt above.
+	if err := s.validateClaimCDIDeviceNodes(claim); err != nil {
+		return nil, fmt.Errorf("unable to prepare claim %v: %w", claimUID, err)
+	}
+
 	tucp0 := time.Now()
 	err = s.updateCheckpoint(ctx, func(cp *Checkpoint) {
 		cp.V2.PreparedClaims[claimUID] = PreparedClaim{
@@ -358,6 +377,15 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	klog.V(6).Infof("t_prep_update_checkpoint %.3f s", time.Since(tucp0).Seconds())
 	klog.V(6).Infof("checkpoint updated for claim %v", claimUID)
 
+	localIPCInfo, err := s.localIPCManager.Prepare(claimUID, claim.Status.Allocation)
+	if err != nil {
+		return nil, fmt.Errorf("unable to prepare local IPC directory: %w", err)
+	}
+	var claimContainerEdits *cdiapi.ContainerEdits
+	if localIPCInfo != nil {
+		claimContainerEdits = localIPCInfo.GetCDIContainerEdits()
+	}
+
 	tprep0 := time.Now()
 	preparedDevices, err := s.prepareDevices(ctx, claim, cp)
 	klog.V(6).Infof("t_prep_core %.3f s (claim %s)", time.Since(tprep0).Seconds(), ResourceClaimToString(claim))
@@ -366,7 +394,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	}
 
 	// TODO: Remove this once partitionable device support is introduced for vfio devices.
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 		for _, device := range preparedDevices.GetDevices() {
 			allocatableDevice := s.perGPUAllocatable.GetAllocatableDevice(device.DeviceName)
 			if allocatableDevice == nil {
@@ -380,7 +408,7 @@ func (s *DeviceState) Prepare(ctx context.Context, claim *resourceapi.ResourceCl
 	}
 
 	tccsf0 := time.Now()
-	if err := s.cdi.CreateClaimSpecFile(claimUID, preparedDevices); err != nil {
+	if err := s.cdi.CreateClaimSpecFile(claimUID, preparedDevices, claimContainerEdits); err != nil {
 		return nil, fmt.Errorf("unable to create CDI spec file for claim: %w", err)
 	}
 	klog.V(7).Infof("t_prep_ccsf %.3f s", time.Since(tccsf0).Seconds())
@@ -473,10 +501,14 @@ func (s *DeviceState) DestroyUnknownMIGDevices(ctx context.Context) {
 	}
 
 	var expectedDeviceNames []DeviceName
-	for _, cpclaim := range filtered {
-		for _, res := range cpclaim.Status.Allocation.Devices.Results {
-			expectedDeviceNames = append(expectedDeviceNames, res.Device)
+	for uid, cpclaim := range filtered {
+		names, ok := cpclaim.GetHeldDevices()
+		if !ok {
+			// Everything not on this list is about to be destroyed.
+			klog.Errorf("%s: skip teardown: cannot tell which devices claim %s holds", logpfx, PreparedClaimToString(&cpclaim, uid))
+			return
 		}
+		expectedDeviceNames = append(expectedDeviceNames, names...)
 	}
 
 	klog.Infof("%s: enter teardown routine (%d expect devices: %s)", logpfx, len(expectedDeviceNames), expectedDeviceNames)
@@ -531,7 +563,7 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 	}
 
 	// TODO: Remove this once partitionable device support is introduced for vfio devices.
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 		for _, device := range pc.PreparedDevices.GetDevices() {
 			allocatableDevice := s.perGPUAllocatable.GetAllocatableDevice(device.DeviceName)
 			if allocatableDevice == nil {
@@ -581,6 +613,11 @@ func (s *DeviceState) Unprepare(ctx context.Context, claimRef kubeletplugin.Name
 		// attempting to remove the claim from the checkpoint.
 		klog.Errorf("unable to delete CDI spec file for claim %s: %s", claimRef.String(), err)
 	}
+	if err := s.localIPCManager.Remove(claimUID); err != nil {
+		// Keep the checkpoint entry so kubelet can retry cleanup instead of
+		// orphaning a writable claim directory.
+		return false, fmt.Errorf("unable to remove local IPC directory for claim %s: %w", claimRef.String(), err)
+	}
 
 	// Mutate checkpoint reflecting that all devices for this claim have been
 	// unprepared, by virtue of removing its entry (based on claim UID) from the
@@ -615,6 +652,10 @@ func (s *DeviceState) rollbackPartiallyPreparedClaim(ctx context.Context, cuid s
 		}
 	}
 
+	if err := s.localIPCManager.Remove(cuid); err != nil {
+		return fmt.Errorf("failed to remove partially prepared local IPC directory: %w", err)
+	}
+
 	return nil
 }
 
@@ -641,8 +682,8 @@ func (s *DeviceState) unpreparePartiallyPreparedClaim(ctx context.Context, cuid 
 		}
 	}
 
-	// Attempt rollback of VFIO devices if PassthroughSupport is enabled.
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	// Attempt rollback of VFIO devices if passthrough is available on this node.
+	if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 		vfioDevices := allocDevsForClaim.GetVfioDevices()
 		if len(vfioDevices) > 0 {
 			klog.V(2).Infof("unprepare: VFIO rollback for partially prepared claim %s (devices: %d)", PreparedClaimToString(&pc, cuid), len(vfioDevices))
@@ -729,6 +770,13 @@ func (s *DeviceState) getAllocatableDevicesForClaim(claimUID string, pc Prepared
 // Construct a list of those claims that, according to the current snapshot,
 // have been properly prepared.
 func (s *DeviceState) rollbackPartiallyPreparedMIGDevices(ctx context.Context, claimUID string, pc PreparedClaim, checkpoint *Checkpoint) error {
+	if pc.Status.Allocation == nil {
+		// A claim in this state has no PreparedDevices checkpointed yet, so
+		// there is nothing left to derive a MIG device from.
+		klog.V(4).Infof("Partial rollback: claim %s has no allocation in the checkpoint", PreparedClaimToString(&pc, claimUID))
+		return nil
+	}
+
 	// When DynamicMIG is enabled, try to identify an orphaned MIG device
 	// corresponding to `pc`. To that end, inspect which currently (completely)
 	// prepared claims use which devices.
@@ -740,6 +788,9 @@ func (s *DeviceState) rollbackPartiallyPreparedMIGDevices(ctx context.Context, c
 	}
 
 	for _, r := range pc.Status.Allocation.Devices.Results {
+		if r.Driver != DriverName {
+			continue
+		}
 		devname := r.Device
 		ms, err := NewMigSpecTupleFromCanonicalName(devname)
 		if err != nil {
@@ -796,6 +847,14 @@ func (s *DeviceState) rollbackPartiallyPreparedVFIODevices(ctx context.Context, 
 	return nil
 }
 
+func (s *DeviceState) reconcileCheckpointState(cp *Checkpoint) error {
+	if err := s.localIPCManager.Reconcile(cp.V2.PreparedClaims); err != nil {
+		return fmt.Errorf("unable to reconcile local IPC directories: %w", err)
+	}
+	syncPreparedDevicesGaugeFromCheckpoint(s.config.flags.nodeName, cp)
+	return nil
+}
+
 func (s *DeviceState) createCheckpoint(ctx context.Context, cp *Checkpoint) error {
 	klog.V(6).Info("acquire cplock (create cp)")
 	release, err := s.cplock.Acquire(ctx, flock.WithTimeout(10*time.Second))
@@ -809,7 +868,6 @@ func (s *DeviceState) createCheckpoint(ctx context.Context, cp *Checkpoint) erro
 	if err != nil {
 		return err
 	}
-	syncPreparedDevicesGaugeFromCheckpoint(s.config.flags.nodeName, cp)
 	return nil
 }
 
@@ -974,7 +1032,7 @@ func (s *DeviceState) prepareDevices(ctx context.Context, claim *resourceapi.Res
 		return nil, err
 	}
 
-	if featuregates.Enabled(featuregates.PassthroughSupport) {
+	if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 		vfioGroups := 0
 		for c := range configResultsMap {
 			if _, ok := c.(*configapi.VfioDeviceConfig); ok {
@@ -1135,7 +1193,7 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 	var taintRemoved bool
 	for _, group := range devices {
 		// Unconfigure the vfio-pci devices.
-		if featuregates.Enabled(featuregates.PassthroughSupport) {
+		if featuregates.Enabled(featuregates.PassthroughSupport) && s.nvdevlib.IsVfioEnabled() {
 			err := s.unprepareVfioDevices(ctx, group.Devices.VfioDevices())
 			if err != nil {
 				return false, fmt.Errorf("error unpreparing VFIO devices: %w", err)
@@ -1198,11 +1256,15 @@ func (s *DeviceState) unprepareDevices(ctx context.Context, claimUID string, dev
 			if len(gpuUUIDsToReset) > 0 {
 				defaultInterval := configapi.DefaultTimeSlice
 				tsc := &configapi.TimeSlicingConfig{Interval: &defaultInterval}
-				if err := s.tsManager.SetTimeSlice(gpuUUIDsToReset, tsc); err != nil {
-					if err == nvml.ERROR_NOT_SUPPORTED {
-						klog.Warningf("Unprepare: skip resetting time-slice policy for devices: %v", err)
-					} else {
-						return false, fmt.Errorf("error setting timeslice for devices: %w", err)
+				// Reset each GPU on its own so that a GPU which does not
+				// support time-slicing does not stop the reset of the others.
+				for _, gpuUUID := range gpuUUIDsToReset {
+					if err := s.tsManager.SetTimeSlice([]string{gpuUUID}, tsc); err != nil {
+						if errors.Is(err, nvml.ERROR_NOT_SUPPORTED) {
+							klog.Warningf("Unprepare: skip resetting time-slice policy for GPU %s: %v", gpuUUID, err)
+							continue
+						}
+						return false, fmt.Errorf("error setting timeslice for GPU %s: %w", gpuUUID, err)
 					}
 				}
 			}
@@ -1240,7 +1302,7 @@ func (s *DeviceState) unprepareVfioDevices(ctx context.Context, devices Prepared
 func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) error {
 	switch device.Type() {
 	case GpuDeviceType:
-		if !device.Gpu.vfioEnabled {
+		if !featuregates.Enabled(featuregates.PassthroughSupport) || !s.nvdevlib.IsVfioEnabled() || !device.Gpu.vfioEnabled {
 			return nil
 		}
 		vfioAllocatable, err := s.nvdevlib.discoverVfioDevice(device.Gpu)
@@ -1261,6 +1323,10 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 			return fmt.Errorf("error adding allocatable device: %w", err)
 		}
 		device.Vfio.parent = gpu.Gpu
+		// Always invalidate after rebinding, even if the minor is unchanged.
+		// getDeviceSpecsByUUIDAndMinor only refreshes entries with a mismatched
+		// minor, so a same-minor cache entry could hide a stale host device node.
+		s.cdi.InvalidateDeviceSpec(gpu.Gpu.UUID)
 
 		// The GPU is back on the nvidia driver: its freshly discovered parent
 		// GpuInfo already carries the gpuModuleID (resolved from NVML in
@@ -1278,6 +1344,50 @@ func (s *DeviceState) discoverSiblingAllocatables(device *AllocatableDevice) err
 	return nil
 }
 
+// validateClaimCDIDeviceNodes verifies that nvcdi can discover the common and
+// per-GPU device nodes needed by a claim before prepareDevices mutates device
+// state. MIG allocations use their physical parent GPU as the parent
+// node is injected into the workload. VFIO allocations are skipped because
+// they use /dev/vfio instead of NVIDIA device nodes.
+func (s *DeviceState) validateClaimCDIDeviceNodes(claim *resourceapi.ResourceClaim) error {
+	if claim.Status.Allocation == nil {
+		return nil
+	}
+
+	gpus := make(map[string]struct{})
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		if result.Driver != DriverName {
+			continue
+		}
+		device := s.perGPUAllocatable.GetAllocatableDevice(result.Device)
+		if device == nil {
+			return fmt.Errorf("allocatable not found for device %q", result.Device)
+		}
+		switch device.Type() {
+		case GpuDeviceType:
+			gpus[device.Gpu.UUID] = struct{}{}
+		case MigStaticDeviceType:
+			gpus[device.MigStatic.ParentUUID] = struct{}{}
+		case MigDynamicDeviceType:
+			gpus[device.MigDynamic.Parent.UUID] = struct{}{}
+		case VfioDeviceType:
+			continue
+		}
+	}
+	if len(gpus) == 0 {
+		return nil
+	}
+	if _, err := s.cdi.GetCommonEditsCached(); err != nil {
+		return fmt.Errorf("failed to validate CDI common device nodes: %w", err)
+	}
+	for uuid := range gpus {
+		if _, err := s.cdi.GetDeviceSpecsByUUIDCached(uuid); err != nil {
+			return fmt.Errorf("failed to validate CDI device node for GPU %q: %w", uuid, err)
+		}
+	}
+	return nil
+}
+
 func (s *DeviceState) applyConfig(ctx context.Context, config configapi.Interface, claim *resourceapi.ResourceClaim, results []*resourceapi.DeviceRequestAllocationResult, cp *Checkpoint) (*DeviceConfigState, error) {
 	switch castConfig := config.(type) {
 	case *configapi.GpuConfig:
@@ -1288,6 +1398,9 @@ func (s *DeviceState) applyConfig(ctx context.Context, config configapi.Interfac
 		return s.applySharingConfig(ctx, castConfig.Sharing, claim, results, cp)
 	case *configapi.VfioDeviceConfig:
 		klog.V(7).Infof("applySharingConfig() for VfioDeviceConfig")
+		if !featuregates.Enabled(featuregates.PassthroughSupport) || !s.nvdevlib.IsVfioEnabled() {
+			return nil, errors.New("VFIO is unavailable on this node")
+		}
 		return s.applyVfioDeviceConfig(ctx, castConfig, claim, results)
 	default:
 		return nil, fmt.Errorf("unknown config type: %T", castConfig)
@@ -1395,7 +1508,7 @@ func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configa
 	}
 
 	for i, r := range results {
-		if err := s.vfioPciManager.Configure(ctx, infos[i]); err != nil {
+		if err := s.vfioPciManager.Configure(ctx, config, infos[i]); err != nil {
 			return nil, fmt.Errorf("error configuring vfio device %q: %w", r.Device, err)
 		}
 	}
@@ -1403,24 +1516,26 @@ func (s *DeviceState) applyVfioDeviceConfig(ctx context.Context, config *configa
 	return &configState, nil
 }
 
-// resolveFabricPartition resolves the FM partition formed by the given
-// set of physical GPUs, using each GPU's gpuModuleID (resolved from NVML at
-// discovery).
+// resolveFabricPartition matches the allocated GPUs to FM members by identity,
+// then selects the partition with exactly that set of FM physical IDs.
 func (s *DeviceState) resolveFabricPartition(gpus []*GpuInfo) (int, error) {
-	moduleIDs := make([]int, 0, len(gpus))
+	physicalIDs := make([]int, 0, len(gpus))
 	for _, gpu := range gpus {
-		if gpu == nil || gpu.gpuModuleID == 0 {
-			pci := ""
-			if gpu != nil {
-				pci = gpu.pciBusID
-			}
-			return 0, fmt.Errorf("fabric manager: no gpuModuleID for GPU at PCI %q", pci)
+		if gpu == nil {
+			return 0, fmt.Errorf("fabric manager: missing physical GPU identity")
 		}
-		moduleIDs = append(moduleIDs, gpu.gpuModuleID)
+		physicalID, found, err := s.fmManager.PhysicalIDForGPU(gpu.UUID, gpu.pciBusID, gpu.gpuModuleID)
+		if err != nil {
+			return 0, err
+		}
+		if !found {
+			return 0, fmt.Errorf("fabric manager: no member for GPU UUID %q PCI %q (NVML module ID %d)", gpu.UUID, gpu.pciBusID, gpu.gpuModuleID)
+		}
+		physicalIDs = append(physicalIDs, physicalID)
 	}
-	partitionID, ok := s.fmManager.FindPartitionByModuleIDs(moduleIDs)
+	partitionID, ok := s.fmManager.FindPartitionByPhysicalIDs(physicalIDs)
 	if !ok {
-		return 0, fmt.Errorf("fabric manager: GPU module set %v does not match any FM partition", moduleIDs)
+		return 0, fmt.Errorf("fabric manager: GPU physical ID set %v does not match any FM partition", physicalIDs)
 	}
 	return partitionID, nil
 }
@@ -1435,7 +1550,7 @@ func (s *DeviceState) gpuInfosFromPreparedClaim(results []resourceapi.DeviceRequ
 		}
 		device := s.perGPUAllocatable.GetAllocatableDevice(r.Device)
 		if device == nil {
-			klog.V(6).Infof("allocatable not found for device %q", r.Device)
+			klog.Warningf("allocatable not found for device %q", r.Device)
 			continue
 		}
 		switch device.Type() {
@@ -1482,28 +1597,41 @@ func (s *DeviceState) deactivateFabricPartition(claimUID string, pc *PreparedCla
 	if err := s.fmManager.DeactivatePartition(partitionID); err != nil {
 		return fmt.Errorf("deactivating fabric partition %d: %w", partitionID, err)
 	}
+	// Full GPUs stay on the NVIDIA driver and do not pass through VFIO
+	// Unconfigure, which restores persistence. Enable it only after the
+	// partition is inactive, including on retries after partial cleanup.
+	for _, device := range s.getAllocatableDevicesForClaim(claimUID, *pc) {
+		if device.Type() != GpuDeviceType {
+			continue
+		}
+		gpu := device.Gpu
+		if err := s.nvdevlib.enableGPUPersistenceMode(gpu.pciBusID); err != nil {
+			return fmt.Errorf("enabling persistence for GPU %s (PCI %s): %w", gpu.UUID, gpu.pciBusID, err)
+		}
+	}
 	return nil
 }
 
-// attachFabricManagerPartitions populates the given GPU's size->partitionId
-// mapping from its gpuModuleID using the FM Manager. It is a no-op when Fabric
-// Manager partitioning is disabled. It gracefully skips GPUs whose module ID
-// could not be resolved from NVML (e.g. a GPU that was already bound to
-// vfio-pci at discovery time).
+// attachFabricManagerPartitions populates partition attributes using the GPU's
+// identity in FM. Keep the NVML module ID unchanged for the gpuModuleID attribute.
 func (s *DeviceState) attachFabricManagerPartitions(gpu *GpuInfo) error {
 	if !s.fabricManagerPartitioningEnabled() || gpu == nil {
 		return nil
 	}
-	if gpu.gpuModuleID == 0 {
-		klog.Warningf("GPU %s has no gpuModuleID; skipping Fabric Manager partition attributes. "+
-			"This happens when the GPU was bound to vfio-pci before discovery (e.g. an active passthrough claim across a plugin restart).",
-			gpu.CanonicalName())
+	physicalID, found, err := s.fmManager.PhysicalIDForGPU(gpu.UUID, gpu.pciBusID, gpu.gpuModuleID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		klog.Warningf("GPU UUID %q PCI %q has no Fabric Manager member; skipping partition attributes", gpu.UUID, gpu.pciBusID)
+		gpu.partitionsBySize = nil
 		return nil
 	}
-	bySize, err := s.fmManager.GetPartitionsBySizeByModuleID(gpu.gpuModuleID)
+	bySize, err := s.fmManager.GetPartitionsBySizeByPhysicalID(physicalID)
 	if err != nil {
-		return fmt.Errorf("getting partition-by-size mapping for moduleID %d: %w", gpu.gpuModuleID, err)
+		return fmt.Errorf("getting partition-by-size mapping for physical ID %d: %w", physicalID, err)
 	}
+	klog.V(4).Infof("Fabric Manager: GPU UUID %s PCI %s NVML module ID %d maps to physical ID %d", gpu.UUID, gpu.pciBusID, gpu.gpuModuleID, physicalID)
 	gpu.partitionsBySize = bySize
 	return nil
 }
@@ -1532,7 +1660,19 @@ func (s *DeviceState) activateFabricPartition(claim *resourceapi.ResourceClaim) 
 	// step failed) that hits an already-active partition is a no-op rather than
 	// an FM in-use error.
 	klog.V(2).Infof("Fabric Manager: activating partition %d for %d-GPU claim %s", partitionID, len(gpus), ResourceClaimToString(claim))
-	if err := s.fmManager.ActivatePartition(partitionID); err != nil {
+	if err := s.fmManager.ActivatePartition(partitionID, func() error {
+		// FM can fail with NV_ERR_IN_USE while persistence keeps a GPU
+		// initialized. VFIO Configure disables persistence too, but runs
+		// after activation and does not cover full-GPU container claims.
+		for _, gpu := range gpus {
+			// Use nvidia-smi even without a persistenced socket: VFIO cleanup
+			// can enable legacy persistence directly through NVML.
+			if err := s.nvdevlib.disableGPUPersistenceMode(gpu.pciBusID); err != nil {
+				return fmt.Errorf("disabling persistence for GPU %s (PCI %s): %w", gpu.UUID, gpu.pciBusID, err)
+			}
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("activating fabric partition %d: %w", partitionID, err)
 	}
 	return nil
@@ -1909,11 +2049,14 @@ func preparedClaimDeviceHasAdminAccess(claim *PreparedClaim, deviceName DeviceNa
 // Make this best-effort for now (do not return an error, but log details).
 func (s *DeviceState) deleteMigDevIfExistsAndNotUsedByCompletedClaim(ms *MigSpecTuple, dname DeviceName, completelyPreparedClaims PreparedClaimsByUID) error {
 	for uid, claim := range completelyPreparedClaims {
-		for _, res := range claim.Status.Allocation.Devices.Results {
-			if res.Device == dname {
-				klog.V(1).Infof("Device %s is in use by completely prepared claim %s", dname, PreparedClaimToString(&claim, uid))
-				return nil
-			}
+		names, ok := claim.GetHeldDevices()
+		if !ok {
+			klog.Warningf("Keep device %s: cannot tell which devices claim %s holds", dname, PreparedClaimToString(&claim, uid))
+			return nil
+		}
+		if slices.Contains(names, dname) {
+			klog.V(1).Infof("Device %s is in use by completely prepared claim %s", dname, PreparedClaimToString(&claim, uid))
+			return nil
 		}
 	}
 

@@ -56,9 +56,8 @@ type GpuInfo struct {
 	maxCapacities PartCapacityMap
 	memSliceCount int
 
-	// Fabric Manager attributes. Populated only
-	// when an FM Manager is available and the GPU is visible to NVML at
-	// discovery time.
+	// NVML module ID, published when FM partitioning is enabled. This is
+	// distinct from FM's physical GPU ID on some platforms.
 	gpuModuleID int
 
 	// partitionsBySize maps an FM partition size (number of GPUs in the
@@ -118,7 +117,7 @@ type VfioDeviceInfo struct {
 // CanonicalName returns the nameused for device announcement (in ResourceSlice
 // objects). There is quite a bit of history to using the minor number for
 // device announcement. Some context can be found at
-// https://sigs.k8s.io/dra-driver-nvidia-gpu/issues/563#issuecomment-3345631087.
+// https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/issues/563#issuecomment-3345631087.
 func (d *GpuInfo) CanonicalName() DeviceName {
 	return fmt.Sprintf("gpu-%d", d.minor)
 }
@@ -210,9 +209,9 @@ func (d *GpuInfo) Attributes() map[resourceapi.QualifiedName]resourceapi.DeviceA
 	return attrs
 }
 
-// addFabricManagerAttributes publishes the Fabric Manager-derived attributes
-// (`gpuModuleID` and `partitionN`) for this physical GPU. The values are
-// resolved from NVML / FM at discovery time (see attachFabricManagerPartitions).
+// addFabricManagerAttributes publishes the NVML-reported gpuModuleID and
+// Fabric Manager partitionN attributes for this physical GPU. Partition
+// membership is resolved at discovery time (see attachFabricManagerPartitions).
 func (d *GpuInfo) addFabricManagerAttributes(attrs map[resourceapi.QualifiedName]resourceapi.DeviceAttribute) {
 	if d == nil {
 		return

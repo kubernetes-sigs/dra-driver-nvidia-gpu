@@ -52,6 +52,14 @@
 {{- fail $error }}
 {{- end }}
 
+{{- if and .Values.resources.computeDomains.enabled (gt (int .Values.controller.replicas) 1) (not .Values.controller.leaderElection.enabled) }}
+{{- $error := "" }}
+{{- $error = printf "%s\ncontroller.replicas is set to %d but controller.leaderElection.enabled is false." $error (int .Values.controller.replicas) }}
+{{- $error = printf "%s\nWithout leader election, every replica reconciles ComputeDomains concurrently." $error }}
+{{- $error = printf "%s\nSet controller.leaderElection.enabled=true, or set controller.replicas=1." $error }}
+{{- fail $error }}
+{{- end }}
+
 {{- if .Values.webhook.enabled }}
 {{- if not .Values.webhook.tls }}
 {{- $error := "" }}

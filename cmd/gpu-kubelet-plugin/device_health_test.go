@@ -44,12 +44,24 @@ type mockNVMLLibrary struct {
 	nvml.Interface
 	deviceGetHandleByPciBusIdFunc  func(string) (nvml.Device, nvml.Return)
 	deviceGetHandleByPciBusIdCalls int
+	deviceGetHandleByUUIDFunc      func(string) (nvml.Device, nvml.Return)
+	deviceGetHandleByUUIDCalls     int
+	deviceGetHandleByUUIDArgs      []string
 }
 
 func (m *mockNVMLLibrary) DeviceGetHandleByPciBusId(busID string) (nvml.Device, nvml.Return) {
 	m.deviceGetHandleByPciBusIdCalls++
 	return m.deviceGetHandleByPciBusIdFunc(busID)
 }
+
+func (m *mockNVMLLibrary) DeviceGetHandleByUUID(uuid string) (nvml.Device, nvml.Return) {
+	m.deviceGetHandleByUUIDCalls++
+	m.deviceGetHandleByUUIDArgs = append(m.deviceGetHandleByUUIDArgs, uuid)
+	return m.deviceGetHandleByUUIDFunc(uuid)
+}
+
+func (m *mockNVMLLibrary) SystemGetDriverVersion() (string, nvml.Return)  { return "", nvml.SUCCESS }
+func (m *mockNVMLLibrary) SystemGetCudaDriverVersion() (int, nvml.Return) { return 0, nvml.SUCCESS }
 
 // mockHealthMonitor implements deviceHealthMonitor for testing healthEventToTaint.
 type mockHealthMonitor struct {
@@ -198,10 +210,10 @@ func TestPartGetDeviceIncludesHealthTaints(t *testing.T) {
 		cudaDriverVersion:     "13.0",
 	}
 	dev := &AllocatableDevice{MigDynamic: &MigSpec{
-		Parent:        parent,
-		Profile:       &nvdev.MigProfileInfo{G: 1, GB: 5, GIProfileID: 19},
-		GIProfileInfo: nvml.GpuInstanceProfileInfo{Id: 19},
-		Placement:     nvml.GpuInstancePlacement{Start: 0, Size: 1},
+		Parent:            parent,
+		CandidateProfiles: []nvdev.MigProfile{&nvdev.MigProfileInfo{G: 1, GB: 5, GIProfileID: 19}},
+		GIProfileInfo:     nvml.GpuInstanceProfileInfo{Id: 19},
+		Placement:         nvml.GpuInstancePlacement{Start: 0, Size: 1},
 	}}
 	taint := &resourceapi.DeviceTaint{
 		Key:    TaintKeyXID,
@@ -761,4 +773,66 @@ func TestClearDynamicMIGXIDTaint(t *testing.T) {
 
 	require.Len(t, static.Taints(), 1)
 	assert.Equal(t, TaintKeyXID, static.Taints()[0].Key)
+}
+func TestSendBatchedHealthEvent(t *testing.T) {
+	devA := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-a"}}
+	devB := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-b"}}
+
+	t.Run("empty devices sends nothing", func(t *testing.T) {
+		m := &nvmlDeviceHealthMonitor{unhealthy: make(chan *DeviceHealthEvent, 1)}
+		m.sendBatchedHealthEvent(nil, HealthEventGPULost)
+		assert.Len(t, m.unhealthy, 0)
+	})
+
+	t.Run("normal batched send", func(t *testing.T) {
+		m := &nvmlDeviceHealthMonitor{unhealthy: make(chan *DeviceHealthEvent, 1)}
+		m.sendBatchedHealthEvent([]*AllocatableDevice{devA, devB}, HealthEventGPULost)
+		require.Len(t, m.unhealthy, 1)
+		event := <-m.unhealthy
+		assert.Equal(t, HealthEventGPULost, event.EventType)
+		assert.Len(t, event.Devices, 2)
+	})
+
+	t.Run("full channel drops without blocking", func(t *testing.T) {
+		m := &nvmlDeviceHealthMonitor{unhealthy: make(chan *DeviceHealthEvent, 1)}
+		m.unhealthy <- &DeviceHealthEvent{} // fill the channel
+		// Must return instead of blocking; the second event is dropped.
+		m.sendBatchedHealthEvent([]*AllocatableDevice{devA}, HealthEventUnmonitored)
+		assert.Len(t, m.unhealthy, 1)
+	})
+}
+
+func TestSendHealthEventForAllDevices(t *testing.T) {
+	devA := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-a"}}
+	devB := &AllocatableDevice{MigStatic: &MigDeviceInfo{ParentUUID: "GPU-a"}}
+	m := &nvmlDeviceHealthMonitor{
+		unhealthy: make(chan *DeviceHealthEvent, 1),
+		perGPUAllocatable: &PerGPUAllocatableDevices{
+			allocatablesMap: map[PCIBusID]AllocatableDevices{
+				"0000:01:00.0": {"gpu": devA, "mig": devB},
+			},
+		},
+	}
+
+	m.sendHealthEventForAllDevices(HealthEventGPULost)
+
+	require.Len(t, m.unhealthy, 1)
+	event := <-m.unhealthy
+	assert.Equal(t, HealthEventGPULost, event.EventType)
+	assert.Len(t, event.Devices, 2)
+}
+
+func TestResolveDeviceByEventAddressUnknownPCIBus(t *testing.T) {
+	// Parent GPU is in the UUID index but its PCI bus is absent from the
+	// allocatable inventory: an inconsistent inventory must surface an error.
+	parent := &GpuInfo{UUID: "GPU-parent-1", pciBusID: "0000:01:00.0"}
+	monitor := &nvmlDeviceHealthMonitor{
+		perGPUAllocatable: &PerGPUAllocatableDevices{
+			allocatablesMap: map[PCIBusID]AllocatableDevices{},
+		},
+		gpuInfosByUUID: map[string]*GpuInfo{parent.UUID: parent},
+	}
+
+	_, err := monitor.resolveDeviceByEventAddress(parent.UUID, nil, FullGPUInstanceID, FullGPUInstanceID)
+	require.ErrorContains(t, err, "failed to find PCI Bus ID")
 }

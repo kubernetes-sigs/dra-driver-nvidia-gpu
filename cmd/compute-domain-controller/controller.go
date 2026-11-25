@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/klog/v2"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
@@ -44,8 +45,20 @@ type ManagerConfig struct {
 	// maxNodesPerIMEXDomain is the maximum number of nodes per IMEX domain to allocate
 	maxNodesPerIMEXDomain int
 
-	// imexConfig holds the resolved imex.mode / imex.isolation configuration.
+	// imexConfig holds the resolved imex.daemonLifecycle configuration.
 	imexConfig imex.Config
+
+	// imexConfigOverrides holds arbitrary nvidia-imex daemon config file
+	// overrides (resources.computeDomains.imex.config Helm value), passed
+	// through to dynamically rendered compute-domain-daemon DaemonSets.
+	imexConfigOverrides map[string]string
+
+	// imexMaxChannels bounds the reserved IMEX channel IDs.
+	imexMaxChannels int
+
+	// claimAdmission is false if the cluster does not serve
+	// resource.k8s.io/v1 ResourceClaims.
+	claimAdmission bool
 
 	// clientsets provides access to various Kubernetes API client interfaces
 	clientsets flags.ClientSets
@@ -70,6 +83,9 @@ type ManagerConfig struct {
 
 	// imagePullSecretNames are the names of the image pull secrets to apply to dynamically rendered compute-domain-daemon
 	imagePullSecretNames []string
+
+	// cdDaemonPriorityClassName is the priority class for dynamically rendered compute-domain-daemon.
+	cdDaemonPriorityClassName string
 }
 
 // Controller manages the lifecycle of the DRA driver and its components.
@@ -90,19 +106,31 @@ func (c *Controller) Run(ctx context.Context) error {
 	workQueue := workqueue.New(workqueue.DefaultControllerRateLimiter())
 
 	managerConfig := &ManagerConfig{
-		driverName:            c.config.driverName,
-		driverNamespace:       c.config.flags.namespace,
-		additionalNamespaces:  c.config.flags.additionalNamespaces.Value(),
-		imageName:             c.config.flags.imageName,
-		maxNodesPerIMEXDomain: c.config.flags.maxNodesPerIMEXDomain,
-		imexConfig:            c.config.imexConfig,
-		clientsets:            c.config.clientsets,
-		workQueue:             workQueue,
-		logVerbosityCDDaemon:  c.config.flags.logVerbosityCDDaemon,
-		httpEndpoint:          c.config.flags.httpEndpoint,
-		metricsPath:           c.config.flags.metricsPath,
-		imagePullSecretNames:  c.config.imagePullSecretNames,
+		driverName:                c.config.driverName,
+		driverNamespace:           c.config.flags.namespace,
+		additionalNamespaces:      c.config.flags.additionalNamespaces.Value(),
+		imageName:                 c.config.flags.imageName,
+		maxNodesPerIMEXDomain:     c.config.flags.maxNodesPerIMEXDomain,
+		imexConfig:                c.config.imexConfig,
+		imexConfigOverrides:       c.config.imexConfigOverrides,
+		imexMaxChannels:           c.config.flags.imexMaxChannels,
+		clientsets:                c.config.clientsets,
+		workQueue:                 workQueue,
+		logVerbosityCDDaemon:      c.config.flags.logVerbosityCDDaemon,
+		httpEndpoint:              c.config.flags.httpEndpoint,
+		metricsPath:               c.config.flags.metricsPath,
+		imagePullSecretNames:      c.config.imagePullSecretNames,
+		cdDaemonPriorityClassName: c.config.cdDaemonPriorityClassName,
 	}
+
+	claimAdmission, err := claimAdmissionSupported(c.config.clientsets.Core)
+	if err != nil {
+		return err
+	}
+	if !claimAdmission {
+		klog.Infof("Not admitting IMEX channels: %s ResourceClaims are not served", resourceapi.SchemeGroupVersion)
+	}
+	managerConfig.claimAdmission = claimAdmission
 
 	// TODO: log full, nested cliFlags structure.
 	klog.Infof("controller manager config: %+v", managerConfig)
@@ -113,8 +141,24 @@ func (c *Controller) Run(ctx context.Context) error {
 		return fmt.Errorf("error starting ComputeDomain manager: %w", err)
 	}
 
+	// Static IMEX daemons are shared by all ComputeDomains.
+	var cddsManager *ComputeDomainDaemonSetManager
+	if !managerConfig.imexConfig.StaticDaemon() {
+		reportStaticDaemonsDisabled(ctx, managerConfig)
+	} else {
+		cddsManager = NewComputeDomainDaemonSetManager(managerConfig, cdManager.claimAdmissionManager.channelClaimNodes)
+		if err := cddsManager.Start(ctx); err != nil {
+			return fmt.Errorf("error starting ComputeDomainDaemonSet manager: %w", err)
+		}
+	}
+
 	workQueue.Run(ctx)
 
+	if cddsManager != nil {
+		if err := cddsManager.Stop(); err != nil {
+			return fmt.Errorf("error stopping ComputeDomainDaemonSet manager: %w", err)
+		}
+	}
 	if err := cdManager.Stop(); err != nil {
 		return fmt.Errorf("error stopping ComputeDomain manager: %w", err)
 	}

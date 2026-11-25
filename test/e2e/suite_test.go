@@ -24,13 +24,15 @@ import (
 	. "github.com/onsi/gomega"
 
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	"sigs.k8s.io/dra-driver-nvidia-gpu/test/e2e/framework"
 )
 
 var (
-	cs  *kubernetes.Clientset
-	gpu *framework.GPUDetails
+	cs         *kubernetes.Clientset
+	restConfig *rest.Config
+	gpu        *framework.GPUDetails
 )
 
 func TestE2E(t *testing.T) {
@@ -40,7 +42,7 @@ func TestE2E(t *testing.T) {
 
 var _ = BeforeSuite(func() {
 	var err error
-	cs, _, err = framework.NewClientset()
+	cs, restConfig, err = framework.NewClientset()
 	Expect(err).NotTo(HaveOccurred(), "build kubernetes client")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

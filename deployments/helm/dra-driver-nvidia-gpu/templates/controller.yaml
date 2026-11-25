@@ -24,6 +24,16 @@ metadata:
     {{- include "dra-driver-nvidia-gpu.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.controller.replicas }}
+  {{- if not .Values.controller.leaderElection.enabled }}
+  # Without leader election, avoid two controllers assigning IMEX channels at
+  # the same time during an update. This keeps the RollingUpdate type, as
+  # switching to Recreate fails for upgrades applied server-side.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  {{- end }}
   selector:
     matchLabels:
       {{- include "dra-driver-nvidia-gpu.selectorLabels" (dict "context" . "componentName" "controller") | nindent 6 }}
@@ -92,6 +102,12 @@ spec:
         - name: CD_DAEMON_IMAGE_PULL_SECRET_NAMES
           value: "{{- range $i, $s := .Values.imagePullSecrets }}{{ if $i }},{{ end }}{{ $s.name }}{{ end }}"
         {{- end }}
+        # Re-use the priority class name of the controller with the rendered
+        # compute domain daemon pod to prevent pod eviction
+        {{- if .Values.controller.priorityClassName }}
+        - name: CD_DAEMON_PRIORITY_CLASS_NAME
+          value: "{{ .Values.controller.priorityClassName }}"
+        {{- end }}
         # Use runc: explicit "void"; otherwise we inherit "all".
         - name: NVIDIA_VISIBLE_DEVICES
           value: void
@@ -100,10 +116,18 @@ spec:
         - name: FEATURE_GATES
           value: "{{ range $key, $value := .Values.featureGates }}{{ $key }}={{ $value }},{{ end }}"
         {{- end }}
-        - name: IMEX_MODE
-          value: "{{ .Values.resources.computeDomains.imex.mode }}"
-        - name: IMEX_ISOLATION
-          value: "{{ .Values.resources.computeDomains.imex.isolation }}"
+        - name: IMEX_DAEMON_LIFECYCLE
+          value: "{{ include "dra-driver-nvidia-gpu.imexDaemonLifecycle" . }}"
+        - name: IMEX_MAX_CHANNELS
+          value: "{{ .Values.resources.computeDomains.imex.maxChannels }}"
+        - name: KUBE_API_QPS
+          value: "{{ .Values.controller.kubeAPI.qps }}"
+        - name: KUBE_API_BURST
+          value: "{{ .Values.controller.kubeAPI.burst }}"
+        {{- if .Values.resources.computeDomains.imex.config }}
+        - name: IMEX_CONFIG_OVERRIDES
+          value: "{{ range $key, $value := .Values.resources.computeDomains.imex.config }}{{ $key }}={{ $value }},{{ end }}"
+        {{- end }}
         {{- with .Values.controller.containers.computeDomain.env }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/require"
 	resourceapi "k8s.io/api/resource/v1"
 )
@@ -203,6 +204,58 @@ func TestSetMax(t *testing.T) {
 	})
 }
 
+func TestDeviceLibGetGpuInfoByMinor(t *testing.T) {
+	tests := map[string]struct {
+		gpuInfosByUUID map[string]*GpuInfo
+		minor          GPUMinor
+		expectedUUID   string
+		expectedError  string
+	}{
+		"finds the GPU with the matching minor": {
+			gpuInfosByUUID: map[string]*GpuInfo{
+				"GPU-1": {UUID: "GPU-1", minor: 1},
+				"GPU-2": {UUID: "GPU-2", minor: 2},
+			},
+			minor:        2,
+			expectedUUID: "GPU-2",
+		},
+		"finds a GPU with minor zero": {
+			gpuInfosByUUID: map[string]*GpuInfo{
+				"GPU-0": {UUID: "GPU-0", minor: 0},
+			},
+			minor:        0,
+			expectedUUID: "GPU-0",
+		},
+		"returns an error when the minor is not found": {
+			gpuInfosByUUID: map[string]*GpuInfo{
+				"GPU-1": {UUID: "GPU-1", minor: 1},
+			},
+			minor:         2,
+			expectedError: "gpu info not found for minor 2",
+		},
+		"returns an error when no GPUs are known": {
+			minor:         1,
+			expectedError: "gpu info not found for minor 1",
+		},
+	}
+
+	for description, tc := range tests {
+		t.Run(description, func(t *testing.T) {
+			l := deviceLib{gpuInfosByUUID: tc.gpuInfosByUUID}
+
+			gpuInfo, err := l.getGpuInfoByMinor(tc.minor)
+			if tc.expectedError != "" {
+				require.EqualError(t, err, tc.expectedError)
+				require.Nil(t, gpuInfo)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tc.expectedUUID, gpuInfo.UUID)
+		})
+	}
+}
+
 // fakeSMI replaces the nvidia-smi binary and the NVML library. setTimeSlice and
 // setComputeMode run these two files.
 type fakeSMI struct {
@@ -282,6 +335,23 @@ func TestDeviceLibSetTimeSlice(t *testing.T) {
 		require.Error(t, l.setTimeSlice([]string{"GPU-1", "GPU-2"}, 5))
 
 		require.Len(t, smi.invocations(t), 1)
+	})
+
+	t.Run("a not-supported exit code wraps nvml.ERROR_NOT_SUPPORTED", func(t *testing.T) {
+		smi := newFakeSMI(t, 3)
+		l := deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath}
+
+		err := l.setTimeSlice([]string{"GPU-1"}, 5)
+		require.ErrorIs(t, err, nvml.ERROR_NOT_SUPPORTED)
+	})
+
+	t.Run("other exit codes do not wrap nvml.ERROR_NOT_SUPPORTED", func(t *testing.T) {
+		smi := newFakeSMI(t, 1)
+		l := deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath}
+
+		err := l.setTimeSlice([]string{"GPU-1"}, 5)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, nvml.ERROR_NOT_SUPPORTED)
 	})
 
 	t.Run("the driver library is prepended to an existing LD_PRELOAD", func(t *testing.T) {

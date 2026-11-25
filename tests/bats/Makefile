@@ -41,10 +41,27 @@ TEST_CRD_UPGRADE_TARGET_GIT_REF ?= "main"
 
 TEST_NVIDIA_DRIVER_ROOT ?= "/run/nvidia/driver"
 
+# Optional image override for the chart under test. TEST_IMAGE must contain a
+# repository and tag, for example registry.example.com/driver:dev. The pull
+# policy is left to the chart default unless TEST_IMAGE_PULL_POLICY is set.
+# TEST_IMAGE_PULL_SECRETS is an optional comma-separated list of image pull
+# secret names that already exist in the chart namespace.
+TEST_IMAGE ?=
+TEST_IMAGE_PULL_POLICY ?=
+TEST_IMAGE_PULL_SECRETS ?=
+
+# Identifies the CI environment for environment-specific test behavior.
+# This will be overriden by the CI-specific hack/ci e2e scripts.
+TEST_CI ?=
+
+# Whether the test GPUs support toggling MIG mode. Set to false for GPUs where
+# MIG mode is permanently enabled and the test suite must not try to disable it.
+TEST_MIG_MODE_TOGGLE_SUPPORTED ?= true
+
 # TODO: calculate precise, expected container image spec,
 # and test for that in test suite, for example:
 # `registry.k8s.io/dra-driver-nvidia/dra-driver-nvidia-gpu:v25.8.0-dev`
-TEST_EXPECTED_IMAGE_SPEC_SUBSTRING ?= $(VERSION)
+TEST_EXPECTED_IMAGE_SPEC_SUBSTRING ?= $(if $(strip $(TEST_IMAGE)),$(TEST_IMAGE),$(VERSION))
 
 ifneq ($(TEST_CHART_LOCAL),"false")
 TEST_CHART_REPO = "deployments/helm/dra-driver-nvidia-gpu"
@@ -109,13 +126,32 @@ DOCKER_ENVS = \
 	--env TEST_GPU_STRESS_DELAY=$(TEST_GPU_STRESS_DELAY) \
 	--env TEST_CRD_UPGRADE_TARGET_GIT_REF=$(TEST_CRD_UPGRADE_TARGET_GIT_REF) \
 	--env TEST_NVIDIA_DRIVER_ROOT=$(TEST_NVIDIA_DRIVER_ROOT) \
+	--env TEST_IMAGE=$(TEST_IMAGE) \
+	--env TEST_IMAGE_PULL_POLICY=$(TEST_IMAGE_PULL_POLICY) \
+	--env TEST_IMAGE_PULL_SECRETS=$(TEST_IMAGE_PULL_SECRETS) \
+	--env TEST_CI=$(TEST_CI) \
+	--env TEST_MIG_MODE_TOGGLE_SUPPORTED=$(TEST_MIG_MODE_TOGGLE_SUPPORTED) \
 	--env TEST_EXPECTED_IMAGE_SPEC_SUBSTRING=$(TEST_EXPECTED_IMAGE_SPEC_SUBSTRING) \
 	--env SKIP_CLEANUP=$(SKIP_CLEANUP) \
 	--env DISABLE_COMPUTE_DOMAINS=$(DISABLE_COMPUTE_DOMAINS) \
 	--env TEST_DRA_LIST_TYPE_ATTRIBUTES=$(TEST_DRA_LIST_TYPE_ATTRIBUTES) \
 	--env NVMM_PATH=$(NVMM_PATH) \
 	--env TEST_ALT_PROC_DEVICES=$(TEST_ALT_PROC_DEVICES) \
-	--env MOCK_NVML=$(MOCK_NVML)
+	--env MOCK_NVML=$(MOCK_NVML) \
+	--env TEST_CD_MODE=$(TEST_CD_MODE) \
+	--env TEST_CD_IMAGE=$(TEST_CD_IMAGE) \
+	--env TEST_CD_READY_TIMEOUT=$(TEST_CD_READY_TIMEOUT) \
+	--env TEST_CD_CLEANUP_TIMEOUT=$(TEST_CD_CLEANUP_TIMEOUT) \
+	--env TEST_CD_STUCK_TIMEOUT=$(TEST_CD_STUCK_TIMEOUT) \
+	--env TEST_CD_CHURN_DURATION=$(TEST_CD_CHURN_DURATION) \
+	--env TEST_CD_CHURN_WORKERS=$(TEST_CD_CHURN_WORKERS) \
+	--env TEST_CD_CHURN_NODES_PER_CD=$(TEST_CD_CHURN_NODES_PER_CD) \
+	--env TEST_CD_CHURN_MIN_LIFETIME=$(TEST_CD_CHURN_MIN_LIFETIME) \
+	--env TEST_CD_CHURN_MAX_LIFETIME=$(TEST_CD_CHURN_MAX_LIFETIME) \
+	--env TEST_CD_FORCE_DELETE_PERCENT=$(TEST_CD_FORCE_DELETE_PERCENT) \
+	--env TEST_CD_CHAOS=$(TEST_CD_CHAOS) \
+	--env TEST_CD_CHAOS_INTERVAL=$(TEST_CD_CHAOS_INTERVAL) \
+	--env TEST_CD_CHURN_SEED=$(TEST_CD_CHURN_SEED)
 
 DOCKER_UID := $(shell id -u)
 DOCKER_GID := $(shell id -g)
@@ -177,7 +213,7 @@ runner-image:
 # suite/file 'setup' in bats, but we'd lose output on success). During dev, you
 # may want to add --show-output-of-passing-tests (and read bats docs for other
 # cmdline args).
-.PHONY: tests-gpu tests-gpu-single tests-gpu-a10 tests-gpu-dynmig tests-cd
+.PHONY: tests-gpu tests-gpu-single tests-gpu-a10 tests-gpu-dynmig tests-gpu-dynmig-no-mig-mode-toggle tests-cd tests-cd-modes tests-cd-mode
 
 # Single-GPU-safe subset. Suitable for CI environments with one GPU and no
 # GPU Operator (e.g., Lambda Cloud). Excludes test_basics.bats (expects GPU
@@ -207,6 +243,7 @@ tests-gpu-single: runner-image
 	$(call RUN_BATS, \
 		tests/bats/test_gpu_basic.bats \
 		tests/bats/test_gpu_cuda_workloads.bats \
+		tests/bats/test_gpu_local_ipc.bats \
 		tests/bats/test_gpu_dynmig.bats \
 		tests/bats/test_gpu_sharing.bats \
 		tests/bats/test_gpu_robustness.bats \
@@ -218,6 +255,7 @@ tests-gpu-a10: runner-image
 	$(call RUN_BATS, \
 		tests/bats/test_gpu_basic.bats \
 		tests/bats/test_gpu_cuda_workloads.bats \
+		tests/bats/test_gpu_local_ipc.bats \
 		tests/bats/test_gpu_sharing.bats \
 		tests/bats/test_gpu_robustness.bats \
 		tests/bats/test_gpu_extres.bats)
@@ -227,12 +265,19 @@ tests-gpu-dynmig: runner-image
 	$(call RUN_BATS, \
 		tests/bats/test_gpu_dynmig.bats)
 
+# DynMIG-only subset for GPUs where MIG mode is permanently enabled.
+tests-gpu-dynmig-no-mig-mode-toggle: TEST_MIG_MODE_TOGGLE_SUPPORTED := false
+tests-gpu-dynmig-no-mig-mode-toggle: runner-image
+	$(call RUN_BATS, \
+		tests/bats/test_gpu_dynmig.bats)
+
 # Run a subset covering mainly the GPU plugin
 tests-gpu: runner-image
 	$(call RUN_BATS, \
 		tests/bats/test_basics.bats \
 		tests/bats/test_gpu_basic.bats \
 		tests/bats/test_gpu_extres.bats \
+		tests/bats/test_gpu_local_ipc.bats \
 		tests/bats/test_gpu_dynmig.bats \
 		tests/bats/test_gpu_mig.bats \
 		tests/bats/test_gpu_updowngrade.bats \
@@ -250,12 +295,41 @@ tests-cd: runner-image
 		tests/bats/test_cd_updowngrade.bats \
 		tests/bats/test_cd_leader_election.bats)
 
+# Driver-managed IMEX modes covered by tests-cd-modes. Host-managed IMEX is
+# not covered.
+TEST_CD_MODES ?= per-cd per-cd-reservations static
+
+# Run the ComputeDomain regression and churn tests once per IMEX mode, with a
+# fresh driver installation each. Continues with the next mode on failure.
+tests-cd-modes: runner-image
+	@failed=""; \
+	for mode in $(TEST_CD_MODES); do \
+	  echo "--- ComputeDomain mode $${mode} ---"; \
+	  $(MAKE) -f tests/bats/Makefile tests-cd-mode TEST_CD_MODE=$${mode} || failed="$${failed} $${mode}"; \
+	done; \
+	if [ -n "$${failed}" ]; then echo "failed modes:$${failed}"; exit 1; fi; \
+	echo "all modes passed: $(TEST_CD_MODES)"
+
+# Tests that do not apply to a mode are left out rather than skipped.
+CD_MODE_TAGS_per-cd := !cd-static,!cd-reservations
+CD_MODE_TAGS_per-cd-reservations := !cd-static
+CD_MODE_TAGS_static := !cd-per-cd
+CD_MODE_FILTER = $(if $(CD_MODE_TAGS_$(TEST_CD_MODE)),--filter-tags '$(CD_MODE_TAGS_$(TEST_CD_MODE))')
+
+# Run the ComputeDomain regression and churn tests in TEST_CD_MODE.
+tests-cd-mode: runner-image
+	$(call RUN_BATS, \
+		$(CD_MODE_FILTER) \
+		tests/bats/test_cd_modes.bats \
+		tests/bats/test_cd_churn.bats)
+
 # Run the complete test suite (the reference!)
 tests: runner-image
 	$(call RUN_BATS, \
 		tests/bats/test_basics.bats \
 		tests/bats/test_gpu_basic.bats \
 		tests/bats/test_gpu_extres.bats \
+		tests/bats/test_gpu_local_ipc.bats \
 		tests/bats/test_gpu_stress.bats \
 		tests/bats/test_gpu_dynmig.bats \
 		tests/bats/test_gpu_mig.bats \

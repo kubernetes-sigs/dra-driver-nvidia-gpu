@@ -9,9 +9,9 @@ This page covers upgrading the DRA Driver for NVIDIA GPUs between releases.
 
 ---
 
-## Upgrade from v0.4.1 to v0.5.0
+## Upgrade from v0.5.0 to v0.5.1
 
-For the full release summary, see the [{{< param driver_release_tag >}} release notes](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/releases/tag/{{< param driver_release_tag >}}).
+For the full release summary, see the [v0.5.1 release notes](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/releases/tag/v0.5.1).
 
 Upgrade the Helm release and reuse the values from the existing installation:
 
@@ -24,12 +24,47 @@ helm upgrade -i nvidia-dra-driver-gpu oci://registry.k8s.io/dra-driver-nvidia/ch
 
 Add any value changes that you want to make to the command.
 If you manage values in a file, pass that file with `--values` instead of using `--reuse-values`.
-The default configuration in {{< param driver_release_tag >}} does not require a data or API migration.
+
+v0.5.1 does not change the CRDs and does not require a data or API migration.
+v0.5.1 adds the optional `resources.computeDomains.imex.config` value for IMEX daemon configuration overrides.
+The upgrade works without this value.
+To set overrides, refer to the [Helm values reference](reference/helm-values/#computedomain-imex).
+
+After the upgrade, verify the Helm release, driver pods, DeviceClasses, and node ResourceSlices:
+
+```bash
+helm status nvidia-dra-driver-gpu -n nvidia-dra-driver-gpu
+kubectl get pods -n nvidia-dra-driver-gpu
+kubectl get deviceclasses
+kubectl get resourceslices
+```
+
+Confirm that every driver pod reports `Running` and `Ready`, and that the expected DeviceClasses and node ResourceSlices remain available.
+
+---
+
+## Upgrade from v0.4.1 to v0.5.0
+
+For the full release summary, see the [v0.5.0 release notes](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu/releases/tag/v0.5.0).
+
+Upgrade the Helm release and reuse the values from the existing installation:
+
+```bash
+helm upgrade -i nvidia-dra-driver-gpu oci://registry.k8s.io/dra-driver-nvidia/charts/dra-driver-nvidia-gpu \
+    --version 0.5.0 \
+    --namespace nvidia-dra-driver-gpu \
+    --reuse-values
+```
+
+Add any value changes that you want to make to the command.
+If you manage values in a file, pass that file with `--values` instead of using `--reuse-values`.
+The default configuration in v0.5.0 does not require a data or API migration.
 If you already used `nameOverride` or upgraded the release to v0.4.0 or later, you do not need to add `nameOverride` for this upgrade.
 The per-claim MPS daemon inherits the existing `image.pullPolicy` and `imagePullSecrets` values, so existing MPS installations do not require an image configuration change.
 
 {{% alert color="warning" title="Warning" %}}
-If you change `resources.computeDomains.imex.mode` or `.isolation` as part of this upgrade, first drain ComputeDomain workloads and delete existing ComputeDomain resources.
+If you change `resources.computeDomains.imex.daemonLifecycle` as part of this upgrade, first drain ComputeDomain workloads and delete existing ComputeDomain resources.
+The `imex.mode` and `imex.isolation` values of v0.5 are deprecated but keep working: `imex.mode=hostManaged` selects `imex.daemonLifecycle=hostManaged`, and `imex.isolation` is ignored. Helm prints a warning for each.
 The DRA Driver does not enforce a safe transition while ComputeDomain workloads are active.
 {{% /alert %}}
 
@@ -114,7 +149,7 @@ kubectl apply \
     -f https://raw.githubusercontent.com/kubernetes-sigs/dra-driver-nvidia-gpu/refs/tags/v0.4.0/deployments/helm/dra-driver-nvidia-gpu/crds/resource.nvidia.com_computedomaincliques.yaml
 ```
 
-2. Upgrade the Helm chart by using the `helm upgrade -i` command to upgrade the chart in place. 
+2. Upgrade the Helm chart by using the `helm upgrade -i` command to upgrade the chart in place.
 
 Two flags are required to upgrade to v0.4.0:
 
