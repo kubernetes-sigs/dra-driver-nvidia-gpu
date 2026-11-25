@@ -55,6 +55,7 @@ const (
 
 type Flags struct {
 	cliqueID               string
+	nodeLocalFabricIPC     bool
 	computeDomainUUID      string
 	computeDomainName      string
 	computeDomainNamespace string
@@ -112,6 +113,12 @@ func newApp() *cli.App {
 			Usage:       "The clique ID for this node.",
 			EnvVars:     []string{"CLIQUE_ID"},
 			Destination: &flags.cliqueID,
+		},
+		&cli.BoolFlag{
+			Name:        "node-local-fabric-ipc-enabled",
+			Usage:       "Whether the kubelet plugin enabled node-local IMEX for this daemon.",
+			EnvVars:     []string{"NODE_LOCAL_FABRIC_IPC_ENABLED"},
+			Destination: &flags.nodeLocalFabricIPC,
 		},
 		&cli.StringFlag{
 			Name:        "compute-domain-uuid",
@@ -270,13 +277,13 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 		return fmt.Errorf("failed to add compute domain clique label to pod: %w", err)
 	}
 
-	// When cliqueID is empty, skip starting the controller and IMEX daemon management entirely.
-	// The compute-domain-controller will watch this pod's label and sync its node info to the
-	// ComputeDomain status. There's no clique to manage, no DNS indices to determine, and no
-	// IMEX daemon to run.
+	// A node-local domain has no NVML clique, but fabric handles still need a
+	// running IMEX service to broker export and import metadata.
 	if flags.cliqueID == "" {
+		if flags.nodeLocalFabricIPC && flags.computeDomainDaemonSet == "" {
+			return runNodeLocalIMEX(ctx, flags, imexConfigOverrides)
+		}
 		klog.Infof("no cliqueID: skipping controller and IMEX daemon management")
-		// Just wait for shutdown signal
 		<-ctx.Done()
 		klog.Infof("Exiting")
 		return nil
@@ -380,6 +387,23 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	return nil
 }
 
+func runNodeLocalIMEX(ctx context.Context, flags *Flags, configOverrides map[string]string) error {
+	if err := writeIMEXConfig(flags.podIP, configOverrides); err != nil {
+		return fmt.Errorf("failed to write node-local IMEX daemon config: %w", err)
+	}
+	daemons := []*nvapi.ComputeDomainDaemonInfo{{IPAddress: flags.podIP}}
+	if err := writeDaemonsConfig("", daemons); err != nil {
+		return fmt.Errorf("failed to write node-local IMEX nodes config: %w", err)
+	}
+
+	processManager := NewProcessManager([]string{imexDaemonBinaryName, "-c", imexDaemonConfigPath})
+	if _, err := processManager.EnsureStarted(); err != nil {
+		return fmt.Errorf("failed to start node-local IMEX daemon: %w", err)
+	}
+	klog.Infof("started node-local IMEX daemon for pod IP %s", flags.podIP)
+	return processManager.Watchdog(ctx)
+}
+
 // IMEXDaemonUpdateLoopWithIPs reacts to ComputeDomain status changes by updating the
 // IMEX daemon nodes config file and (re)starting the IMEX daemon process.
 func IMEXDaemonUpdateLoopWithIPs(ctx context.Context, controller *Controller, cliqueID string, pm *ProcessManager) error {
@@ -467,7 +491,7 @@ func IMEXDaemonUpdateLoopWithDNSNames(ctx context.Context, controller *Controlle
 // check verifies if the node is IMEX capable and if so, checks if the IMEX daemon is ready.
 // It returns an error if any step fails.
 func check(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
-	if flags.cliqueID == "" {
+	if flags.cliqueID == "" && (!flags.nodeLocalFabricIPC || flags.computeDomainDaemonSet != "") {
 		fmt.Println("check succeeded (noop, clique ID is empty)")
 		return nil
 	}

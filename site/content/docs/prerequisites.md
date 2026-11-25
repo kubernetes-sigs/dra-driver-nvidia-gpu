@@ -27,7 +27,7 @@ both, satisfy the requirements for both features.
 | NVIDIA Container Toolkit | v1.18.0 or higher. | Both |
 | Container runtime with CDI | CDI must be enabled. It is enabled by default in containerd v2.0 and later and CRI-O v1.27 and later. The DRA Driver uses CDI to expose GPUs to containers. | Both |
 | Node Feature Discovery (NFD) | v0.18.2 or higher. The DRA Driver has no version-specific NFD API dependency. The driver requires NFD's NVIDIA PCI node labels to target the kubelet plugin. | Both |
-| GPU Feature Discovery (GFD) | v0.18.0 or higher. GFD must generate the `nvidia.com/gpu.clique` node label. | ComputeDomains |
+| GPU Feature Discovery (GFD) | v0.18.0 or higher. For MNNVL ComputeDomains, GFD must generate the `nvidia.com/gpu.clique` node label. | ComputeDomains |
 
 The GPU Operator owns the compatibility of the NVIDIA components that it deploys.
 
@@ -40,7 +40,7 @@ Hardware requirements depend on the resource type and feature:
 | Full GPU allocation, time-slicing, or VFIO passthrough | NVIDIA Data Center GPUs |
 | MPS multi-user mode | NVIDIA V100 or newer. This requirement applies specifically to `multiUser: true`. Refer to [MPS prerequisites](guides/mps.md#prerequisites). |
 | MIG | A [MIG-capable data center GPU](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/#supported-gpus) with Ampere architecture or newer. |
-| ComputeDomains | Grace Blackwell GPUs with Multi-Node NVLink, such as NVIDIA HGX GB200 NVL72 or GB300 NVL72. |
+| ComputeDomains | Grace Blackwell GPUs with Multi-Node NVLink, such as NVIDIA HGX GB200 NVL72 or GB300 NVL72. The alpha `NodeLocalFabricIPC` gate also supports node-local CUDA fabric-handle IPC on GPUs and drivers that meet the requirements below. |
 
 Check the GPU model and installed driver version on every GPU node:
 
@@ -56,10 +56,37 @@ For ComputeDomain-specific software and node configuration, see
 If you plan to use ComputeDomains, you also need:
 
 - NVIDIA Driver v570.158.01 or later. The `IMEXDaemonsWithDNSNames` feature gate is enabled by default and requires this driver version. The ComputeDomain plugin will fail to start on older drivers unless `IMEXDaemonsWithDNSNames` is explicitly disabled.
-- Multi-Node NVLink (MNNVL) hardware. Nodes must be connected via NVLink fabric, such as GB200 NVL72 and similar systems.
-- A component that manages the `nvidia.com/gpu.clique` node label.
-  Use GPU Feature Discovery (GFD), or set `kubeletPlugin.containers.computeDomains.gpuCliqueLabelEnabled=true` so the ComputeDomain kubelet plugin manages the label.
+- Multi-Node NVLink (MNNVL) hardware, unless you enable the alpha `NodeLocalFabricIPC` mode described below. MNNVL nodes must be connected via NVLink fabric, such as GB200 NVL72 and similar systems.
+- For MNNVL, a component that manages the `nvidia.com/gpu.clique` node label. Use GPU Feature Discovery (GFD), or set `kubeletPlugin.containers.computeDomains.gpuCliqueLabelEnabled=true` so the ComputeDomain kubelet plugin manages the label.
 
+### Node-local fabric IPC
+
+The alpha `NodeLocalFabricIPC` feature gate extends ComputeDomain channel injection to supported nodes that do not belong to an MNNVL clique. This is useful for exchanging CUDA fabric handles between isolated pods on one NVLink-connected node, including A100 systems where the installed driver reports fabric-handle support.
+
+When the gate is enabled, the kubelet plugin detects Fabric Manager-managed NVLink hardware at startup. If a node has neither an MNNVL clique nor this hardware, the plugin prepares claims without exposing IMEX channel devices.
+
+For node-local fabric IPC, check the following on each participating node:
+
+- `CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED` is `1` for the allocated GPUs.
+- `/proc/devices` contains `nvidia-caps-imex-channels`.
+- `/proc/driver/nvidia/params` reports a nonzero `ImexChannelCount`.
+- `nvidia-imex` and `nvidia-imex-ctl` are installed with the NVIDIA driver.
+- NVIDIA Fabric Manager is running on the node, for example on an HGX A100 system with NVSwitch.
+- The communicating pods use the same ComputeDomain channel ResourceClaim and are scheduled onto the same node.
+
+```bash
+--set featureGates.NodeLocalFabricIPC=true
+```
+
+On an eligible node, the driver injects the allocated `/dev/nvidia-caps-imex-channels/channelN` device after IMEX is ready. In [driver-managed mode](#driver-managed-imex), the driver runs one local `nvidia-imex` instance for the ComputeDomain. In [host-managed mode](#host-managed-imex), the kubelet plugin checks the existing host service through its Unix socket. Static IMEX requires an MNNVL clique.
+
+Before changing the gate, stop affected workloads. After the controller and kubelet plugin rollout completes, recreate affected driver-managed ComputeDomains and their channel claims before restarting workloads. Existing ComputeDomain DaemonSets and prepared claims retain their previous configuration. In host-managed mode, recreate affected channel claims so the kubelet plugin prepares them with the new gate setting.
+
+Applications must allocate and export memory with `CU_MEM_HANDLE_TYPE_FABRIC`. This feature does not share the Linux IPC namespace and does not make legacy `cudaIpcGetMemHandle` or `cudaIpcOpenMemHandle` work across isolated PID namespaces.
+
+{{% alert color="warning" title="Warning" %}}
+Workloads that use the same channel can access shared allocations. Do not share a channel across mutually untrusted workloads.
+{{% /alert %}}
 
 ### Driver-managed IMEX
 

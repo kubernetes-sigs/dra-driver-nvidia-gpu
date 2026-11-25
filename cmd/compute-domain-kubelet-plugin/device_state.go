@@ -748,9 +748,10 @@ func (s *DeviceState) applyComputeDomainChannelConfigSharedDomain(ctx context.Co
 		channelID:     channelID,
 	}
 
-	if s.computeDomainManager.CliqueID() == "" {
-		// Non-fabric node (e.g. not part of an MNNVL clique): do not inject
-		// IMEX channel device nodes, but let the claim succeed.
+	cliqueID := s.computeDomainManager.CliqueID()
+	if cliqueID == "" && (s.config.imexConfig.StaticDaemon() || !s.nvdevlib.nodeLocalFabricIPCEnabled) {
+		// Static IMEX daemons require a clique. Other nodes without IMEX
+		// support can also prepare claims without channel device nodes.
 		return &configState, nil
 	}
 
@@ -762,6 +763,9 @@ func (s *DeviceState) applyComputeDomainChannelConfigSharedDomain(ctx context.Co
 		klog.V(4).Infof("ComputeDomain %s already prepared on this node, skipping IMEX readiness check", config.DomainID)
 	} else if err := assertIMEXReady(ctx); err != nil {
 		return nil, err
+	}
+	if cliqueID == "" {
+		klog.V(1).Infof("injecting IMEX channel %d for node-local CUDA fabric IPC", channelID)
 	}
 
 	if channelID < 0 || channelID >= len(s.nvdevlib.nvCapImexChanDevInfos) {
@@ -821,11 +825,11 @@ func (s *DeviceState) applyComputeDomainChannelConfigDriverManaged(ctx context.C
 		}
 	}
 
-	if s.computeDomainManager.CliqueID() == "" {
+	cliqueID := s.computeDomainManager.CliqueID()
+	if cliqueID == "" && !s.nvdevlib.nodeLocalFabricIPCEnabled {
 		// Do not inject IMEX channel device nodes.
 		return &configState, nil
 	}
-
 	// If explicitly requested, inject all channels instead of just one.
 	channels := s.nvdevlib.nvCapImexChanDevInfos
 	if config.AllocationMode != configapi.ComputeDomainChannelAllocationModeAll {
@@ -833,6 +837,9 @@ func (s *DeviceState) applyComputeDomainChannelConfigDriverManaged(ctx context.C
 			return nil, fmt.Errorf("applyComputeDomainChannelConfigDriverManaged: channel %d out of range (node has %d IMEX channels)", channelID, len(channels))
 		}
 		channels = channels[channelID : channelID+1]
+	}
+	if cliqueID == "" {
+		klog.V(1).Infof("injecting %d IMEX channel(s) for node-local CUDA fabric IPC", len(channels))
 	}
 	for _, info := range channels {
 		edits := s.computeDomainManager.GetComputeDomainChannelContainerEdits(s.cdi.devRoot, info)
@@ -897,16 +904,16 @@ func (s *DeviceState) applyComputeDomainDaemonConfig(ctx context.Context, config
 
 	// Always inject CD config details into the CD daemon (regardless of clique
 	// ID being empty or not).
-	edits, err := computeDomainDaemonSettings.GetCDIContainerEditsCommon(ctx)
+	cliqueID := s.computeDomainManager.CliqueID()
+	nodeLocalFabricIPCEnabled := cliqueID == "" && !s.config.imexConfig.StaticDaemon() && s.nvdevlib.nodeLocalFabricIPCEnabled
+	edits, err := computeDomainDaemonSettings.GetCDIContainerEditsCommon(ctx, cliqueID, nodeLocalFabricIPCEnabled)
 	if err != nil {
 		return nil, fmt.Errorf("error getting common container edits for ComputeDomain daemon '%s': %w", config.DomainID, err)
 	}
 	configState.containerEdits = configState.containerEdits.Append(edits)
 
-	// Only inject dev nodes related to
-	// /proc/driver/nvidia/capabilities/fabric-imex-mgmt if IMEX is supported
-	// (if we want to start the IMEX daemon process in the CD daemon pod).
-	if s.computeDomainManager.CliqueID() != "" {
+	// Inject the IMEX management device whenever this daemon will run nvidia-imex.
+	if cliqueID != "" || nodeLocalFabricIPCEnabled {
 		nvcapPath := nvidiaCapFabricImexMgmtPath
 		if common.UsingAltProcDevices() {
 			nvcapPath = filepath.Join(s.config.flags.containerDriverRoot, "proc/driver/nvidia/capabilities/fabric-imex-mgmt")
