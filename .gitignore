@@ -13,4 +13,5 @@ tests-out
 *.log
 *.tar
 *.tgz
-
+__pycache__/
+*.py[cod]
