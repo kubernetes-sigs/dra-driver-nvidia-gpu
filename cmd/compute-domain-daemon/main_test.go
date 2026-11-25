@@ -17,8 +17,8 @@ limitations under the License.
 package main
 
 import (
-	"context"
 	"os/exec"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,22 +38,30 @@ func TestCheckIMEXReadiness(t *testing.T) {
 	})
 
 	for name, tc := range map[string]struct {
-		cliqueID  string
-		enabled   bool
-		wantProbe bool
+		cliqueID            string
+		daemonSetUID        string
+		featureGateEnabled  bool
+		injectedEligibility string
+		wantProbe           bool
 	}{
-		"no clique, gate disabled": {},
-		"no clique, gate enabled":  {enabled: true, wantProbe: true},
-		"clique, gate disabled":    {cliqueID: "clique-a", wantProbe: true},
-		"clique, gate enabled":     {cliqueID: "clique-a", enabled: true, wantProbe: true},
+		"no clique, no CDI value":           {},
+		"no clique, feature gate disabled":  {injectedEligibility: "false"},
+		"no clique, gate on but ineligible": {featureGateEnabled: true, injectedEligibility: "false"},
+		"no clique, eligible":               {featureGateEnabled: true, injectedEligibility: "true", wantProbe: true},
+		"no clique, use the CDI decision":   {injectedEligibility: "true", wantProbe: true},
+		"static daemon without a clique":    {daemonSetUID: "daemon-set-uid", injectedEligibility: "true"},
+		"native clique":                     {cliqueID: "clique-a", injectedEligibility: "false", wantProbe: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
-				string(featuregates.NodeLocalFabricIPC): tc.enabled,
-			}))
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			err := check(ctx, cancel, &Flags{cliqueID: tc.cliqueID})
+			t.Setenv("CLIQUE_ID", tc.cliqueID)
+			t.Setenv("COMPUTE_DOMAIN_DAEMONSET_UID", tc.daemonSetUID)
+			t.Setenv("FEATURE_GATES", "NodeLocalFabricIPC="+strconv.FormatBool(tc.featureGateEnabled))
+			t.Setenv("NODE_LOCAL_FABRIC_IPC_ENABLED", tc.injectedEligibility)
+
+			app := newApp()
+			// Kubernetes logging is configured once per process.
+			app.Before = nil
+			err := app.Run([]string{"compute-domain-daemon", "check"})
 			if tc.wantProbe {
 				assert.ErrorIs(t, err, exec.ErrNotFound)
 			} else {

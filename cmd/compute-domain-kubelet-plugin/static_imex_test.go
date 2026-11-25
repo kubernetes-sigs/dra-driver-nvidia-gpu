@@ -105,6 +105,17 @@ func TestApplyChannelConfigStaticDaemon(t *testing.T) {
 		assert.Contains(t, err.Error(), "static IMEX daemon not ready")
 	})
 
+	t.Run("skips static IMEX on an eligible node without a clique", func(t *testing.T) {
+		state := staticTestState(t, testCDDS())
+		state.computeDomainManager.cliqueID = ""
+		state.nvdevlib.nodeLocalFabricIPCEnabled = true
+
+		configState, err := apply(state)
+
+		require.NoError(t, err)
+		assert.Nil(t, configState.containerEdits)
+	})
+
 	t.Run("injects the reserved channel once the daemon is ready", func(t *testing.T) {
 		configState, err := apply(staticTestState(t, testCDDS(), testStaticClique(configapi.ComputeDomainStatusReady)))
 
@@ -137,7 +148,7 @@ func TestStaticDaemonContainerEdits(t *testing.T) {
 	settings, err := m.NewSettings(testCDDSUID)
 	require.NoError(t, err)
 
-	edits, err := settings.GetCDIContainerEditsCommon(context.Background())
+	edits, err := settings.GetCDIContainerEditsCommon(context.Background(), m.CliqueID(), false)
 
 	require.NoError(t, err)
 	env := strings.Join(edits.Env, " ")

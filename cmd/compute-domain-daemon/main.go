@@ -55,6 +55,7 @@ const (
 
 type Flags struct {
 	cliqueID               string
+	nodeLocalFabricIPC     bool
 	computeDomainUUID      string
 	computeDomainName      string
 	computeDomainNamespace string
@@ -112,6 +113,12 @@ func newApp() *cli.App {
 			Usage:       "The clique ID for this node.",
 			EnvVars:     []string{"CLIQUE_ID"},
 			Destination: &flags.cliqueID,
+		},
+		&cli.BoolFlag{
+			Name:        "node-local-fabric-ipc-enabled",
+			Usage:       "Whether the kubelet plugin enabled node-local IMEX for this daemon.",
+			EnvVars:     []string{"NODE_LOCAL_FABRIC_IPC_ENABLED"},
+			Destination: &flags.nodeLocalFabricIPC,
 		},
 		&cli.StringFlag{
 			Name:        "compute-domain-uuid",
@@ -273,8 +280,8 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	// A node-local domain has no NVML clique, but fabric handles still need a
 	// running IMEX service to broker export and import metadata.
 	if flags.cliqueID == "" {
-		if featuregates.Enabled(featuregates.NodeLocalFabricIPC) {
-			return runNodeLocalIMEX(ctx, flags)
+		if flags.nodeLocalFabricIPC && flags.computeDomainDaemonSet == "" {
+			return runNodeLocalIMEX(ctx, flags, imexConfigOverrides)
 		}
 		klog.Infof("no cliqueID: skipping controller and IMEX daemon management")
 		<-ctx.Done()
@@ -380,8 +387,8 @@ func run(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
 	return nil
 }
 
-func runNodeLocalIMEX(ctx context.Context, flags *Flags) error {
-	if err := writeIMEXConfig(flags.podIP); err != nil {
+func runNodeLocalIMEX(ctx context.Context, flags *Flags, configOverrides map[string]string) error {
+	if err := writeIMEXConfig(flags.podIP, configOverrides); err != nil {
 		return fmt.Errorf("failed to write node-local IMEX daemon config: %w", err)
 	}
 	daemons := []*nvapi.ComputeDomainDaemonInfo{{IPAddress: flags.podIP}}
@@ -484,7 +491,7 @@ func IMEXDaemonUpdateLoopWithDNSNames(ctx context.Context, controller *Controlle
 // check verifies if the node is IMEX capable and if so, checks if the IMEX daemon is ready.
 // It returns an error if any step fails.
 func check(ctx context.Context, cancel context.CancelFunc, flags *Flags) error {
-	if flags.cliqueID == "" && !featuregates.Enabled(featuregates.NodeLocalFabricIPC) {
+	if flags.cliqueID == "" && (!flags.nodeLocalFabricIPC || flags.computeDomainDaemonSet != "") {
 		fmt.Println("check succeeded (noop, clique ID is empty)")
 		return nil
 	}

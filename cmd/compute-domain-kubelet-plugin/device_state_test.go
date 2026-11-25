@@ -42,7 +42,6 @@ import (
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/internal/common"
-	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/imex"
 	nvfake "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/nvidia.com/clientset/versioned/fake"
@@ -837,19 +836,6 @@ func hostManagedConfig() *Config {
 	}
 }
 
-func setNodeLocalFabricIPCForTest(t *testing.T, enabled bool) {
-	t.Helper()
-	previous := featuregates.Enabled(featuregates.NodeLocalFabricIPC)
-	require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
-		string(featuregates.NodeLocalFabricIPC): enabled,
-	}))
-	t.Cleanup(func() {
-		require.NoError(t, featuregates.FeatureGates().SetFromMap(map[string]bool{
-			string(featuregates.NodeLocalFabricIPC): previous,
-		}))
-	})
-}
-
 // TestApplyComputeDomainChannelConfigHostManagedIgnoresAllocationMode
 // confirms the kubelet plugin does not (re-)validate AllocationMode under
 // host-managed IMEX: today the controller is the one that always requests
@@ -864,9 +850,8 @@ func TestApplyComputeDomainChannelConfigHostManagedIgnoresAllocationMode(t *test
 				ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "cd-uid"},
 			}
 
-			// Empty cliqueID keeps this fixture minimal (no nvdevlib/cdi
-			// setup needed): it only needs to reach past the removed
-			// AllocationMode check to prove the mode is no longer rejected.
+			// With IMEX disabled, this fixture only needs to reach past the
+			// removed AllocationMode check.
 			factory := nvinformers.NewSharedInformerFactory(nvfake.NewSimpleClientset(), 0)
 			informer := factory.Resource().V1beta1().ComputeDomains().Informer()
 			require.NoError(t, informer.AddIndexers(cache.Indexers{"computeDomainUID": uidIndexer[*configapi.ComputeDomain]}))
@@ -875,7 +860,8 @@ func TestApplyComputeDomainChannelConfigHostManagedIgnoresAllocationMode(t *test
 			state := &DeviceState{
 				config:               hostManagedConfig(),
 				checkpointManager:    &fakeCheckpointManager{checkpoint: checkpointWithClaims(nil)},
-				computeDomainManager: &ComputeDomainManager{informer: informer, cliqueID: ""},
+				computeDomainManager: &ComputeDomainManager{informer: informer},
+				nvdevlib:             &deviceLib{},
 				allocatable: AllocatableDevices{
 					"channel-0": &AllocatableDevice{Channel: &ComputeDomainChannelInfo{ID: 0}},
 				},
@@ -913,8 +899,6 @@ func TestApplyComputeDomainDaemonConfigHostManagedRejected(t *testing.T) {
 }
 
 func TestApplyComputeDomainChannelConfigHostManagedNoCliqueSkipsInjection(t *testing.T) {
-	setNodeLocalFabricIPCForTest(t, false)
-
 	cd := &configapi.ComputeDomain{
 		ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "cd-uid"},
 	}
@@ -930,7 +914,8 @@ func TestApplyComputeDomainChannelConfigHostManagedNoCliqueSkipsInjection(t *tes
 	state := &DeviceState{
 		config:               hostManagedConfig(),
 		checkpointManager:    &fakeCheckpointManager{checkpoint: checkpointWithClaims(nil)},
-		computeDomainManager: &ComputeDomainManager{informer: informer, cliqueID: ""},
+		computeDomainManager: &ComputeDomainManager{informer: informer},
+		nvdevlib:             &deviceLib{},
 		allocatable: AllocatableDevices{
 			"channel-0": &AllocatableDevice{Channel: &ComputeDomainChannelInfo{ID: 0}},
 		},
@@ -964,9 +949,7 @@ func TestApplyComputeDomainChannelConfigHostManagedNoCliqueSkipsInjection(t *tes
 	assert.Nil(t, configState.containerEdits, "no clique on this node means no IMEX channel device node is injected")
 }
 
-func TestApplyComputeDomainChannelConfigDriverManagedNoCliqueInjectsNodeLocalChannel(t *testing.T) {
-	setNodeLocalFabricIPCForTest(t, true)
-
+func TestApplyComputeDomainChannelConfigDriverManagedNoClique(t *testing.T) {
 	const nodeName = "node-a"
 	cd := &configapi.ComputeDomain{
 		ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "cd-uid"},
@@ -986,7 +969,7 @@ func TestApplyComputeDomainChannelConfigDriverManagedNoCliqueInjectsNodeLocalCha
 			Core:   kubefake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}),
 			Nvidia: nvidiaClient,
 		},
-		imexConfig: imex.Config{Mode: imex.ModeDriverManaged, Isolation: imex.IsolationIMEXDomain},
+		imexConfig: imex.Config{DaemonLifecycle: imex.DaemonLifecyclePerComputeDomain},
 	}
 	channel := &common.NVcapDeviceInfo{
 		Major: 236,
@@ -994,33 +977,42 @@ func TestApplyComputeDomainChannelConfigDriverManagedNoCliqueInjectsNodeLocalCha
 		Mode:  0666,
 		Path:  "/dev/nvidia-caps-imex-channels/channel0",
 	}
-	state := &DeviceState{
-		config:            config,
-		checkpointManager: &fakeCheckpointManager{checkpoint: checkpointWithClaims(nil)},
-		computeDomainManager: &ComputeDomainManager{
-			config:   config,
-			informer: informer,
-			cliqueID: "",
-		},
-		cdi:      &CDIHandler{},
-		nvdevlib: &deviceLib{maxImexChannelCount: 1, nvCapImexChanDevInfos: []*common.NVcapDeviceInfo{channel}},
-		allocatable: AllocatableDevices{
-			"channel-0": &AllocatableDevice{Channel: &ComputeDomainChannelInfo{ID: 0}},
-		},
+	for name, enabled := range map[string]bool{"eligible": true, "ineligible": false} {
+		t.Run(name, func(t *testing.T) {
+			state := &DeviceState{
+				config:            config,
+				checkpointManager: &fakeCheckpointManager{checkpoint: checkpointWithClaims(nil)},
+				computeDomainManager: &ComputeDomainManager{
+					config:   config,
+					informer: informer,
+					cliqueID: "",
+				},
+				cdi:      &CDIHandler{},
+				nvdevlib: &deviceLib{maxImexChannelCount: 1, nodeLocalFabricIPCEnabled: enabled, nvCapImexChanDevInfos: []*common.NVcapDeviceInfo{channel}},
+				allocatable: AllocatableDevices{
+					"channel-0": &AllocatableDevice{Channel: &ComputeDomainChannelInfo{ID: 0}},
+				},
+			}
+
+			result := allocationResult("request", DriverName, "channel-0", nil)
+			configState, err := state.applyComputeDomainChannelConfig(
+				context.Background(),
+				channelConfig("cd-uid"),
+				claimWithResults("claim-uid", result),
+				[]*resourceapi.DeviceRequestAllocationResult{&result},
+			)
+
+			require.NoError(t, err)
+			require.NotNil(t, configState)
+			if !enabled {
+				assert.Nil(t, configState.containerEdits)
+				return
+			}
+			require.NotNil(t, configState.containerEdits)
+			require.Len(t, configState.containerEdits.DeviceNodes, 1)
+			assert.Equal(t, channel.Path, configState.containerEdits.DeviceNodes[0].Path)
+		})
 	}
-
-	result := allocationResult("request", DriverName, "channel-0", nil)
-	configState, err := state.applyComputeDomainChannelConfig(
-		context.Background(),
-		channelConfig("cd-uid"),
-		claimWithResults("claim-uid", result),
-		[]*resourceapi.DeviceRequestAllocationResult{&result},
-	)
-
-	require.NoError(t, err)
-	require.NotNil(t, configState.containerEdits)
-	require.Len(t, configState.containerEdits.DeviceNodes, 1)
-	assert.Equal(t, channel.Path, configState.containerEdits.DeviceNodes[0].Path)
 }
 
 // TestApplyComputeDomainChannelConfigHostManagedUsesAllocatedChannel confirms
@@ -1079,13 +1071,10 @@ func TestApplyComputeDomainChannelConfigHostManagedRequiresHostIMEXReady(t *test
 		cliqueID                  string
 		nodeLocalFabricIPCEnabled bool
 	}{
-		"fabric with gate disabled": {cliqueID: "clique-a"},
-		"fabric with gate enabled":  {cliqueID: "clique-a", nodeLocalFabricIPCEnabled: true},
-		"node-local fabric":         {nodeLocalFabricIPCEnabled: true},
+		"MNNVL clique":      {cliqueID: "clique-a"},
+		"node-local fabric": {nodeLocalFabricIPCEnabled: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			setNodeLocalFabricIPCForTest(t, tc.nodeLocalFabricIPCEnabled)
-
 			cd := &configapi.ComputeDomain{
 				ObjectMeta: metav1.ObjectMeta{Name: "cd", Namespace: "default", UID: "cd-uid"},
 			}
@@ -1098,7 +1087,7 @@ func TestApplyComputeDomainChannelConfigHostManagedRequiresHostIMEXReady(t *test
 				config:               hostManagedConfig(),
 				checkpointManager:    &fakeCheckpointManager{checkpoint: checkpointWithClaims(nil)},
 				computeDomainManager: &ComputeDomainManager{informer: informer, cliqueID: tc.cliqueID},
-				nvdevlib:             &deviceLib{devRoot: t.TempDir()},
+				nvdevlib:             &deviceLib{devRoot: t.TempDir(), nodeLocalFabricIPCEnabled: tc.nodeLocalFabricIPCEnabled},
 				allocatable: AllocatableDevices{
 					"channel-0": &AllocatableDevice{Channel: &ComputeDomainChannelInfo{ID: 0}},
 				},

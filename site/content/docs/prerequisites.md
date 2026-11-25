@@ -63,23 +63,29 @@ If you plan to use ComputeDomains, you also need:
 
 The alpha `NodeLocalFabricIPC` feature gate extends ComputeDomain channel injection to supported nodes that do not belong to an MNNVL clique. This is useful for exchanging CUDA fabric handles between isolated pods on one NVLink-connected node, including A100 systems where the installed driver reports fabric-handle support.
 
-Enable the gate only when all of the following are true on each participating node:
+When the gate is enabled, the kubelet plugin detects Fabric Manager-managed NVLink hardware at startup. If a node has neither an MNNVL clique nor this hardware, the plugin prepares claims without exposing IMEX channel devices.
+
+For node-local fabric IPC, check the following on each participating node:
 
 - `CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED` is `1` for the allocated GPUs.
 - `/proc/devices` contains `nvidia-caps-imex-channels`.
 - `/proc/driver/nvidia/params` reports a nonzero `ImexChannelCount`.
 - `nvidia-imex` and `nvidia-imex-ctl` are installed with the NVIDIA driver.
-- NVIDIA Fabric Manager is running on NVSwitch systems such as HGX A100.
+- NVIDIA Fabric Manager is running on the node, for example on an HGX A100 system with NVSwitch.
 - The communicating pods use the same ComputeDomain channel ResourceClaim and are scheduled onto the same node.
 
 ```bash
 --set featureGates.NodeLocalFabricIPC=true
 ```
 
-On a node without a clique, the driver starts one `nvidia-imex` instance for the ComputeDomain and injects the allocated `/dev/nvidia-caps-imex-channels/channelN` device into the workload containers. Workload preparation waits until the local IMEX instance is ready. Applications must allocate and export memory with `CU_MEM_HANDLE_TYPE_FABRIC`. This feature does not share the Linux IPC namespace and does not make legacy `cudaIpcGetMemHandle` or `cudaIpcOpenMemHandle` work across isolated PID namespaces.
+On an eligible node, the driver injects the allocated `/dev/nvidia-caps-imex-channels/channelN` device after IMEX is ready. In [driver-managed mode](#driver-managed-imex), the driver runs one local `nvidia-imex` instance for the ComputeDomain. In [host-managed mode](#host-managed-imex), the kubelet plugin checks the existing host service through its Unix socket. Static IMEX requires an MNNVL clique.
+
+Before changing the gate, stop affected workloads. After the controller and kubelet plugin rollout completes, recreate affected driver-managed ComputeDomains and their channel claims before restarting workloads. Existing ComputeDomain DaemonSets and prepared claims retain their previous configuration. In host-managed mode, recreate affected channel claims so the kubelet plugin prepares them with the new gate setting.
+
+Applications must allocate and export memory with `CU_MEM_HANDLE_TYPE_FABRIC`. This feature does not share the Linux IPC namespace and does not make legacy `cudaIpcGetMemHandle` or `cudaIpcOpenMemHandle` work across isolated PID namespaces.
 
 {{% alert color="warning" title="Warning" %}}
-ComputeDomain isolation is currently domain-wide: all workloads in a ComputeDomain receive channel 0. Do not place mutually untrusted tenants in the same ComputeDomain.
+Workloads that use the same channel can access shared allocations. Do not share a channel across mutually untrusted workloads.
 {{% /alert %}}
 
 ### Driver-managed IMEX

@@ -46,13 +46,14 @@ const (
 
 type deviceLib struct {
 	nvdev.Interface
-	nvmllib                  nvml.Interface
-	driverLibraryPath        string
-	devRoot                  string
-	nvidiaSMIPath            string
-	maxImexChannelCount      int
-	nvCapImexChanDevInfos    []*common.NVcapDeviceInfo
-	isSingleNodeNVLinkSystem bool
+	nvmllib                   nvml.Interface
+	driverLibraryPath         string
+	devRoot                   string
+	nvidiaSMIPath             string
+	maxImexChannelCount       int
+	nvCapImexChanDevInfos     []*common.NVcapDeviceInfo
+	isSingleNodeNVLinkSystem  bool
+	nodeLocalFabricIPCEnabled bool
 }
 
 func newDeviceLib(driver *root.Driver) (*deviceLib, error) {
@@ -105,14 +106,34 @@ func newDeviceLib(driver *root.Driver) (*deviceLib, error) {
 		}
 	}
 
-	if featuregates.Enabled(featuregates.FabricManagerPartitioning) {
-		isSingleNodeNVLinkSystem, err := d.checkIsSingleNodeNVLinkSystem()
-		if err != nil {
-			return nil, fmt.Errorf("error checking if node is single-node NVLink system: %w", err)
-		}
-		d.isSingleNodeNVLinkSystem = isSingleNodeNVLinkSystem
+	if err := d.detectFabricManagerFabric(); err != nil {
+		return nil, err
 	}
 	return &d, nil
+}
+
+func (l *deviceLib) detectFabricManagerFabric() error {
+	partitioning := featuregates.Enabled(featuregates.FabricManagerPartitioning)
+	nodeLocal := featuregates.Enabled(featuregates.NodeLocalFabricIPC)
+	if !partitioning && !nodeLocal {
+		return nil
+	}
+
+	hasFabric, err := fm.HasFabricManagerFabric(l.devRoot)
+	if err != nil {
+		if partitioning {
+			return fmt.Errorf("failed to detect Fabric Manager fabric: %w", err)
+		}
+		klog.Warningf("NodeLocalFabricIPC disabled on this node: failed to detect Fabric Manager fabric: %v", err)
+		return nil
+	}
+
+	l.isSingleNodeNVLinkSystem = hasFabric
+	l.nodeLocalFabricIPCEnabled = nodeLocal && hasFabric
+	if nodeLocal {
+		klog.Infof("NodeLocalFabricIPC supported on this node: %t", hasFabric)
+	}
+	return nil
 }
 
 func (l deviceLib) init() error {
@@ -212,27 +233,10 @@ func (l deviceLib) getCliqueID() (string, error) {
 	}
 	defer l.alwaysShutdown()
 
-	var cliqueID string
-	var err error
 	if featuregates.Enabled(featuregates.CrashOnNVLinkFabricErrors) {
-		cliqueID, err = l.getCliqueIDStrict()
-	} else {
-		cliqueID, err = l.getCliqueIDLegacy()
+		return l.getCliqueIDStrict()
 	}
-	if err != nil {
-		return "", err
-	}
-
-	if cliqueID == "" && featuregates.Enabled(featuregates.NodeLocalFabricIPC) {
-		hasFabric, err := l.checkIsSingleNodeNVLinkSystem()
-		if err != nil {
-			return "", err
-		}
-		if !hasFabric {
-			return "", fmt.Errorf("NodeLocalFabricIPC requires a Fabric Manager-managed NVLink fabric")
-		}
-	}
-	return cliqueID, nil
+	return l.getCliqueIDLegacy()
 }
 
 // getCliqueIDLegacy uses IsFabricAttached() and falls back gracefully on errors.
@@ -498,19 +502,4 @@ func (l deviceLib) unmountRecursively(root string) error {
 	}
 
 	return helper(root)
-}
-
-// isSingleNodeNVLinkSystem returns true if the node is a single-node NVLink
-// system with one or more NVSwitch (or newer NVLink5 switch) devices.
-func (l deviceLib) checkIsSingleNodeNVLinkSystem() (bool, error) {
-	hasLocalFabric, err := fm.HasFabricManagerFabric(l.devRoot)
-	if err != nil {
-		return false, fmt.Errorf("failed to check if node has local fabric: %w", err)
-	}
-
-	if !hasLocalFabric {
-		return false, nil
-	}
-
-	return true, nil
 }
