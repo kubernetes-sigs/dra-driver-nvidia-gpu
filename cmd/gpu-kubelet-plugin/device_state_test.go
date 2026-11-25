@@ -25,15 +25,19 @@ import (
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	resourceapi "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/utils/ptr"
 
 	configapi "sigs.k8s.io/dra-driver-nvidia-gpu/api/nvidia.com/resource/v1beta1"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/fabricmanager"
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
+	pkgflags "sigs.k8s.io/dra-driver-nvidia-gpu/pkg/flags"
 )
 
 func TestValidateNoOverlappingPreparedDevices(t *testing.T) {
@@ -1240,4 +1244,88 @@ func TestUnprepareDevicesTimeSliceReset(t *testing.T) {
 		_, err := newState(smi).unprepareDevices(context.Background(), "claim-uid", devices, &Checkpoint{})
 		require.Error(t, err)
 	})
+}
+
+// A claim whose MPS control daemon never became ready stays in PrepareStarted.
+// Unpreparing it must still stop the daemon that Prepare() started.
+func TestUnpreparePartiallyPreparedClaimStopsMpsControlDaemon(t *testing.T) {
+	gates := map[string]bool{
+		string(featuregates.MPSSupport):         true,
+		string(featuregates.PassthroughSupport): false,
+		string(featuregates.DynamicMIG):         false,
+	}
+	original := map[string]bool{}
+	for gate := range gates {
+		original[gate] = featuregates.Enabled(featuregate.Feature(gate))
+	}
+	require.NoError(t, featuregates.FeatureGates().SetFromMap(gates))
+	t.Cleanup(func() {
+		require.NoError(t, featuregates.FeatureGates().SetFromMap(original))
+	})
+
+	const claimUID = "claim-uid"
+	gpu := &AllocatableDevice{Gpu: &GpuInfo{UUID: "GPU-0000"}}
+
+	clientset := k8sfake.NewSimpleClientset()
+	smi := newFakeSMI(t, 0)
+	cfg := &Config{
+		flags: &Flags{
+			nodeName:                    "node-a",
+			namespace:                   "dra-driver",
+			kubeletPluginsDirectoryPath: t.TempDir(),
+		},
+		clientsets: pkgflags.ClientSets{Core: clientset},
+	}
+	nvdevlib := &deviceLib{nvidiaSMIPath: smi.path, driverLibraryPath: smi.libPath}
+	state := &DeviceState{
+		config:     cfg,
+		nvdevlib:   nvdevlib,
+		mpsManager: NewMpsManager(cfg, nvdevlib, "/", MpsControlDaemonTemplatePath),
+		perGPUAllocatable: &PerGPUAllocatableDevices{
+			allocatablesMap: map[PCIBusID]AllocatableDevices{"0000:01:00.0": {"gpu-0": gpu}},
+		},
+	}
+
+	// What Start() left behind before AssertReady() failed.
+	daemon := state.mpsManager.NewMpsControlDaemon(claimUID, AllocatableDevices{"gpu-0": gpu})
+	require.NoError(t, os.MkdirAll(daemon.shmDir, 0o755))
+	_, err := clientset.AppsV1().Deployments(daemon.namespace).Create(
+		context.Background(),
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: daemon.name, Namespace: daemon.namespace}},
+		metav1.CreateOptions{},
+	)
+	require.NoError(t, err)
+
+	pc := PreparedClaim{
+		CheckpointState: ClaimCheckpointStatePrepareStarted,
+		Status: resourceapi.ResourceClaimStatus{
+			Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{
+					Results: []resourceapi.DeviceRequestAllocationResult{
+						{Request: "mps-gpu", Driver: DriverName, Device: "gpu-0"},
+					},
+					Config: []resourceapi.DeviceAllocationConfiguration{{
+						Source:   resourceapi.AllocationConfigSourceClaim,
+						Requests: []string{"mps-gpu"},
+						DeviceConfiguration: resourceapi.DeviceConfiguration{
+							Opaque: &resourceapi.OpaqueDeviceConfiguration{
+								Driver: DriverName,
+								Parameters: runtime.RawExtension{Raw: []byte(
+									`{"apiVersion":"resource.nvidia.com/v1beta1","kind":"GpuConfig","sharing":{"strategy":"MPS"}}`,
+								)},
+							},
+						},
+					}},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, state.unpreparePartiallyPreparedClaim(context.Background(), claimUID, pc, nil))
+
+	_, err = clientset.AppsV1().Deployments(daemon.namespace).Get(context.Background(), daemon.name, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err), "MPS control daemon deployment should be deleted, got err=%v", err)
+	require.NoDirExists(t, daemon.rootDir)
+	require.Len(t, smi.invocations(t), 1)
+	require.Contains(t, smi.invocations(t)[0], "-i GPU-0000 -c DEFAULT")
 }
