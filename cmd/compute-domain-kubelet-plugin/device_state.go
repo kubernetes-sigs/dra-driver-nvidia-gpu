@@ -886,15 +886,6 @@ func (s *DeviceState) applyComputeDomainDaemonConfig(ctx context.Context, config
 		return nil, permanentError{fmt.Errorf("error creating ComputeDomain daemon settings: %w", err)}
 	}
 
-	// Prepare injecting IMEX daemon config files even if IMEX is not supported.
-	// This for example creates
-	// '/var/lib/kubelet/plugins/compute-domain.nvidia.com/domains/<uid>' on the
-	// host which is used as mount source mapped to /imexd in the CD daemon
-	// container.
-	if err := computeDomainDaemonSettings.Prepare(ctx); err != nil {
-		return nil, fmt.Errorf("error preparing ComputeDomain daemon settings for requests '%v' in claim '%v': %w", requests, claim.UID, err)
-	}
-
 	// Always inject CD config details into the CD daemon (regardless of clique
 	// ID being empty or not).
 	edits, err := computeDomainDaemonSettings.GetCDIContainerEditsCommon(ctx)
@@ -919,6 +910,12 @@ func (s *DeviceState) applyComputeDomainDaemonConfig(ctx context.Context, config
 		}
 		edits := computeDomainDaemonSettings.GetCDIContainerEditsForImex(ctx, s.cdi.devRoot, nvcapDeviceInfo)
 		configState.containerEdits = configState.containerEdits.Append(edits)
+	}
+
+	// Write the config files last so that a failure above leaves none behind.
+	// They are needed even without IMEX: the directory is mounted at /imexd.
+	if err := computeDomainDaemonSettings.Prepare(ctx); err != nil {
+		return nil, fmt.Errorf("error preparing ComputeDomain daemon settings for requests '%v' in claim '%v': %w", requests, claim.UID, err)
 	}
 
 	return &configState, nil
