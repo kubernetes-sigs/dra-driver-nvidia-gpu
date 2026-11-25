@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Namespace }}
+{{- if .AdminAccess }}
+  labels:
+    resource.kubernetes.io/admin-access: "true"
+{{- end }}
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+spec:
+  spec:
+    devices:
+      requests:
+{{- range $i, $uuid := .UUIDs }}
+      - name: gpu{{ $i }}
+        exactly:
+          deviceClassName: gpu.nvidia.com
+{{- if $.AdminAccess }}
+          adminAccess: true
+{{- end }}
+          selectors:
+          - cel:
+              expression: device.attributes["gpu.nvidia.com"].uuid == "{{ $uuid }}"
+{{- end }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+  labels:
+    app: fm-test
+spec:
+  containers:
+  - name: ctr
+    image: {{ .Image }}
+    command: ["bash", "-c"]
+    args: ["sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: gpus
+  resourceClaims:
+  - name: gpus
+    resourceClaimTemplateName: {{ .Name }}
+  tolerations:
+  - key: "nvidia.com/gpu"
+    operator: "Exists"
+    effect: "NoSchedule"

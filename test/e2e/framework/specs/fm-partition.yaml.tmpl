@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Namespace }}
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpus
+        exactly:
+          deviceClassName: {{ .DeviceClass }}
+          allocationMode: ExactCount
+          count: {{ .Size }}
+{{- if ge .PartitionID 0 }}
+          selectors:
+          - cel:
+              expression: device.attributes["gpu.nvidia.com"].partition{{ .Size }} == {{ .PartitionID }}
+{{- end }}
+      constraints:
+      - requests:
+        - gpus
+        matchAttribute: gpu.nvidia.com/partition{{ .Size }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+  labels:
+    app: fm-test
+spec:
+{{- if .Node }}
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchFields:
+          - key: metadata.name
+            operator: In
+            values: ["{{ .Node }}"]
+{{- end }}
+  containers:
+  - name: ctr
+    image: {{ .Image }}
+    command: ["bash", "-c"]
+    args: ["sleep 9999 & wait"]
+    resources:
+      claims:
+      - name: gpus
+  resourceClaims:
+  - name: gpus
+    resourceClaimTemplateName: {{ .Name }}
+  tolerations:
+  - key: "nvidia.com/gpu"
+    operator: "Exists"
+    effect: "NoSchedule"
