@@ -92,8 +92,7 @@ func TestNewMigSpecTupleFromCanonicalName(t *testing.T) {
 	}
 
 	// The three numeric dimensions survive a round trip; the profile name is
-	// deliberately not part of the parsed tuple (device_state.go relies on this
-	// to classify device names).
+	// deliberately not part of the parsed tuple.
 	t.Run("round trip recovers numeric dimensions", func(t *testing.T) {
 		in := MigSpecTuple{ParentMinor: 7, ProfileID: 21, PlacementStart: 4}
 		got, err := NewMigSpecTupleFromCanonicalName(in.ToCanonicalName("3g.20gb"))
