@@ -49,6 +49,8 @@ type fakeCheckpointManager struct {
 	list       []string
 	// creates counts writes; an entry written and then deleted leaves no trace.
 	creates int
+	// getDelay is how long each GetCheckpoint call takes.
+	getDelay time.Duration
 }
 
 func (m *fakeCheckpointManager) CreateCheckpoint(_ string, checkpoint checkpointmanager.Checkpoint) error {
@@ -61,6 +63,7 @@ func (m *fakeCheckpointManager) CreateCheckpoint(_ string, checkpoint checkpoint
 }
 
 func (m *fakeCheckpointManager) GetCheckpoint(_ string, checkpoint checkpointmanager.Checkpoint) error {
+	time.Sleep(m.getDelay)
 	cp, ok := checkpoint.(*Checkpoint)
 	if !ok {
 		return nil

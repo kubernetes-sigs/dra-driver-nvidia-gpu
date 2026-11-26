@@ -33,7 +33,7 @@ import (
 
 const (
 	ResourceClaimCleanupInterval = 10 * time.Minute
-	PrepareAbortedClaimEntryTTL  = 2 * ErrorRetryMaxTimeout
+	PrepareAbortedClaimEntryTTL  = 2 * RetryMaxTimeout
 )
 
 type TypeUnprepCallable = func(ctx context.Context, claimRef kubeletplugin.NamespacedObject) (bool, error)

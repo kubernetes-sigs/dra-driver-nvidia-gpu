@@ -114,12 +114,12 @@ func computeDomainPublishedSlices(allocatable AllocatableDevices, config *Config
 }
 
 const (
-	// ErrorRetryMaxTimeout limits the amount of time spent in the request
+	// RetryMaxTimeout limits the amount of time spent in the request
 	// handlers UnprepareResourceClaims() and PrepareResourceClaims(), so that
-	// we send a response to the kubelet in a predictable amount of time. Within
+	// we send a response to the kubelet before its 45s timeout. Within
 	// that deadline, retryable errors are retried (with backoff) via the
 	// workqueue abstraction.
-	ErrorRetryMaxTimeout = 45 * time.Second
+	RetryMaxTimeout = 40 * time.Second
 	// DriverPrepUprepFlockPath is the path to a lock file used to make sure
 	// that calls to nodePrepareResource() / nodeUnprepareResource() never
 	// interleave, node-globally.
@@ -127,7 +127,7 @@ const (
 )
 
 // permanentError defines an error indicating that it is permanent.
-// By default, every error will be retried up to ErrorRetryMaxTimeout.
+// By default, every error will be retried up to RetryMaxTimeout.
 // Errors marked as permanent will not be retried.
 type permanentError struct{ error }
 
@@ -239,7 +239,7 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 		return results, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, ErrorRetryMaxTimeout)
+	ctx, cancel := context.WithTimeout(ctx, RetryMaxTimeout)
 	defer cancel()
 	workQueue := workqueue.New(workqueue.DefaultPrepUnprepRateLimiter())
 
@@ -249,8 +249,12 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 		key := fmt.Sprintf("%v", claim.UID)
 		workQueue.EnqueueRawWithKey(claim, key, func(ctx context.Context, obj any) error {
 			done, res := d.nodePrepareResource(ctx, claim)
-			if done {
+			// Keep the earlier error: after the retries stop, a retryable
+			// one often only reports the deadline.
+			if _, ok := results[claim.UID]; !ok || done || ctx.Err() == nil {
 				results[claim.UID] = res
+			}
+			if done {
 				pending--
 				if pending == 0 {
 					cancel()
@@ -262,6 +266,11 @@ func (d *driver) PrepareResourceClaims(ctx context.Context, claims []*resourceap
 	}
 
 	workQueue.Run(ctx)
+	for _, claim := range claims {
+		if _, ok := results[claim.UID]; !ok {
+			results[claim.UID] = kubeletplugin.PrepareResult{Err: fmt.Errorf("not attempted before the retries stopped: %w", ctx.Err())}
+		}
+	}
 	return results, nil
 }
 
@@ -274,7 +283,7 @@ func (d *driver) UnprepareResourceClaims(ctx context.Context, claimRefs []kubele
 		return results, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, ErrorRetryMaxTimeout)
+	ctx, cancel := context.WithTimeout(ctx, RetryMaxTimeout)
 	defer cancel()
 
 	// Review: do we want to have a new queue per incoming Prepare/Unprepare
@@ -287,8 +296,12 @@ func (d *driver) UnprepareResourceClaims(ctx context.Context, claimRefs []kubele
 		key := fmt.Sprintf("%v", claim.UID)
 		workQueue.EnqueueRawWithKey(claim, key, func(ctx context.Context, obj any) error {
 			done, err := d.nodeUnprepareResource(ctx, claim)
-			if done {
+			// Keep the earlier error: after the retries stop, a retryable
+			// one often only reports the deadline.
+			if _, ok := results[claim.UID]; !ok || done || ctx.Err() == nil {
 				results[claim.UID] = err
+			}
+			if done {
 				pending--
 				if pending == 0 {
 					cancel()
@@ -303,6 +316,11 @@ func (d *driver) UnprepareResourceClaims(ctx context.Context, claimRefs []kubele
 	}
 
 	workQueue.Run(ctx)
+	for _, claim := range claimRefs {
+		if _, ok := results[claim.UID]; !ok {
+			results[claim.UID] = fmt.Errorf("not attempted before the retries stopped: %w", ctx.Err())
+		}
+	}
 
 	return results, nil
 }
