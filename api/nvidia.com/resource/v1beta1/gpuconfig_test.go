@@ -78,6 +78,19 @@ func TestGpuConfigNormalizeTimeSlicing(t *testing.T) {
 	}
 }
 
+func TestGpuConfigDeepCopyClocks(t *testing.T) {
+	config := &configapi.GpuConfig{
+		Clocks: &configapi.GpuClocks{SMLockedMHz: ptr(int32(1200))},
+	}
+
+	copy := config.DeepCopy()
+	require.NotSame(t, config.Clocks, copy.Clocks)
+	require.NotSame(t, config.Clocks.SMLockedMHz, copy.Clocks.SMLockedMHz)
+
+	*copy.Clocks.SMLockedMHz = 1500
+	require.Equal(t, int32(1200), *config.Clocks.SMLockedMHz)
+}
+
 func TestTimeSlicingConfigValidate(t *testing.T) {
 	testCases := []struct {
 		description string

@@ -20,15 +20,21 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
+	"fmt"
+
 	"sigs.k8s.io/dra-driver-nvidia-gpu/pkg/featuregates"
 )
 
-// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+type GpuClocks struct {
+	SMLockedMHz *int32 `json:"smLockedMHz,omitempty"`
+}
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // GpuConfig holds the set of parameters for configuring a GPU.
 type GpuConfig struct {
 	metav1.TypeMeta `json:",inline"`
 	Sharing         *GpuSharing `json:"sharing,omitempty"`
+	Clocks          *GpuClocks  `json:"clocks,omitempty"`
 }
 
 // DefaultGpuConfig provides the default GPU configuration.
@@ -67,8 +73,28 @@ func (c *GpuConfig) Normalize() error {
 	return nil
 }
 
+const (
+	minClock int32 = 0
+	maxClock int32 = 5000
+)
+
+// Validate ensures that GpuClocks has a valid set of values.
+func (s *GpuClocks) Validate() error {
+	if s == nil || s.SMLockedMHz == nil {
+		return nil
+	}
+	val := *s.SMLockedMHz
+	if val > maxClock || val < minClock {
+		return fmt.Errorf("invalid requested clock speed %d MHz: must be between 0 and 5000 MHz", val)
+	}
+	return nil
+}
+
 // Validate ensures that GpuConfig has a valid set of values.
 func (c *GpuConfig) Validate() error {
+	if err := c.Clocks.Validate(); err != nil {
+		return err
+	}
 	if c.Sharing == nil {
 		return nil
 	}
