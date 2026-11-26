@@ -695,6 +695,13 @@ func (s *DeviceState) unpreparePartiallyPreparedClaim(ctx context.Context, cuid 
 		}
 	}
 
+	// Stop any MPS control daemon started by the incomplete Prepare().
+	if featuregates.Enabled(featuregates.MPSSupport) {
+		if err := s.stopMpsControlDaemonsForPartiallyPreparedClaim(ctx, cuid, pc); err != nil {
+			return fmt.Errorf("failed to stop MPS control daemon of partially prepared claim: %w", err)
+		}
+	}
+
 	// If FM partitioning is enabled, then deactivate the partition
 	// for the devices in the claim. At this point, the gpuInfo objects
 	// for all devices in the claim are expected to have been discovered.
@@ -733,6 +740,53 @@ func (s *DeviceState) getAllocatableDevicesForClaim(claimUID string, pc Prepared
 		allocDevsForClaim[r.Device] = device
 	}
 	return allocDevsForClaim
+}
+
+// stopMpsControlDaemonsForPartiallyPreparedClaim stops the MPS control daemons
+// that an incomplete Prepare() may have started for the claim.
+//
+// The daemon ID is checkpointed only once prepare completes, so it is derived
+// here the same way applySharingConfig() derives it: from the claim's MPS
+// configs and the devices each of them applies to. Stop() is a noop for a
+// daemon that was never started.
+func (s *DeviceState) stopMpsControlDaemonsForPartiallyPreparedClaim(ctx context.Context, cuid string, pc PreparedClaim) error {
+	configResultsMap, err := s.getConfigResultsMap(pc.Status.Allocation)
+	if err != nil {
+		// Prepare() maps configs to results the same way before it starts a
+		// daemon, so most likely no daemon was started. Do not fail here, or
+		// the unprepare would be retried forever.
+		klog.V(4).Infof("Partial unprepare: skipping MPS teardown for claim %s: %v", PreparedClaimToString(&pc, cuid), err)
+		return nil
+	}
+
+	for c, results := range configResultsMap {
+		var sharing configapi.Sharing
+		switch castConfig := c.(type) {
+		case *configapi.GpuConfig:
+			sharing = castConfig.Sharing
+		case *configapi.MigDeviceConfig:
+			sharing = castConfig.Sharing
+		default:
+			continue
+		}
+		if !sharing.IsMps() {
+			continue
+		}
+
+		devices := make(AllocatableDevices)
+		for _, r := range results {
+			if device := s.perGPUAllocatable.GetAllocatableDevice(r.Device); device != nil {
+				devices[r.Device] = device
+			}
+		}
+
+		klog.V(2).Infof("unprepare: MPS rollback for partially prepared claim %s (devices: %d)", PreparedClaimToString(&pc, cuid), len(devices))
+		if err := s.mpsManager.NewMpsControlDaemon(cuid, devices).Stop(ctx); err != nil {
+			return fmt.Errorf("error stopping MPS control daemon: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // Revert previous and potentially partial MIG device creation (not acknowledged
