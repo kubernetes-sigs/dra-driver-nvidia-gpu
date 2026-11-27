@@ -614,6 +614,30 @@ requests a Hopper GPU with more than 80 GiB of memory:
 For the full list of attributes and capacity values you can use in selectors,
 refer to [ResourceSlice device attributes](../../reference/resourceslice-attributes.md).
 
+## Use GDRCopy and GPUDirect Storage
+
+On nodes that have the GDRCopy or GPUDirect Storage (GDS) device nodes, the driver adds their devices to every container that uses a GPU or MIG claim.
+You don't need to configure the claim, the DeviceClass, or the driver.
+
+- GDRCopy: the container gets `/dev/gdrdrv`.
+- GDS: the container gets the `/dev/nvidia-fs*` device nodes.
+
+The driver looks for these device nodes in the same place it finds the NVIDIA GPU device nodes.
+For GDS, the driver also mounts `/run/udev` and `/etc/cufile.json` read-only, each only if it exists under the NVIDIA driver root (`nvidiaDriverRoot`).
+If they don't exist under the driver root, for example with a driver that the GPU Operator installs, the driver doesn't mount them.
+If the driver doesn't mount `/etc/cufile.json`, the container uses the copy in its image, if any.
+
+When the driver mounts the node's `/etc/cufile.json`, that file replaces any file that the pod or the image puts at the same path.
+To use your own cuFile configuration, put it at a different path and set the `CUFILE_ENV_PATH_JSON` environment variable in the container to that path.
+For details, refer to the [GPUDirect Storage troubleshooting guide](https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/basic-troubleshooting.html).
+
+The driver checks for these device nodes each time it prepares a claim.
+A claim that was prepared before the device nodes existed doesn't get them.
+To get the devices, delete every pod that uses the claim, wait until the pods are gone, and then create them again.
+
+The driver doesn't add InfiniBand devices such as `/dev/infiniband/uverbs*`.
+To pair a NIC with a GPU, allocate the NIC through a NIC DRA driver and match the `resource.kubernetes.io/pcieRoot` attribute described in [ResourceSlice device attributes](../../reference/resourceslice-attributes.md).
+
 ## Clean up
 
 Delete the pods and resources created in this guide:

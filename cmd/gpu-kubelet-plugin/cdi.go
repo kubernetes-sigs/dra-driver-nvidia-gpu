@@ -57,6 +57,8 @@ type CDIHandler struct {
 	nvdevice          nvdevice.Interface
 	nvcdiClaim        nvcdi.Interface
 	vfiocdi           *vfioCDIHandler
+	gdrcopycdi        *gpuDirectCDIHandler
+	gdscdi            *gpuDirectCDIHandler
 	driverRoot        string
 	devRoot           string
 	targetDriverRoot  string
@@ -104,6 +106,21 @@ func NewCDIHandler(opts ...cdiOption) (*CDIHandler, error) {
 			return nil, fmt.Errorf("unable to create CDI library for claims: %w", err)
 		}
 		h.nvcdiClaim = nvcdilib
+	}
+
+	if h.gdrcopycdi == nil {
+		gdrcopycdi, err := NewGPUDirectCDIHandler(nvcdi.ModeGdrcopy, h.nvdevice, h.nvml, h.driverRoot, h.devRoot, h.nvidiaCDIHookPath, h.logger)
+		if err != nil {
+			return nil, err
+		}
+		h.gdrcopycdi = gdrcopycdi
+	}
+	if h.gdscdi == nil {
+		gdscdi, err := NewGPUDirectCDIHandler(nvcdi.ModeGds, h.nvdevice, h.nvml, h.driverRoot, h.devRoot, h.nvidiaCDIHookPath, h.logger)
+		if err != nil {
+			return nil, err
+		}
+		h.gdscdi = gdscdi
 	}
 
 	// The expiration time is defined upon key insert, not cache-globally.
@@ -284,6 +301,10 @@ func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, preparedDevices Prep
 		commonEdits, err = cdi.GetCommonEditsCached()
 		if err != nil {
 			return fmt.Errorf("failed to get common CDI spec edits: %w", err)
+		}
+		commonEdits, err = cdi.appendGPUDirectEdits(commonEdits)
+		if err != nil {
+			return err
 		}
 	}
 

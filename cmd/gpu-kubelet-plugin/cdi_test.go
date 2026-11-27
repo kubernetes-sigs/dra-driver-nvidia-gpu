@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi"
 	nvcdspec "github.com/NVIDIA/nvidia-container-toolkit/pkg/nvcdi/spec"
 	resourceapi "k8s.io/api/resource/v1"
 	utilcache "k8s.io/apimachinery/pkg/util/cache"
@@ -304,6 +305,8 @@ func TestCreateClaimSpecFileRejectsMismatchedGPUDeviceMinor(t *testing.T) {
 	}
 	handler := &CDIHandler{
 		nvcdiClaim: fake,
+		gdrcopycdi: gpuDirectHandler(nvcdi.ModeGdrcopy, cdispec.ContainerEdits{}, nil),
+		gdscdi:     gpuDirectHandler(nvcdi.ModeGds, cdispec.ContainerEdits{}, nil),
 		specCache:  utilcache.NewExpiring(),
 		cdiRoot:    t.TempDir(),
 	}
@@ -335,6 +338,8 @@ func TestCreateClaimSpecFileMergesClaimContainerEdits(t *testing.T) {
 	cdiRoot := t.TempDir()
 	handler := &CDIHandler{
 		nvcdiClaim: fake,
+		gdrcopycdi: gpuDirectHandler(nvcdi.ModeGdrcopy, cdispec.ContainerEdits{}, nil),
+		gdscdi:     gpuDirectHandler(nvcdi.ModeGds, cdispec.ContainerEdits{}, nil),
 		specCache:  utilcache.NewExpiring(),
 		cdiRoot:    cdiRoot,
 	}
