@@ -19,7 +19,33 @@ setup() {
   _common_setup
   MOCK_NVML_CDI_TEST_ACTIVE=false
   MOCK_NVML_UVM_TOOLS_REMOVED=false
+  MOCK_NVML_GDRDRV_CREATED=false
+  MOCK_NVML_GDS_CREATED=false
   log_objects
+}
+
+remove_mock_nvml_gds_files() {
+  local plugin_pod
+  plugin_pod=$(get_one_kubelet_plugin_pod_name)
+  if [ -z "${plugin_pod}" ]; then
+    return 1
+  fi
+
+  kubectl exec -n dra-driver-nvidia-gpu "${plugin_pod}" -c gpus -- \
+    rm -rf /driver-root/dev/nvidia-fs0 /driver-root/etc/cufile.json /driver-root/run/udev
+  MOCK_NVML_GDS_CREATED=false
+}
+
+remove_mock_nvml_gdrdrv_node() {
+  local plugin_pod
+  plugin_pod=$(get_one_kubelet_plugin_pod_name)
+  if [ -z "${plugin_pod}" ]; then
+    return 1
+  fi
+
+  kubectl exec -n dra-driver-nvidia-gpu "${plugin_pod}" -c gpus -- \
+    rm -f /driver-root/dev/gdrdrv
+  MOCK_NVML_GDRDRV_CREATED=false
 }
 
 restore_mock_nvml_uvm_tools_node() {
@@ -40,6 +66,12 @@ teardown() {
   fi
   if [ "${MOCK_NVML_UVM_TOOLS_REMOVED:-}" = "true" ]; then
     restore_mock_nvml_uvm_tools_node || true
+  fi
+  if [ "${MOCK_NVML_GDRDRV_CREATED:-}" = "true" ]; then
+    remove_mock_nvml_gdrdrv_node || true
+  fi
+  if [ "${MOCK_NVML_GDS_CREATED:-}" = "true" ]; then
+    remove_mock_nvml_gds_files || true
   fi
 }
 
@@ -392,4 +424,81 @@ SPEC
   kubectl delete -f "${_specpath}"
   kubectl wait --for=delete pod/"${_podname}" --timeout=30s
   MOCK_NVML_CDI_TEST_ACTIVE=false
+}
+
+# --- 11. GDRCopy device node ---
+
+# bats test_tags=fastfeedback,gpu-robustness,mock-nvml
+@test "MockNVML: /dev/gdrdrv is injected into GPU claims only while it exists" {
+  if [ "${MOCK_NVML:-}" != "true" ]; then
+    skip "mock NVML only"
+  fi
+
+  local _specpath="tests/bats/specs/gpu-simple-full.yaml"
+  local _podname="pod-full-gpu"
+  local plugin_pod
+  plugin_pod=$(get_one_kubelet_plugin_pod_name)
+  [ -n "${plugin_pod}" ]
+
+  # 510 is the mock nvidia-uvm major; the workload only stats the node.
+  MOCK_NVML_GDRDRV_CREATED=true
+  kubectl exec -n dra-driver-nvidia-gpu "${plugin_pod}" -c gpus -- \
+    sh -c 'rm -f /driver-root/dev/gdrdrv && mknod -m 666 /driver-root/dev/gdrdrv c 510 2'
+
+  MOCK_NVML_CDI_TEST_ACTIVE=true
+  kubectl apply -f "${_specpath}"
+  kubectl wait --for=condition=READY pods "${_podname}" --timeout=60s
+  kubectl exec "${_podname}" -- test -c /dev/gdrdrv
+  kubectl delete -f "${_specpath}"
+  kubectl wait --for=delete pods "${_podname}" --timeout=30s
+
+  remove_mock_nvml_gdrdrv_node
+  kubectl apply -f "${_specpath}"
+  kubectl wait --for=condition=READY pods "${_podname}" --timeout=60s
+  run kubectl exec "${_podname}" -- sh -c 'test -e /dev/gdrdrv && echo present || echo absent'
+  assert_output "absent"
+
+  kubectl delete -f "${_specpath}"
+  kubectl wait --for=delete pods "${_podname}" --timeout=30s
+  MOCK_NVML_CDI_TEST_ACTIVE=false
+}
+
+# --- 12. GDS device nodes and mounts ---
+
+# bats test_tags=fastfeedback,gpu-robustness,mock-nvml
+@test "MockNVML: GDS device nodes and mounts are injected into GPU claims" {
+  if [ "${MOCK_NVML:-}" != "true" ]; then
+    skip "mock NVML only"
+  fi
+
+  local _specpath="tests/bats/specs/gpu-simple-full.yaml"
+  local _podname="pod-full-gpu"
+  local plugin_pod
+  plugin_pod=$(get_one_kubelet_plugin_pod_name)
+  [ -n "${plugin_pod}" ]
+
+  MOCK_NVML_GDS_CREATED=true
+  kubectl exec -n dra-driver-nvidia-gpu "${plugin_pod}" -c gpus -- \
+    sh -c 'rm -rf /driver-root/dev/nvidia-fs0 /driver-root/etc/cufile.json /driver-root/run/udev &&
+      mknod -m 666 /driver-root/dev/nvidia-fs0 c 510 3 &&
+      mkdir -p /driver-root/etc /driver-root/run/udev &&
+      echo "{\"marker\":\"host\"}" > /driver-root/etc/cufile.json &&
+      echo host-udev > /driver-root/run/udev/marker'
+
+  MOCK_NVML_CDI_TEST_ACTIVE=true
+  kubectl apply -f "${_specpath}"
+  kubectl wait --for=condition=READY pods "${_podname}" --timeout=60s
+
+  kubectl exec "${_podname}" -- test -c /dev/nvidia-fs0
+  run kubectl exec "${_podname}" -- cat /etc/cufile.json
+  assert_output '{"marker":"host"}'
+  run kubectl exec "${_podname}" -- cat /run/udev/marker
+  assert_output "host-udev"
+  run kubectl exec "${_podname}" -- sh -c 'touch /run/udev/probe 2>/dev/null && echo writable || echo read-only'
+  assert_output "read-only"
+
+  kubectl delete -f "${_specpath}"
+  kubectl wait --for=delete pods "${_podname}" --timeout=30s
+  MOCK_NVML_CDI_TEST_ACTIVE=false
+  remove_mock_nvml_gds_files
 }
